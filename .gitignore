@@ -1,0 +1,29 @@
+# Claude Code local state: per-machine permission allowlist and session
+# checkpoints. Not project configuration -- nothing here is reproducible or
+# meaningful on another machine.
+.claude/
+target/
+
+# Local editor and agent state
+.codex/
+.opencode/
+.idea/
+.vscode/
+
+# macOS metadata
+.DS_Store
+._*
+
+# Local credentials and diagnostics
+.env
+.env.*
+!.env.example
+server.env
+*.pem
+*.key
+*.log
+*.log.*
+
+# Python helper caches
+__pycache__/
+*.py[cod]

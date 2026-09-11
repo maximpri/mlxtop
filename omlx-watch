@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+
+"""Digest oMLX server activity into the signals that actually predict trouble.
+
+Every check here exists because it caught a real failure on this host:
+
+  hit-ceiling  a completion ending exactly on max_tokens. AMBIGUOUS: either
+               degeneration, or real work that needs more room. Distinguish by
+               reading the output, never from the log alone -- a task here
+               truncated at 12288, then completed naturally at 16718 tokens
+               once the ceiling was raised.
+  pressure     the enforcer throttles decode above the soft watermark, and the
+               throttle is not graceful (measured 2.0 tok/s against 30.7 clean).
+  throttle     prefill chunk collapse (2048 -> 64) turns a 3-minute prefill
+               into 17 minutes.
+  refusal      the prefill guard rejecting a prompt outright.
+  cache        prefix-cache reuse. 0% means every turn re-prefills from
+               scratch, which dominates cost in an agent loop.
+  mtp          speculative-decode acceptance; a collapse here halves throughput.
+"""
+import argparse, json, os, re, subprocess, sys
+from datetime import datetime, timedelta
+
+LOG = os.path.expanduser("~/.omlx-coding/logs/server.log")
+TS = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+
+PATTERNS = {
+    "completion": re.compile(
+        r"Chat completion: model=(?P<model>[^,]+), (?P<out>\d+) tokens in (?P<secs>[\d.]+)s "
+        r"\((?P<tps>[\d.]+) tok/s\), prompt: (?P<prompt>\d+), finish_reason=(?P<finish>\w+), "
+        r"max_tokens=(?P<maxtok>\d+)"),
+    "pressure": re.compile(
+        r"Memory pressure level: (?P<from>\w+) -> (?P<to>\w+) \(current=(?P<cur>[\d.]+)GB, "
+        r"soft=(?P<soft>[\d.]+)GB, hard=(?P<hard>[\d.]+)GB"),
+    "throttle": re.compile(r"Prefill throttled for \S+: chunk (?P<from>\d+) -> (?P<to>\d+)"),
+    "overmax":  re.compile(r"Chunked prefill above max_bytes at (?P<tok>\d+) tokens: (?P<usage>[\d.]+)GB"),
+    "refusal":  re.compile(r"context too large at progress=(?P<prog>\d+) kv_len=(?P<kv>\d+)"),
+    "mtp":      re.compile(r"tok/cycle=(?P<tpc>[\d.]+) accept=\d+/\d+ \((?P<acc>[\d.]+)%\)"),
+    "hotshrink":re.compile(r"Shrank shared hot cache under memory pressure: freed=(?P<freed>[\d.]+)GB"),
+    "ssdsat":   re.compile(r"SSD write queue saturated"),
+    "loaded":   re.compile(r"Loaded model: (?P<model>\S+) \(actual: (?P<gb>[\d.]+)GB"),
+}
+
+def parse(since_min):
+    cutoff = datetime.now() - timedelta(minutes=since_min)
+    ev = {k: [] for k in PATTERNS}
+    try:
+        fh = open(LOG, errors="ignore")
+    except OSError as e:
+        print("cannot read log:", e); sys.exit(1)
+    with fh:
+        for line in fh:
+            m = TS.match(line)
+            if not m:
+                continue
+            try:
+                t = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            if t < cutoff:
+                continue
+            for name, pat in PATTERNS.items():
+                hit = pat.search(line)
+                if hit:
+                    d = hit.groupdict()
+                    d["t"] = t.strftime("%H:%M:%S")
+                    ev[name].append(d)
+    return ev
+
+def live():
+    out = {}
+    try:
+        pid = subprocess.run(["pgrep", "-x", "omlx-server"], capture_output=True,
+                             text=True).stdout.strip().split("\n")[0]
+        fp = subprocess.run(["/usr/bin/footprint", "-p", pid], capture_output=True, text=True).stdout
+        mm = re.search(r"phys_footprint:\s+(\d+)\s+(\w+)", fp)
+        if mm:
+            v = float(mm.group(1))
+            out["phys_gb"] = v / 1024 if mm.group(2) == "MB" else v
+        sw = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True).stdout
+        sm = re.search(r"used = ([\d.]+)M", sw)
+        if sm:
+            out["swap_mb"] = float(sm.group(1))
+    except Exception:
+        pass
+    return out
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--since", type=int, default=60, help="minutes of history")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    ev = parse(a.since)
+    lv = live()
+
+    comps = ev["completion"]
+    # A runaway fills a LARGE budget. Hitting a small cap (a probe with
+    # max_tokens=16, or a client deliberately asking for a short reply) is
+    # the ceiling doing its job, not degeneration -- flagging those made the
+    # detector cry wolf on my own measurement traffic.
+    RUNAWAY_MIN_BUDGET = 512
+    runaways = [c for c in comps
+                if c["finish"] == "length"
+                and int(c["out"]) >= int(c["maxtok"])
+                and int(c["maxtok"]) >= RUNAWAY_MIN_BUDGET]
+    slow = [c for c in comps if float(c["tps"]) < 10 and int(c["out"]) > 20]
+    hard = [p for p in ev["pressure"] if p["to"] == "hard"]
+    soft = [p for p in ev["pressure"] if p["to"] == "soft"]
+    deep = [t for t in ev["throttle"] if int(t["to"]) <= 256]
+
+    findings = []
+    if runaways:
+        findings.append(("HIT-CEILING",
+                         "%d completion(s) ended exactly on max_tokens. READ THE OUTPUT before "
+                         "concluding: coherent text cut mid-sentence means the ceiling is too "
+                         "low; repeated text means degeneration. Assuming the latter here cost "
+                         "three wrong changes." % len(runaways)))
+    if hard:
+        findings.append(("HARD-PRESSURE", "%d transition(s) to hard pressure -- decode throttles hard here" % len(hard)))
+    if slow:
+        findings.append(("SLOW-DECODE", "%d completion(s) under 10 tok/s -- usually memory pressure" % len(slow)))
+    if ev["refusal"]:
+        findings.append(("PREFILL-REFUSED", "%d prompt(s) rejected by the memory guard" % len(ev["refusal"])))
+    if deep:
+        findings.append(("DEEP-THROTTLE", "prefill chunk fell to <=256 tokens %d time(s)" % len(deep)))
+    if ev["hotshrink"]:
+        findings.append(("HOT-CACHE-SHRUNK", "enforcer reclaimed the hot cache %d time(s)" % len(ev["hotshrink"])))
+    if ev["ssdsat"]:
+        findings.append(("SSD-SATURATED", "%d inline evictions -- SSD cache at capacity" % len(ev["ssdsat"])))
+
+    if a.json:
+        print(json.dumps({"findings": findings, "completions": comps, "live": lv,
+                          "pressure": ev["pressure"], "refusals": ev["refusal"]}, indent=2))
+        return
+
+    print("=== oMLX watch: last %d min ===" % a.since)
+    if lv:
+        print("  live: phys %.0f GB   swap %.0f MB" % (lv.get("phys_gb", 0), lv.get("swap_mb", 0)))
+    print()
+    print("  FINDINGS:" if findings else "  FINDINGS: none")
+    for tag, msg in findings:
+        print("    [%s] %s" % (tag, msg))
+    print()
+    print("  completions: %d" % len(comps))
+    for c in comps[-12:]:
+        flag = "  <== hit ceiling" if c in runaways else ("  <== slow" if c in slow else "")
+        print("    %s out=%-6s/%-6s prompt=%-7s %-9s %5s tok/s%s" %
+              (c["t"], c["out"], c["maxtok"], c["prompt"], c["finish"], c["tps"], flag))
+    if ev["mtp"]:
+        acc = [float(m["acc"]) for m in ev["mtp"]]
+        tpc = [float(m["tpc"]) for m in ev["mtp"]]
+        print("\n  MTP: acceptance %.1f%% avg (min %.1f)   %.2f tok/cycle avg" %
+              (sum(acc)/len(acc), min(acc), sum(tpc)/len(tpc)))
+    if ev["overmax"]:
+        peak = max(float(o["usage"]) for o in ev["overmax"])
+        print("  prefill: %d over-watermark chunks, peak usage %.1f GB" % (len(ev["overmax"]), peak))
+    if ev["pressure"]:
+        print("  pressure transitions: %d (soft %d, hard %d)" % (len(ev["pressure"]), len(soft), len(hard)))
+    if ev["loaded"]:
+        l = ev["loaded"][-1]
+        print("  last load: %s (%s GB) at %s" % (l["model"], l["gb"], l["t"]))
+
+if __name__ == "__main__":
+    main()

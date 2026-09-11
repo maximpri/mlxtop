@@ -1,0 +1,29 @@
+[package]
+name = "mlxtop"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Full-screen macOS memory and local-LLM performance monitor"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/maximpri/mlxtop"
+keywords = ["llm", "monitoring", "macos", "ratatui", "tui"]
+categories = ["command-line-utilities"]
+include = [
+  "/src/**",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/docs/**",
+  "/LICENSE",
+  "/CONTRIBUTING.md",
+  "/SECURITY.md",
+  "/OPEN_SOURCE_ROADMAP.md",
+  "/THIRD_PARTY_NOTICES.md",
+  "/mlxtop.sh",
+]
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.29"
+serde_json = "1"
