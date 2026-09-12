@@ -23,6 +23,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crossterm::{
@@ -95,6 +96,54 @@ const LLM_PROCESS_MARKERS: &[&str] = &[
     "koboldcpp",
     "localai",
 ];
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+struct Config {
+    interval: Option<u64>,
+    history: Option<usize>,
+    omx: Option<OmxConfig>,
+    memory_warn_load: Option<u64>,
+    memory_critical_load: Option<u64>,
+    gpu_warn_load: Option<u64>,
+    gpu_critical_load: Option<u64>,
+    swap_warn_rate: Option<u64>,
+    swap_critical_rate: Option<u64>,
+    compression_warn_rate: Option<u64>,
+    swap_warn_exit: Option<u64>,
+    compression_warn_exit: Option<u64>,
+    gpu_warn_exit: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+struct OmxConfig {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+fn load_config() -> Config {
+    let config_path = config_path();
+    match fs::read_to_string(&config_path) {
+        Ok(text) => match serde_json::from_str::<Config>(&text) {
+            Ok(config) => {
+                diagnostics_log("INFO", "config_loaded", format!("path={}", config_path.display()));
+                config
+            }
+            Err(e) => {
+                diagnostics_log("WARN", "config_parse_error", format!("path={} error={}", config_path.display(), e));
+                Config::default()
+            }
+        },
+        Err(_) => Config::default(),
+    }
+}
+
+fn config_path() -> PathBuf {
+    if let Some(home) = env::var_os("HOME") {
+        Path::new(&home).join(".config/mlxtop/config.json")
+    } else {
+        PathBuf::from("config.json")
+    }
+}
 
 static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
 
@@ -953,6 +1002,7 @@ struct Collector {
     gpu_history: VecDeque<ChartPoint>,
     signals: VecDeque<SignalEvent>,
     history_limit: usize,
+    config: Config,
 }
 
 enum SamplerCommand {
@@ -969,7 +1019,7 @@ struct Sampler {
 }
 
 impl Sampler {
-    fn spawn(interval: Duration, history_limit: usize) -> Self {
+    fn spawn(interval: Duration, history_limit: usize, config: Config) -> Self {
         diagnostics_log(
             "INFO",
             "sampler_start",
@@ -981,7 +1031,7 @@ impl Sampler {
         let (command_tx, command_rx) = mpsc::channel();
         let (view_tx, view_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let mut collector = Collector::new(history_limit);
+            let mut collector = Collector::new(history_limit, config);
             let mut interval = interval;
             let mut paused = false;
             let mut next_sample = Instant::now();
@@ -1075,7 +1125,7 @@ impl Drop for Sampler {
 }
 
 impl Collector {
-    fn new(history_limit: usize) -> Self {
+    fn new(history_limit: usize, config: Config) -> Self {
         let total_memory = command_u64("/usr/sbin/sysctl", &["-n", "hw.memsize"]).unwrap_or(0);
         let mut metal = parse_metal_hardware(
             &command_text(
@@ -1094,7 +1144,7 @@ impl Collector {
             page_size: command_u64("/usr/sbin/sysctl", &["-n", "hw.pagesize"]).unwrap_or(16_384),
             total_memory,
             metal,
-            llm_client: LlmTelemetryClient::new(),
+            llm_client: LlmTelemetryClient::from_config(&config),
             correlation: CorrelationEngine::default(),
             previous: None,
             previous_llm_cache: None,
@@ -1107,6 +1157,7 @@ impl Collector {
             gpu_history: VecDeque::with_capacity(history_limit),
             signals: VecDeque::with_capacity(8),
             history_limit,
+            config,
         }
     }
 
@@ -1762,10 +1813,11 @@ struct App {
     sampler_disconnected: bool,
     alert: Option<ActiveAlert>,
     alert_bells: usize,
+    config: Config,
 }
 
 impl App {
-    fn new(interval: u64, history: usize) -> Self {
+    fn new(interval: u64, history: usize, config: Config) -> Self {
         let interval = Duration::from_secs(interval);
         Self {
             collector: CollectorView {
@@ -1778,7 +1830,7 @@ impl App {
                 gpu_history: VecDeque::new(),
                 signals: VecDeque::new(),
             },
-            sampler: Sampler::spawn(interval, history),
+            sampler: Sampler::spawn(interval, history, config.clone()),
             interval,
             paused: false,
             tab: 0,
@@ -1793,6 +1845,7 @@ impl App {
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            config,
         }
     }
 
@@ -5469,8 +5522,8 @@ fn process_provider(name: &str, command: &str) -> Option<String> {
 }
 
 impl LlmTelemetryClient {
-    fn new() -> Self {
-        let (host, port) = read_omlx_endpoint();
+    fn from_config(config: &Config) -> Self {
+        let (host, port) = read_omlx_endpoint(config);
         Self {
             host,
             port,
@@ -5750,9 +5803,9 @@ fn http_request(
     })
 }
 
-fn read_omlx_endpoint() -> (String, u16) {
-    let mut host = DEFAULT_OMLX_HOST.to_owned();
-    let mut port = DEFAULT_OMLX_PORT;
+fn read_omlx_endpoint(config: &Config) -> (String, u16) {
+    let mut host = config.omx.as_ref().and_then(|o| o.host.clone()).unwrap_or_else(|| DEFAULT_OMLX_HOST.to_owned());
+    let mut port = config.omx.as_ref().and_then(|o| o.port).unwrap_or(DEFAULT_OMLX_PORT);
     if let Some(home) = env::var_os("HOME") {
         let path = Path::new(&home).join(".config/omlx-coding/server.env");
         if let Ok(text) = std::fs::read_to_string(path) {
@@ -6907,8 +6960,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut interval = 1_u64;
-    let mut history = 300_usize;
+    let config = load_config();
+    let mut interval = config.interval.unwrap_or(1_u64);
+    let mut history = config.history.unwrap_or(300_usize);
     let mut once = false;
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -6935,6 +6989,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                      -1, --once         static report\n\
                      -V, --version      show version\n\
                      -h, --help         show help\n\
+                     Config file: ~/.config/mlxtop/config.json\n\
                      Diagnostics: ~/Library/Logs/mlxtop/mlxtop.log (override with MLXTOP_LOG_PATH)\n\n\
                      Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · +/- interval · ? help"
                 );
@@ -6956,13 +7011,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "INFO",
         "configuration",
         format!(
-            "interval_seconds={interval} history_limit={history} once={once} interactive={}",
-            io::stdin().is_terminal() && io::stdout().is_terminal()
+            "interval_seconds={interval} history_limit={history} once={once} interactive={} config_path={}",
+            io::stdin().is_terminal() && io::stdout().is_terminal(),
+            config_path().display()
         ),
     );
 
     if once {
-        let mut collector = Collector::new(history);
+        let mut collector = Collector::new(history, config.clone());
         collector.sample();
         thread::sleep(Duration::from_secs(interval));
         let sample = collector.sample();
@@ -6979,7 +7035,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     execute!(out, EnterAlternateScreen, crossterm::cursor::Hide)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(interval, history);
+    let mut app = App::new(interval, history, config);
     let result = run_app(&mut terminal, &mut app);
     disable_raw_mode()?;
     execute!(
@@ -7038,6 +7094,7 @@ mod tests {
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            config: Config::default(),
         };
         (app, view_sender)
     }
@@ -8245,5 +8302,39 @@ mod tests {
 
         assert_eq!(panic_payload(owned.as_ref()), "owned panic");
         assert_eq!(panic_payload(static_text.as_ref()), "static panic");
+    }
+
+    #[test]
+    fn config_defaults_when_file_missing() {
+        let config = Config::default();
+        assert_eq!(config.interval, None);
+        assert_eq!(config.history, None);
+        assert_eq!(config.omx, None);
+        assert_eq!(config.memory_warn_load, None);
+        assert_eq!(config.gpu_critical_load, None);
+    }
+
+    #[test]
+    fn config_parses_from_json() {
+        let json_str = r#"{"interval":5,"history":500,"omx":{"host":"0.0.0.0","port":9090},"memory_warn_load":80,"memory_critical_load":90,"gpu_warn_load":85,"gpu_critical_load":95,"swap_warn_rate":1048576,"swap_critical_rate":16777216}"#;
+        let config: Config = serde_json::from_str(json_str).expect("valid json should parse");
+        assert_eq!(config.interval, Some(5));
+        assert_eq!(config.history, Some(500));
+        assert_eq!(config.omx.as_ref().unwrap().host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(config.omx.as_ref().unwrap().port, Some(9090));
+        assert_eq!(config.memory_warn_load, Some(80));
+        assert_eq!(config.memory_critical_load, Some(90));
+        assert_eq!(config.gpu_warn_load, Some(85));
+        assert_eq!(config.gpu_critical_load, Some(95));
+        assert_eq!(config.swap_warn_rate, Some(1048576));
+        assert_eq!(config.swap_critical_rate, Some(16777216));
+    }
+
+    #[test]
+    fn config_omlx_defaults_when_missing() {
+        let json_str = r#"{"interval":2}"#;
+        let config: Config = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.interval, Some(2));
+        assert_eq!(config.omx, None);
     }
 }

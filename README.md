@@ -40,6 +40,42 @@ The installer checks the download’s SHA-256 checksum and places `mlxtop` in
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 
+## Configuration
+
+Create `~/.config/mlxtop/config.json` to customize mlxtop. All fields are optional.
+
+```json
+{
+  "interval": 2,
+  "history": 500,
+  "omx": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "memory_warn_load": 70,
+  "memory_critical_load": 85,
+  "gpu_warn_load": 75,
+  "gpu_critical_load": 90,
+  "swap_warn_rate": 1048576,
+  "swap_critical_rate": 16777216
+}
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `interval` | integer | 1 | Refresh interval in seconds (1–60) |
+| `history` | integer | 300 | Chart/journal history size (20–3600) |
+| `omx.host` | string | "127.0.0.1" | oMLX server host |
+| `omx.port` | integer | 8080 | oMLX server port |
+| `memory_warn_load` | integer | 70 | Memory warning threshold (%) |
+| `memory_critical_load` | integer | 85 | Memory critical threshold (%) |
+| `gpu_warn_load` | integer | 75 | GPU warning threshold (%) |
+| `gpu_critical_load` | integer | 90 | GPU critical threshold (%) |
+| `swap_warn_rate` | integer | 1 MiB/s | Swap warning rate |
+| `swap_critical_rate` | integer | 16 MiB/s | Swap critical rate |
+
+CLI arguments override config file values.
+
 ## Usage
 
 You should see live memory and GPU readings as soon as the dashboard opens.
