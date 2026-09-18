@@ -28,6 +28,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crossterm::{
@@ -69,6 +70,10 @@ const SWAP_WARN_RATE: u64 = MIB;
 const SWAP_CRITICAL_RATE: u64 = 16 * MIB;
 const COMPRESSION_WARN_RATE: u64 = 64 * MIB;
 const SWAP_WARN_EXIT: u64 = 2 * MIB;
+/** Churn rate that turns "paging active" on; `swap_warn_exit` turns it off. */
+const PAGING_ACTIVE_ENTER_RATE: u64 = 4 * MIB;
+/** GPU load that turns "GPU busy" on; `gpu_warn_exit` turns it off. */
+const GPU_BUSY_ENTER_LOAD: u64 = 80;
 const COMPRESSION_WARN_EXIT: u64 = 32 * MIB;
 const GPU_WARN_EXIT: u64 = 70;
 const CORRELATION_HISTORY_LIMIT: usize = 16;
@@ -90,6 +95,194 @@ const DIAGNOSTICS_LOG_ENV: &str = "MLXTOP_LOG_PATH";
 const DIAGNOSTICS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_OMLX_HOST: &str = "127.0.0.1";
 const DEFAULT_OMLX_PORT: u16 = 8080;
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+struct Config {
+    interval: Option<u64>,
+    history: Option<usize>,
+    omx: Option<OmxConfig>,
+    memory_warn_load: Option<u64>,
+    memory_critical_load: Option<u64>,
+    gpu_warn_load: Option<u64>,
+    gpu_critical_load: Option<u64>,
+    swap_warn_rate: Option<u64>,
+    swap_critical_rate: Option<u64>,
+    compression_warn_rate: Option<u64>,
+    swap_warn_exit: Option<u64>,
+    compression_warn_exit: Option<u64>,
+    gpu_warn_exit: Option<u64>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+struct OmxConfig {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+fn load_config() -> Config {
+    let config_path = config_path();
+    match fs::read_to_string(&config_path) {
+        Ok(text) => match serde_json::from_str::<Config>(&text) {
+            Ok(config) => {
+                diagnostics_log(
+                    "INFO",
+                    "config_loaded",
+                    format!("path={}", config_path.display()),
+                );
+                config
+            }
+            Err(e) => {
+                diagnostics_log(
+                    "WARN",
+                    "config_parse_error",
+                    format!("path={} error={}", config_path.display(), e),
+                );
+                Config::default()
+            }
+        },
+        Err(_) => Config::default(),
+    }
+}
+
+const INTERVAL_MIN: u64 = 1;
+const INTERVAL_MAX: u64 = 60;
+const INTERVAL_DEFAULT: u64 = 1;
+const HISTORY_MIN: usize = 20;
+const HISTORY_MAX: usize = 3600;
+const HISTORY_DEFAULT: usize = 300;
+
+/**
+ * Resolve `interval` from the config file.
+ *
+ * An out-of-range entry falls back to the default and reports `true` so the
+ * caller can log it: a typo in a file the user edits by hand should not stop
+ * mlxtop from starting. An out-of-range CLI argument is still a hard error,
+ * because the user typed it just now and can see the message.
+ */
+fn config_interval(config: &Config) -> (u64, bool) {
+    match config.interval {
+        Some(value) if (INTERVAL_MIN..=INTERVAL_MAX).contains(&value) => (value, false),
+        Some(_) => (INTERVAL_DEFAULT, true),
+        None => (INTERVAL_DEFAULT, false),
+    }
+}
+
+/**
+ * Resolve `history` from the config file, with the same fallback rule as
+ * [`config_interval`].
+ */
+fn config_history(config: &Config) -> (usize, bool) {
+    match config.history {
+        Some(value) if (HISTORY_MIN..=HISTORY_MAX).contains(&value) => (value, false),
+        Some(_) => (HISTORY_DEFAULT, true),
+        None => (HISTORY_DEFAULT, false),
+    }
+}
+
+fn config_path() -> PathBuf {
+    if let Some(home) = env::var_os("HOME") {
+        Path::new(&home).join(".config/mlxtop/config.json")
+    } else {
+        PathBuf::from("config.json")
+    }
+}
+
+/**
+ * Effective severity thresholds for one run.
+ *
+ * Defaults mirror the built-in constants; every field can be replaced by the
+ * matching key in `~/.config/mlxtop/config.json`. Values are resolved once at
+ * startup and then handed to the severity, alert and correlation code, so a
+ * configured value changes what the user actually sees.
+ */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Thresholds {
+    memory_warn_load: u64,
+    memory_critical_load: u64,
+    gpu_warn_load: u64,
+    gpu_critical_load: u64,
+    gpu_warn_exit: u64,
+    swap_warn_rate: u64,
+    swap_critical_rate: u64,
+    swap_warn_exit: u64,
+    compression_warn_rate: u64,
+    compression_warn_exit: u64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            memory_warn_load: MEMORY_WARN_LOAD,
+            memory_critical_load: MEMORY_CRITICAL_LOAD,
+            gpu_warn_load: GPU_WARN_LOAD,
+            gpu_critical_load: GPU_CRITICAL_LOAD,
+            gpu_warn_exit: GPU_WARN_EXIT,
+            swap_warn_rate: SWAP_WARN_RATE,
+            swap_critical_rate: SWAP_CRITICAL_RATE,
+            swap_warn_exit: SWAP_WARN_EXIT,
+            compression_warn_rate: COMPRESSION_WARN_RATE,
+            compression_warn_exit: COMPRESSION_WARN_EXIT,
+        }
+    }
+}
+
+impl Thresholds {
+    fn from_config(config: &Config) -> Self {
+        let defaults = Self::default();
+        Self {
+            memory_warn_load: config.memory_warn_load.unwrap_or(defaults.memory_warn_load),
+            memory_critical_load: config
+                .memory_critical_load
+                .unwrap_or(defaults.memory_critical_load),
+            gpu_warn_load: config.gpu_warn_load.unwrap_or(defaults.gpu_warn_load),
+            gpu_critical_load: config
+                .gpu_critical_load
+                .unwrap_or(defaults.gpu_critical_load),
+            gpu_warn_exit: config.gpu_warn_exit.unwrap_or(defaults.gpu_warn_exit),
+            swap_warn_rate: config.swap_warn_rate.unwrap_or(defaults.swap_warn_rate),
+            swap_critical_rate: config
+                .swap_critical_rate
+                .unwrap_or(defaults.swap_critical_rate),
+            swap_warn_exit: config.swap_warn_exit.unwrap_or(defaults.swap_warn_exit),
+            compression_warn_rate: config
+                .compression_warn_rate
+                .unwrap_or(defaults.compression_warn_rate),
+            compression_warn_exit: config
+                .compression_warn_exit
+                .unwrap_or(defaults.compression_warn_exit),
+        }
+        .normalized()
+    }
+
+    /**
+     * Keep the bands usable no matter what the file says: percentages stay
+     * within 0..=100, a critical level never sits below its warning level,
+     * and a hysteresis exit never sits above the level that turns the state
+     * on. Bad input is clamped rather than rejected so a single stray value
+     * cannot silently remove a severity band.
+     */
+    fn normalized(mut self) -> Self {
+        self.memory_warn_load = self.memory_warn_load.min(100);
+        self.memory_critical_load = self.memory_critical_load.clamp(self.memory_warn_load, 100);
+        self.gpu_warn_load = self.gpu_warn_load.min(100);
+        self.gpu_critical_load = self.gpu_critical_load.clamp(self.gpu_warn_load, 100);
+        self.gpu_warn_exit = self.gpu_warn_exit.min(100);
+        self.swap_critical_rate = self.swap_critical_rate.max(self.swap_warn_rate);
+        self.compression_warn_exit = self.compression_warn_exit.min(self.compression_warn_rate);
+        self
+    }
+}
+
+/** Shared warn/critical banding used by every load-style indicator. */
+fn load_tone(value: u64, warn: u64, critical: u64) -> Tone {
+    if value >= critical {
+        Tone::Red
+    } else if value >= warn {
+        Tone::Yellow
+    } else {
+        Tone::Green
+    }
+}
 
 static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
 
@@ -447,28 +640,24 @@ impl ChartMetric {
         }
     }
 
-    fn tone(self, value: u64) -> Tone {
+    fn tone(self, value: u64, thresholds: Thresholds) -> Tone {
         match self {
             Self::Generation | Self::Prefill | Self::Cache => Tone::Cyan,
-            Self::Memory => match value {
-                MEMORY_CRITICAL_LOAD.. => Tone::Red,
-                MEMORY_WARN_LOAD..MEMORY_CRITICAL_LOAD => Tone::Yellow,
-                _ => Tone::Green,
-            },
-            Self::Gpu => match value {
-                GPU_CRITICAL_LOAD.. => Tone::Red,
-                GPU_WARN_LOAD..GPU_CRITICAL_LOAD => Tone::Yellow,
-                _ => Tone::Green,
-            },
-            Self::Swap => {
-                if value >= SWAP_CRITICAL_RATE {
-                    Tone::Red
-                } else if value >= SWAP_WARN_RATE {
-                    Tone::Yellow
-                } else {
-                    Tone::Green
-                }
-            }
+            Self::Memory => load_tone(
+                value,
+                thresholds.memory_warn_load,
+                thresholds.memory_critical_load,
+            ),
+            Self::Gpu => load_tone(
+                value,
+                thresholds.gpu_warn_load,
+                thresholds.gpu_critical_load,
+            ),
+            Self::Swap => load_tone(
+                value,
+                thresholds.swap_warn_rate,
+                thresholds.swap_critical_rate,
+            ),
         }
     }
 }
@@ -983,6 +1172,7 @@ struct Collector {
     request_history: request_dashboard::History,
     operator_history: operator_charts::History,
     history_limit: usize,
+    thresholds: Thresholds,
 }
 
 enum SamplerCommand {
@@ -999,7 +1189,7 @@ struct Sampler {
 }
 
 impl Sampler {
-    fn spawn(interval: Duration, history_limit: usize) -> Self {
+    fn spawn(interval: Duration, history_limit: usize, config: Config) -> Self {
         diagnostics_log(
             "INFO",
             "sampler_start",
@@ -1011,7 +1201,7 @@ impl Sampler {
         let (command_tx, command_rx) = mpsc::channel();
         let (view_tx, view_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let mut collector = Collector::new(history_limit);
+            let mut collector = Collector::new(history_limit, config);
             let mut interval = interval;
             let mut paused = false;
             let mut next_sample = Instant::now();
@@ -1105,7 +1295,7 @@ impl Drop for Sampler {
 }
 
 impl Collector {
-    fn new(history_limit: usize) -> Self {
+    fn new(history_limit: usize, config: Config) -> Self {
         let (total_memory, page_size, metal) = if cfg!(target_os = "macos") {
             let total_memory = command_u64("/usr/sbin/sysctl", &["-n", "hw.memsize"]).unwrap_or(0);
             let mut metal = parse_metal_hardware(
@@ -1132,7 +1322,7 @@ impl Collector {
             page_size,
             total_memory,
             metal,
-            llm_client: LlmTelemetryClient::new(),
+            llm_client: LlmTelemetryClient::from_config(&config),
             seen_requests: VecDeque::new(),
             correlation: CorrelationEngine::default(),
             previous: None,
@@ -1148,6 +1338,7 @@ impl Collector {
             request_history: request_dashboard::History::default(),
             operator_history: operator_charts::History::default(),
             history_limit,
+            thresholds: Thresholds::from_config(&config),
         }
     }
 
@@ -1392,20 +1583,22 @@ impl Collector {
         } else {
             Some(self.current.clone())
         };
-        sample.correlation = self.correlation.observe(&sample);
-        classify(&mut sample, previous.as_ref());
+        sample.correlation = self.correlation.observe(&sample, self.thresholds);
+        classify(&mut sample, previous.as_ref(), self.thresholds);
 
         push_history(
             &mut self.generation_history,
             chart_rate_value(&sample, ChartMetric::Generation),
             ChartMetric::Generation,
             self.history_limit,
+            self.thresholds,
         );
         push_history(
             &mut self.prefill_history,
             chart_rate_value(&sample, ChartMetric::Prefill),
             ChartMetric::Prefill,
             self.history_limit,
+            self.thresholds,
         );
         push_history(
             &mut self.cache_history,
@@ -1415,6 +1608,7 @@ impl Collector {
                 .map(|value| value.round() as u64),
             ChartMetric::Cache,
             self.history_limit,
+            self.thresholds,
         );
         if let Some(point) = self.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
@@ -1430,6 +1624,7 @@ impl Collector {
             sample.availability.map(|v| 100_u8.saturating_sub(v) as u64),
             ChartMetric::Memory,
             self.history_limit,
+            self.thresholds,
         );
         push_history(
             &mut self.swap_history,
@@ -1437,12 +1632,14 @@ impl Collector {
                 .then_some(sample.swap_in.saturating_add(sample.swap_out)),
             ChartMetric::Swap,
             self.history_limit,
+            self.thresholds,
         );
         push_history(
             &mut self.gpu_history,
             sample.gpu_util.map(u64::from),
             ChartMetric::Gpu,
             self.history_limit,
+            self.thresholds,
         );
 
         self.record_journal_events(previous.as_ref(), &sample);
@@ -1800,11 +1997,13 @@ struct App {
     sampler_disconnected: bool,
     alert: Option<ActiveAlert>,
     alert_bells: usize,
+    thresholds: Thresholds,
 }
 
 impl App {
-    fn new(interval: u64, history: usize) -> Self {
+    fn new(interval: u64, history: usize, config: Config) -> Self {
         let interval = Duration::from_secs(interval);
+        let thresholds = Thresholds::from_config(&config);
         Self {
             collector: CollectorView {
                 current: Sample::default(),
@@ -1818,7 +2017,7 @@ impl App {
                 request_history: request_dashboard::History::default(),
                 operator_history: operator_charts::History::default(),
             },
-            sampler: Sampler::spawn(interval, history),
+            sampler: Sampler::spawn(interval, history, config),
             interval,
             paused: false,
             tab: 0,
@@ -1834,6 +2033,7 @@ impl App {
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            thresholds,
         }
     }
 
@@ -2411,7 +2611,7 @@ impl App {
         let availability = s.availability;
         let memory_load = availability.map(|value| 100_u8.saturating_sub(value));
         let load_tone = memory_load
-            .map(|value| ChartMetric::Memory.tone(value as u64))
+            .map(|value| ChartMetric::Memory.tone(value as u64, self.thresholds))
             .unwrap_or(Tone::Muted);
         let memory_tone = match s.pressure_tone {
             Tone::Yellow | Tone::Red => s.pressure_tone,
@@ -2424,7 +2624,7 @@ impl App {
             0
         };
         let paging_tone = if paging_rates_available {
-            ChartMetric::Swap.tone(paging_rate)
+            ChartMetric::Swap.tone(paging_rate, self.thresholds)
         } else {
             Tone::Muted
         };
@@ -2444,7 +2644,7 @@ impl App {
         };
         let gpu_tone = s
             .gpu_util
-            .map(|value| ChartMetric::Gpu.tone(value as u64))
+            .map(|value| ChartMetric::Gpu.tone(value as u64, self.thresholds))
             .unwrap_or(Tone::Muted);
         let gpu_memory = match (s.gpu_in_use, s.gpu_alloc) {
             (Some(used), Some(allocated)) => {
@@ -2755,7 +2955,7 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  ·  {}", gpu_load_label(s.gpu_util)),
+                    format!("  ·  {}", gpu_load_label(s.gpu_util, self.thresholds)),
                     Style::default().fg(gpu_tone.color()),
                 ),
             ]),
@@ -3174,9 +3374,12 @@ impl App {
                 column,
                 previous_row,
                 row,
-                metric,
-                previous_tone,
-                tone,
+                TraceStyle {
+                    metric,
+                    previous_tone,
+                    tone,
+                    thresholds: self.thresholds,
+                },
             );
         }
 
@@ -3632,7 +3835,9 @@ impl App {
                     .unwrap_or_else(|| "—".into());
                 let memory_tone = process
                     .memory_percent
-                    .map(|value| ChartMetric::Memory.tone(value.max(0.0).round() as u64))
+                    .map(|value| {
+                        ChartMetric::Memory.tone(value.max(0.0).round() as u64, self.thresholds)
+                    })
                     .unwrap_or(Tone::Muted);
                 let pagein_rate = process
                     .pagein_rate
@@ -4059,7 +4264,7 @@ fn threshold_with_hysteresis(value: u64, was_active: bool, enter: u64, exit: u64
     value >= if was_active { exit } else { enter }
 }
 
-fn classify(sample: &mut Sample, previous: Option<&Sample>) {
+fn classify(sample: &mut Sample, previous: Option<&Sample>, thresholds: Thresholds) {
     let swap_churn = sample.swap_in.saturating_add(sample.swap_out);
     let comp_churn = sample.compress.saturating_add(sample.decompress);
     let llm = llm_is_observed(sample);
@@ -4070,24 +4275,30 @@ fn classify(sample: &mut Sample, previous: Option<&Sample>) {
     );
     let was_compressing = matches!(previous_impact, Some("COMPRESSION ACTIVE"));
     let was_gpu_busy = matches!(previous_impact, Some("GPU BUSY"));
-    let paging_active = threshold_with_hysteresis(swap_churn, was_paging, 4 * MIB, SWAP_WARN_EXIT);
+    let swap_critical_rate = thresholds.swap_critical_rate;
+    let paging_active = threshold_with_hysteresis(
+        swap_churn,
+        was_paging,
+        PAGING_ACTIVE_ENTER_RATE,
+        thresholds.swap_warn_exit,
+    );
     let compression_active = threshold_with_hysteresis(
         comp_churn,
         was_compressing,
-        COMPRESSION_WARN_RATE,
-        COMPRESSION_WARN_EXIT,
+        thresholds.compression_warn_rate,
+        thresholds.compression_warn_exit,
     );
-    let watch_paging = swap_churn >= SWAP_WARN_RATE;
+    let watch_paging = swap_churn >= thresholds.swap_warn_rate;
     let swap_thrashing =
-        sample.swap_in >= SWAP_CRITICAL_RATE && sample.swap_out >= SWAP_CRITICAL_RATE;
-    let heavy_paging = sample.swap_out >= 2 * SWAP_CRITICAL_RATE
-        || sample.swap_growth >= (2 * SWAP_CRITICAL_RATE) as i64;
-    let page_in_recovery = sample.swap_in >= 2 * SWAP_CRITICAL_RATE && sample.swap_growth <= 0;
+        sample.swap_in >= swap_critical_rate && sample.swap_out >= swap_critical_rate;
+    let heavy_paging = sample.swap_out >= 2 * swap_critical_rate
+        || sample.swap_growth >= (2 * swap_critical_rate) as i64;
+    let page_in_recovery = sample.swap_in >= 2 * swap_critical_rate && sample.swap_growth <= 0;
     let gpu_busy = threshold_with_hysteresis(
         sample.gpu_util.unwrap_or_default() as u64,
         was_gpu_busy,
-        80,
-        GPU_WARN_EXIT,
+        GPU_BUSY_ENTER_LOAD,
+        thresholds.gpu_warn_exit,
     ) && llm;
     let native_counters_available = sample.total_memory > 0
         && sample.availability.is_some()
@@ -4209,8 +4420,8 @@ fn classify(sample: &mut Sample, previous: Option<&Sample>) {
             rate(sample.swap_out)
         );
         sample.guidance_action = "Reduce model/context/KV cache or parallel requests.".into();
-    } else if sample.swap_out >= SWAP_CRITICAL_RATE
-        || sample.swap_growth >= SWAP_CRITICAL_RATE as i64
+    } else if sample.swap_out >= swap_critical_rate
+        || sample.swap_growth >= swap_critical_rate as i64
     {
         sample.guidance_badge = "ACT NOW".into();
         sample.guidance_cause =
@@ -4640,15 +4851,31 @@ fn trace_point(value: u64, height: usize) -> Option<(usize, char)> {
     Some((row, '━'))
 }
 
+/**
+ * How one chart segment should be coloured: which metric it belongs to, the
+ * tones at each end of the segment, and the thresholds that band them.
+ */
+#[derive(Clone, Copy)]
+struct TraceStyle {
+    metric: ChartMetric,
+    previous_tone: Tone,
+    tone: Tone,
+    thresholds: Thresholds,
+}
+
 fn trace_connector(
     cells: &mut [Vec<TraceCell>],
     column: usize,
     previous_row: usize,
     row: usize,
-    metric: ChartMetric,
-    previous_tone: Tone,
-    tone: Tone,
+    style: TraceStyle,
 ) {
+    let TraceStyle {
+        metric,
+        previous_tone,
+        tone,
+        thresholds,
+    } = style;
     if column >= cells.first().map(Vec::len).unwrap_or(0)
         || previous_row == row
         || previous_row >= cells.len()
@@ -4663,7 +4890,7 @@ fn trace_connector(
         let display_value = chart_row_value(offset, height);
         row_cells[column] = TraceCell {
             glyph: '┃',
-            tone: chart_transition_tone(metric, display_value, previous_tone, tone),
+            tone: chart_transition_tone(metric, display_value, previous_tone, tone, thresholds),
         };
     }
     cells[upper][column] = TraceCell {
@@ -4700,6 +4927,7 @@ fn chart_transition_tone(
     display_value: u64,
     previous_tone: Tone,
     tone: Tone,
+    thresholds: Thresholds,
 ) -> Tone {
     match metric {
         ChartMetric::Generation | ChartMetric::Prefill => {
@@ -4710,8 +4938,8 @@ fn chart_transition_tone(
             }
         }
         ChartMetric::Cache => tone,
-        ChartMetric::Memory | ChartMetric::Gpu => metric.tone(display_value),
-        ChartMetric::Swap => metric.tone(display_value.saturating_mul(16 * MIB) / 100),
+        ChartMetric::Memory | ChartMetric::Gpu => metric.tone(display_value, thresholds),
+        ChartMetric::Swap => metric.tone(display_value.saturating_mul(16 * MIB) / 100, thresholds),
     }
 }
 
@@ -4890,10 +5118,10 @@ fn pressure_state_label(sample: &Sample) -> &'static str {
     }
 }
 
-fn gpu_load_label(value: Option<u8>) -> &'static str {
+fn gpu_load_label(value: Option<u8>, thresholds: Thresholds) -> &'static str {
     match value.map(u64::from) {
-        Some(value) if value >= GPU_CRITICAL_LOAD => "saturated",
-        Some(value) if value >= GPU_WARN_LOAD => "loaded",
+        Some(value) if value >= thresholds.gpu_critical_load => "saturated",
+        Some(value) if value >= thresholds.gpu_warn_load => "loaded",
         Some(_) => "within target",
         None => "unavailable",
     }
@@ -5008,7 +5236,7 @@ fn compact_model_memory(sample: &Sample) -> String {
 }
 
 impl CorrelationEngine {
-    fn observe(&mut self, sample: &Sample) -> CorrelationInsight {
+    fn observe(&mut self, sample: &Sample, thresholds: Thresholds) -> CorrelationInsight {
         let current = CorrelationObservation::from_sample(sample);
         let previous = self.observations.back().cloned();
         let comparable_previous = previous
@@ -5018,7 +5246,8 @@ impl CorrelationEngine {
             })
             .cloned();
         let baseline = self.baseline(&current.provider, &current.model);
-        let insight = correlate_observations(&current, comparable_previous.as_ref(), baseline);
+        let insight =
+            correlate_observations(&current, comparable_previous.as_ref(), baseline, thresholds);
 
         self.observations.push_back(current);
         while self.observations.len() > CORRELATION_HISTORY_LIMIT {
@@ -5090,6 +5319,7 @@ fn correlate_observations(
     current: &CorrelationObservation,
     previous: Option<&CorrelationObservation>,
     baseline: Option<f64>,
+    thresholds: Thresholds,
 ) -> CorrelationInsight {
     let current_tps = current.generation_tps.filter(|value| {
         value.is_finite() && (*value > 0.0 || current.active_requests.unwrap_or_default() > 0)
@@ -5136,8 +5366,8 @@ fn correlate_observations(
         _ => {}
     }
 
-    if current.paging_rate >= SWAP_WARN_RATE {
-        let score = if current.paging_rate >= SWAP_CRITICAL_RATE {
+    if current.paging_rate >= thresholds.swap_warn_rate {
+        let score = if current.paging_rate >= thresholds.swap_critical_rate {
             100
         } else {
             88
@@ -5150,7 +5380,7 @@ fn correlate_observations(
         );
     }
 
-    if current.compression_rate >= COMPRESSION_WARN_RATE {
+    if current.compression_rate >= thresholds.compression_warn_rate {
         push_correlation_factor(
             &mut factors,
             CorrelationCause::Compression,
@@ -5177,7 +5407,7 @@ fn correlate_observations(
         .flatten()
         .max();
     if let Some(gpu) = current_gpu {
-        if u64::from(gpu) >= GPU_CRITICAL_LOAD {
+        if u64::from(gpu) >= thresholds.gpu_critical_load {
             let crossed = previous
                 .and_then(|previous| {
                     [
@@ -5189,14 +5419,14 @@ fn correlate_observations(
                     .flatten()
                     .max()
                 })
-                .is_none_or(|value| u64::from(value) < GPU_CRITICAL_LOAD);
+                .is_none_or(|value| u64::from(value) < thresholds.gpu_critical_load);
             push_correlation_factor(
                 &mut factors,
                 CorrelationCause::GpuSaturation,
                 if crossed { 95 } else { 72 },
                 format!("GPU {gpu}% busy"),
             );
-        } else if gpu >= 80 {
+        } else if u64::from(gpu) >= GPU_BUSY_ENTER_LOAD {
             push_correlation_factor(
                 &mut factors,
                 CorrelationCause::GpuSaturation,
@@ -6048,8 +6278,8 @@ fn process_provider(name: &str, command: &str) -> Option<String> {
 }
 
 impl LlmTelemetryClient {
-    fn new() -> Self {
-        let (host, port) = read_omlx_endpoint();
+    fn from_config(config: &Config) -> Self {
+        let (host, port) = read_omlx_endpoint(config);
         Self {
             provider_adapter: providers::Adapter::new(),
             host,
@@ -6333,28 +6563,88 @@ fn http_request(
     })
 }
 
-fn read_omlx_endpoint() -> (String, u16) {
-    let mut host = DEFAULT_OMLX_HOST.to_owned();
-    let mut port = DEFAULT_OMLX_PORT;
-    if let Some(home) = env::var_os("HOME") {
-        let path = Path::new(&home).join(".config/omlx-coding/server.env");
-        if let Ok(text) = std::fs::read_to_string(path) {
-            for line in text.lines() {
-                let Some((key, value)) = line.split_once('=') else {
-                    continue;
-                };
-                let value = value.trim().trim_matches('"');
-                match key.trim() {
-                    "HOST" | "OMLX_HOST" if !value.is_empty() && value != "0.0.0.0" => {
-                        host = value.to_owned()
-                    }
-                    "PORT" | "OMLX_PORT" => {
-                        port = value.parse().unwrap_or(port);
-                    }
-                    _ => {}
+/**
+ * Endpoint values discovered from `~/.config/omlx-coding/server.env`.
+ *
+ * `None` means the file said nothing usable about that field, which keeps
+ * "absent" distinct from "explicitly set to the built-in default".
+ */
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DiscoveredEndpoint {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+fn parse_omlx_server_env(text: &str) -> DiscoveredEndpoint {
+    let mut discovered = DiscoveredEndpoint::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        match key.trim() {
+            "HOST" | "OMLX_HOST" if !value.is_empty() && value != "0.0.0.0" => {
+                discovered.host = Some(value.to_owned());
+            }
+            "PORT" | "OMLX_PORT" => {
+                if let Ok(port) = value.parse::<u16>() {
+                    discovered.port = Some(port);
                 }
             }
+            _ => {}
         }
+    }
+    discovered
+}
+
+/**
+ * Resolve the endpoint to monitor.
+ *
+ * Discovery supplies the defaults; an explicitly configured host or port
+ * always wins, because the user picked it deliberately. Each field is
+ * resolved on its own, so configuring only a port keeps the discovered host.
+ * A field that is neither configured nor discovered falls back to the
+ * built-in default.
+ */
+fn resolve_omlx_endpoint(discovered: &DiscoveredEndpoint, config: &Config) -> (String, u16) {
+    let configured = config.omx.as_ref();
+    let host = configured
+        .and_then(|omx| omx.host.clone())
+        .filter(|host| !host.trim().is_empty())
+        .or_else(|| discovered.host.clone())
+        .unwrap_or_else(|| DEFAULT_OMLX_HOST.to_owned());
+    let port = configured
+        .and_then(|omx| omx.port)
+        .or(discovered.port)
+        .unwrap_or(DEFAULT_OMLX_PORT);
+    (host, port)
+}
+
+fn read_omlx_endpoint(config: &Config) -> (String, u16) {
+    let discovered = env::var_os("HOME")
+        .map(|home| Path::new(&home).join(".config/omlx-coding/server.env"))
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|text| parse_omlx_server_env(&text))
+        .unwrap_or_default();
+    let (host, port) = resolve_omlx_endpoint(&discovered, config);
+    if discovered
+        .host
+        .as_deref()
+        .is_some_and(|value| value != host)
+        || discovered.port.is_some_and(|value| value != port)
+    {
+        diagnostics_log(
+            "INFO",
+            "omlx_endpoint_override",
+            format!(
+                "configured={host}:{port} discovered={}:{}",
+                discovered.host.as_deref().unwrap_or("-"),
+                discovered
+                    .port
+                    .map(|port| port.to_string())
+                    .unwrap_or_else(|| "-".to_owned())
+            ),
+        );
     }
     (host, port)
 }
@@ -7059,9 +7349,12 @@ fn push_history(
     value: Option<u64>,
     metric: ChartMetric,
     limit: usize,
+    thresholds: Thresholds,
 ) {
     history.push_back(ChartPoint {
-        tone: value.map(|value| metric.tone(value)).unwrap_or(Tone::Muted),
+        tone: value
+            .map(|value| metric.tone(value, thresholds))
+            .unwrap_or(Tone::Muted),
         value,
     });
     while history.len() > limit {
@@ -7512,8 +7805,29 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut interval = 1_u64;
-    let mut history = 300_usize;
+    let config = load_config();
+    let (mut interval, interval_rejected) = config_interval(&config);
+    let (mut history, history_rejected) = config_history(&config);
+    if interval_rejected {
+        diagnostics_log(
+            "WARN",
+            "config_out_of_range",
+            format!(
+                "field=interval value={:?} allowed={INTERVAL_MIN}..={INTERVAL_MAX} using={interval}",
+                config.interval
+            ),
+        );
+    }
+    if history_rejected {
+        diagnostics_log(
+            "WARN",
+            "config_out_of_range",
+            format!(
+                "field=history value={:?} allowed={HISTORY_MIN}..={HISTORY_MAX} using={history}",
+                config.history
+            ),
+        );
+    }
     let mut once = false;
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -7540,6 +7854,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                      -1, --once         static report\n\
                      -V, --version      show version\n\
                      -h, --help         show help\n\
+                     Config file: ~/.config/mlxtop/config.json\n\
                      Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
                      Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · +/- interval · ? help",
                     diagnostics_default_hint()
@@ -7551,10 +7866,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         i += 1;
     }
-    if !(1..=60).contains(&interval) {
+    if !(INTERVAL_MIN..=INTERVAL_MAX).contains(&interval) {
         return Err("interval must be between 1 and 60 seconds".into());
     }
-    if !(20..=3600).contains(&history) {
+    if !(HISTORY_MIN..=HISTORY_MAX).contains(&history) {
         return Err("history must be between 20 and 3600".into());
     }
 
@@ -7562,13 +7877,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "INFO",
         "configuration",
         format!(
-            "interval_seconds={interval} history_limit={history} once={once} interactive={}",
-            io::stdin().is_terminal() && io::stdout().is_terminal()
+            "interval_seconds={interval} history_limit={history} once={once} interactive={} config_path={}",
+            io::stdin().is_terminal() && io::stdout().is_terminal(),
+            config_path().display()
         ),
     );
 
     if once {
-        let mut collector = Collector::new(history);
+        let mut collector = Collector::new(history, config.clone());
         collector.sample();
         thread::sleep(Duration::from_secs(interval));
         let sample = collector.sample();
@@ -7585,7 +7901,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     execute!(out, EnterAlternateScreen, crossterm::cursor::Hide)?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = App::new(interval, history);
+    let mut app = App::new(interval, history, config);
     let result = run_app(&mut terminal, &mut app);
     disable_raw_mode()?;
     execute!(
@@ -7602,6 +7918,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /** Built-in thresholds, for tests that are not exercising configuration. */
+    fn defaults() -> Thresholds {
+        Thresholds::default()
+    }
+
+    /**
+     * A config file that sets every supported field to a value that differs
+     * from the built-in default and survives normalization unchanged.
+     */
+    const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
+        "interval": 7,
+        "history": 1234,
+        "omx": { "host": "10.1.2.3", "port": 9999 },
+        "memory_warn_load": 55,
+        "memory_critical_load": 77,
+        "gpu_warn_load": 44,
+        "gpu_critical_load": 66,
+        "gpu_warn_exit": 33,
+        "swap_warn_rate": 3145728,
+        "swap_critical_rate": 25165824,
+        "swap_warn_exit": 4194304,
+        "compression_warn_rate": 100663296,
+        "compression_warn_exit": 50331648
+    }"#;
 
     fn test_app(tab: usize) -> App {
         let (app, _views) = test_app_with_sender(tab);
@@ -7647,6 +7988,7 @@ mod tests {
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            thresholds: Thresholds::default(),
         };
         (app, view_sender)
     }
@@ -7790,12 +8132,18 @@ mod tests {
 
     #[test]
     fn chart_colors_follow_load_thresholds() {
-        assert_eq!(ChartMetric::Memory.tone(69), Tone::Green);
-        assert_eq!(ChartMetric::Memory.tone(70), Tone::Yellow);
-        assert_eq!(ChartMetric::Memory.tone(85), Tone::Red);
-        assert_eq!(ChartMetric::Swap.tone(0), Tone::Green);
-        assert_eq!(ChartMetric::Swap.tone(1024 * 1024), Tone::Yellow);
-        assert_eq!(ChartMetric::Swap.tone(16 * 1024 * 1024), Tone::Red);
+        assert_eq!(ChartMetric::Memory.tone(69, defaults()), Tone::Green);
+        assert_eq!(ChartMetric::Memory.tone(70, defaults()), Tone::Yellow);
+        assert_eq!(ChartMetric::Memory.tone(85, defaults()), Tone::Red);
+        assert_eq!(ChartMetric::Swap.tone(0, defaults()), Tone::Green);
+        assert_eq!(
+            ChartMetric::Swap.tone(1024 * 1024, defaults()),
+            Tone::Yellow
+        );
+        assert_eq!(
+            ChartMetric::Swap.tone(16 * 1024 * 1024, defaults()),
+            Tone::Red
+        );
     }
 
     #[test]
@@ -7820,10 +8168,10 @@ mod tests {
             ..Sample::default()
         };
         assert_eq!(pressure_state_label(&sample), "critical");
-        assert_eq!(gpu_load_label(Some(40)), "within target");
-        assert_eq!(gpu_load_label(Some(80)), "loaded");
-        assert_eq!(gpu_load_label(Some(95)), "saturated");
-        assert_eq!(gpu_load_label(None), "unavailable");
+        assert_eq!(gpu_load_label(Some(40), defaults()), "within target");
+        assert_eq!(gpu_load_label(Some(80), defaults()), "loaded");
+        assert_eq!(gpu_load_label(Some(95), defaults()), "saturated");
+        assert_eq!(gpu_load_label(None, defaults()), "unavailable");
     }
 
     #[test]
@@ -8477,9 +8825,12 @@ mod tests {
             1,
             0,
             6,
-            ChartMetric::Gpu,
-            Tone::Red,
-            Tone::Green,
+            TraceStyle {
+                metric: ChartMetric::Gpu,
+                previous_tone: Tone::Red,
+                tone: Tone::Green,
+                thresholds: defaults(),
+            },
         );
         assert_eq!(cells[0][1].glyph, '┓');
         assert_eq!(cells[0][1].tone, Tone::Red);
@@ -8494,9 +8845,12 @@ mod tests {
             2,
             6,
             0,
-            ChartMetric::Gpu,
-            Tone::Green,
-            Tone::Yellow,
+            TraceStyle {
+                metric: ChartMetric::Gpu,
+                previous_tone: Tone::Green,
+                tone: Tone::Yellow,
+                thresholds: defaults(),
+            },
         );
         assert_eq!(cells[0][2].glyph, '┏');
         assert_eq!(cells[0][2].tone, Tone::Yellow);
@@ -8571,8 +8925,8 @@ mod tests {
     #[test]
     fn bar_chart_keeps_each_sample_tone_independent() {
         let history = VecDeque::from([
-            ChartPoint::new(Some(69), ChartMetric::Memory.tone(69)),
-            ChartPoint::new(Some(85), ChartMetric::Memory.tone(85)),
+            ChartPoint::new(Some(69), ChartMetric::Memory.tone(69, defaults())),
+            ChartPoint::new(Some(85), ChartMetric::Memory.tone(85, defaults())),
         ]);
         assert_eq!(history[0].tone, Tone::Green);
         assert_eq!(history[1].tone, Tone::Red);
@@ -8643,10 +8997,30 @@ mod tests {
 
     #[test]
     fn severity_thresholds_have_a_recovery_band() {
-        assert!(!threshold_with_hysteresis(69, false, 70, GPU_WARN_EXIT));
-        assert!(threshold_with_hysteresis(75, false, 70, GPU_WARN_EXIT));
-        assert!(threshold_with_hysteresis(71, true, 80, GPU_WARN_EXIT));
-        assert!(!threshold_with_hysteresis(69, true, 80, GPU_WARN_EXIT));
+        assert!(!threshold_with_hysteresis(
+            69,
+            false,
+            70,
+            defaults().gpu_warn_exit
+        ));
+        assert!(threshold_with_hysteresis(
+            75,
+            false,
+            70,
+            defaults().gpu_warn_exit
+        ));
+        assert!(threshold_with_hysteresis(
+            71,
+            true,
+            80,
+            defaults().gpu_warn_exit
+        ));
+        assert!(!threshold_with_hysteresis(
+            69,
+            true,
+            80,
+            defaults().gpu_warn_exit
+        ));
     }
 
     #[test]
@@ -8679,17 +9053,17 @@ mod tests {
             llm_count: 1,
             ..Sample::default()
         };
-        classify(&mut sample, None);
+        classify(&mut sample, None, defaults());
         assert_eq!(sample.impact, "LLM READY");
 
         sample.vm_available = false;
-        classify(&mut sample, None);
+        classify(&mut sample, None, defaults());
         assert_eq!(sample.impact, "DATA LIMITED");
         assert_eq!(sample.guidance_badge, "CHECK");
 
         sample.vm_available = true;
         sample.compress = COMPRESSION_WARN_RATE;
-        classify(&mut sample, None);
+        classify(&mut sample, None, defaults());
         assert_eq!(sample.impact, "COMPRESSION ACTIVE");
         assert_eq!(sample.guidance_badge, "WATCH");
     }
@@ -8870,7 +9244,7 @@ mod tests {
             gpu_alloc: Some(100),
             ..Sample::default()
         };
-        engine.observe(&baseline);
+        engine.observe(&baseline, defaults());
 
         let current = Sample {
             llm_provider: "oMLX".into(),
@@ -8885,7 +9259,7 @@ mod tests {
             gpu_alloc: Some(100),
             ..Sample::default()
         };
-        let insight = engine.observe(&current);
+        let insight = engine.observe(&current, defaults());
 
         assert_eq!(insight.direction, ThroughputDirection::Down);
         assert_eq!(insight.cause, CorrelationCause::ContextGrowth);
@@ -8905,20 +9279,26 @@ mod tests {
     #[test]
     fn correlation_is_honest_when_no_system_signal_moved_with_rate() {
         let mut engine = CorrelationEngine::default();
-        engine.observe(&Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(30.0),
-            llm_generation_tps_live: true,
-            ..Sample::default()
-        });
-        let insight = engine.observe(&Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(25.0),
-            llm_generation_tps_live: true,
-            ..Sample::default()
-        });
+        engine.observe(
+            &Sample {
+                llm_provider: "oMLX".into(),
+                llm_model: "model".into(),
+                llm_generation_tps: Some(30.0),
+                llm_generation_tps_live: true,
+                ..Sample::default()
+            },
+            defaults(),
+        );
+        let insight = engine.observe(
+            &Sample {
+                llm_provider: "oMLX".into(),
+                llm_model: "model".into(),
+                llm_generation_tps: Some(25.0),
+                llm_generation_tps_live: true,
+                ..Sample::default()
+            },
+            defaults(),
+        );
 
         assert_eq!(insight.cause, CorrelationCause::Runtime);
         assert_eq!(insight.confidence_label(), "low");
@@ -9033,18 +9413,24 @@ mod tests {
     #[test]
     fn correlation_ignores_retained_idle_rates() {
         let mut engine = CorrelationEngine::default();
-        engine.observe(&Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(30.0),
-            ..Sample::default()
-        });
-        let insight = engine.observe(&Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(25.0),
-            ..Sample::default()
-        });
+        engine.observe(
+            &Sample {
+                llm_provider: "oMLX".into(),
+                llm_model: "model".into(),
+                llm_generation_tps: Some(30.0),
+                ..Sample::default()
+            },
+            defaults(),
+        );
+        let insight = engine.observe(
+            &Sample {
+                llm_provider: "oMLX".into(),
+                llm_model: "model".into(),
+                llm_generation_tps: Some(25.0),
+                ..Sample::default()
+            },
+            defaults(),
+        );
 
         assert_eq!(insight.direction, ThroughputDirection::Unknown);
         assert_eq!(insight.cause, CorrelationCause::None);
@@ -9140,5 +9526,522 @@ mod tests {
 
         assert_eq!(panic_payload(owned.as_ref()), "owned panic");
         assert_eq!(panic_payload(static_text.as_ref()), "static panic");
+    }
+
+    #[test]
+    fn config_defaults_when_file_missing() {
+        let config = Config::default();
+        assert_eq!(config.interval, None);
+        assert_eq!(config.history, None);
+        assert_eq!(config.omx, None);
+        assert_eq!(config.memory_warn_load, None);
+        assert_eq!(config.gpu_critical_load, None);
+    }
+
+    #[test]
+    fn config_parses_from_json() {
+        let json_str = r#"{"interval":5,"history":500,"omx":{"host":"0.0.0.0","port":9090},"memory_warn_load":80,"memory_critical_load":90,"gpu_warn_load":85,"gpu_critical_load":95,"swap_warn_rate":1048576,"swap_critical_rate":16777216}"#;
+        let config: Config = serde_json::from_str(json_str).expect("valid json should parse");
+        assert_eq!(config.interval, Some(5));
+        assert_eq!(config.history, Some(500));
+        assert_eq!(
+            config.omx.as_ref().unwrap().host.as_deref(),
+            Some("0.0.0.0")
+        );
+        assert_eq!(config.omx.as_ref().unwrap().port, Some(9090));
+        assert_eq!(config.memory_warn_load, Some(80));
+        assert_eq!(config.memory_critical_load, Some(90));
+        assert_eq!(config.gpu_warn_load, Some(85));
+        assert_eq!(config.gpu_critical_load, Some(95));
+        assert_eq!(config.swap_warn_rate, Some(1048576));
+        assert_eq!(config.swap_critical_rate, Some(16777216));
+    }
+
+    #[test]
+    fn config_omlx_defaults_when_missing() {
+        let json_str = r#"{"interval":2}"#;
+        let config: Config = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.interval, Some(2));
+        assert_eq!(config.omx, None);
+    }
+
+    #[test]
+    fn configured_thresholds_replace_the_built_in_defaults() {
+        let config: Config = serde_json::from_str(
+            r#"{"memory_warn_load":60,"memory_critical_load":75,
+                "gpu_warn_load":50,"gpu_critical_load":65,"gpu_warn_exit":40,
+                "swap_warn_rate":2097152,"swap_critical_rate":33554432,
+                "swap_warn_exit":1048576,
+                "compression_warn_rate":134217728,"compression_warn_exit":67108864}"#,
+        )
+        .expect("valid json should parse");
+        let thresholds = Thresholds::from_config(&config);
+
+        assert_eq!(
+            thresholds,
+            Thresholds {
+                memory_warn_load: 60,
+                memory_critical_load: 75,
+                gpu_warn_load: 50,
+                gpu_critical_load: 65,
+                gpu_warn_exit: 40,
+                swap_warn_rate: 2 * MIB,
+                swap_critical_rate: 32 * MIB,
+                swap_warn_exit: MIB,
+                compression_warn_rate: 128 * MIB,
+                compression_warn_exit: 64 * MIB,
+            }
+        );
+        assert_eq!(Thresholds::from_config(&Config::default()), defaults());
+    }
+
+    #[test]
+    fn configured_memory_thresholds_move_the_severity_band() {
+        let config: Config = serde_json::from_str(r#"{"memory_critical_load":95}"#)
+            .expect("valid json should parse");
+        let thresholds = Thresholds::from_config(&config);
+
+        /* 85% is critical with the built-in default and only a warning once
+         * the user raises the critical level to 95. */
+        assert_eq!(ChartMetric::Memory.tone(85, defaults()), Tone::Red);
+        assert_eq!(ChartMetric::Memory.tone(85, thresholds), Tone::Yellow);
+        assert_eq!(ChartMetric::Memory.tone(95, thresholds), Tone::Red);
+        assert_eq!(ChartMetric::Memory.tone(69, thresholds), Tone::Green);
+    }
+
+    #[test]
+    fn configured_gpu_thresholds_change_the_reported_load_label() {
+        let config: Config = serde_json::from_str(r#"{"gpu_warn_load":85,"gpu_critical_load":95}"#)
+            .expect("valid json should parse");
+        let thresholds = Thresholds::from_config(&config);
+
+        assert_eq!(gpu_load_label(Some(80), defaults()), "loaded");
+        assert_eq!(gpu_load_label(Some(80), thresholds), "within target");
+        assert_eq!(gpu_load_label(Some(90), thresholds), "loaded");
+        assert_eq!(gpu_load_label(Some(96), thresholds), "saturated");
+    }
+
+    #[test]
+    fn configured_swap_rates_change_the_classified_impact() {
+        let template = Sample {
+            rate_ready: true,
+            total_memory: 32 * 1024 * 1024 * 1024,
+            availability: Some(50),
+            pressure: "GREEN".into(),
+            vm_available: true,
+            swap_available: true,
+            thermal: "no warning".into(),
+            llm_count: 1,
+            swap_in: 16 * MIB,
+            swap_out: 16 * MIB,
+            ..Sample::default()
+        };
+
+        let mut sample = template.clone();
+        classify(&mut sample, None, defaults());
+        assert_eq!(sample.impact, "SWAP THRASHING");
+
+        let config: Config =
+            serde_json::from_str(r#"{"swap_warn_rate":67108864,"swap_critical_rate":134217728}"#)
+                .expect("valid json should parse");
+        let mut sample = template;
+        classify(&mut sample, None, Thresholds::from_config(&config));
+        assert_ne!(sample.impact, "SWAP THRASHING");
+        assert_eq!(sample.impact, "PAGING ACTIVE");
+    }
+
+    #[test]
+    fn configured_compression_rate_changes_the_classified_impact() {
+        let template = Sample {
+            rate_ready: true,
+            total_memory: 32 * 1024 * 1024 * 1024,
+            availability: Some(50),
+            pressure: "GREEN".into(),
+            vm_available: true,
+            swap_available: true,
+            thermal: "no warning".into(),
+            llm_count: 1,
+            compress: COMPRESSION_WARN_RATE,
+            ..Sample::default()
+        };
+
+        let mut sample = template.clone();
+        classify(&mut sample, None, defaults());
+        assert_eq!(sample.impact, "COMPRESSION ACTIVE");
+
+        let config: Config = serde_json::from_str(r#"{"compression_warn_rate":268435456}"#)
+            .expect("valid json should parse");
+        let mut sample = template;
+        classify(&mut sample, None, Thresholds::from_config(&config));
+        assert_eq!(sample.impact, "LLM READY");
+    }
+
+    #[test]
+    fn configured_gpu_threshold_changes_correlation_attribution() {
+        let current = CorrelationObservation {
+            provider: "oMLX".into(),
+            model: "model".into(),
+            generation_tps: Some(20.0),
+            gpu_util: Some(78),
+            ..CorrelationObservation::default()
+        };
+        let previous = CorrelationObservation {
+            provider: "oMLX".into(),
+            model: "model".into(),
+            generation_tps: Some(30.0),
+            gpu_util: Some(10),
+            ..CorrelationObservation::default()
+        };
+
+        let with_defaults =
+            correlate_observations(&current, Some(&previous), Some(30.0), defaults());
+        assert_ne!(with_defaults.cause, CorrelationCause::GpuSaturation);
+
+        let config: Config = serde_json::from_str(r#"{"gpu_warn_load":60,"gpu_critical_load":70}"#)
+            .expect("valid json should parse");
+        let with_lower_ceiling = correlate_observations(
+            &current,
+            Some(&previous),
+            Some(30.0),
+            Thresholds::from_config(&config),
+        );
+        assert_eq!(with_lower_ceiling.cause, CorrelationCause::GpuSaturation);
+        assert!(with_lower_ceiling.details.contains("GPU 78% busy"));
+    }
+
+    #[test]
+    fn inverted_or_out_of_range_thresholds_are_clamped_into_usable_bands() {
+        let config: Config = serde_json::from_str(
+            r#"{"memory_warn_load":90,"memory_critical_load":40,
+                "gpu_warn_load":250,"gpu_critical_load":10,
+                "swap_warn_rate":1000,"swap_critical_rate":10,
+                "compression_warn_rate":100,"compression_warn_exit":900}"#,
+        )
+        .expect("valid json should parse");
+        let thresholds = Thresholds::from_config(&config);
+
+        assert_eq!(thresholds.memory_warn_load, 90);
+        assert_eq!(thresholds.memory_critical_load, 90);
+        assert_eq!(thresholds.gpu_warn_load, 100);
+        assert_eq!(thresholds.gpu_critical_load, 100);
+        assert_eq!(thresholds.swap_warn_rate, 1000);
+        assert_eq!(thresholds.swap_critical_rate, 1000);
+        assert_eq!(thresholds.compression_warn_exit, 100);
+        /* The warning band is never silently removed by bad input. */
+        assert_eq!(ChartMetric::Memory.tone(89, thresholds), Tone::Green);
+        assert_eq!(ChartMetric::Memory.tone(90, thresholds), Tone::Red);
+    }
+
+    #[test]
+    fn explicit_endpoint_settings_win_over_discovery() {
+        let discovered = parse_omlx_server_env("HOST=10.0.0.5\nPORT=9000\n");
+        assert_eq!(discovered.host.as_deref(), Some("10.0.0.5"));
+        assert_eq!(discovered.port, Some(9000));
+
+        let config: Config = serde_json::from_str(r#"{"omx":{"host":"192.168.1.20","port":8123}}"#)
+            .expect("valid json should parse");
+        assert_eq!(
+            resolve_omlx_endpoint(&discovered, &config),
+            ("192.168.1.20".to_owned(), 8123)
+        );
+    }
+
+    #[test]
+    fn partially_specified_endpoint_settings_keep_discovered_values() {
+        let discovered = parse_omlx_server_env("OMLX_HOST=10.0.0.5\nOMLX_PORT=9000\n");
+
+        let host_only: Config = serde_json::from_str(r#"{"omx":{"host":"192.168.1.20"}}"#)
+            .expect("valid json should parse");
+        assert_eq!(
+            resolve_omlx_endpoint(&discovered, &host_only),
+            ("192.168.1.20".to_owned(), 9000)
+        );
+
+        let port_only: Config =
+            serde_json::from_str(r#"{"omx":{"port":8123}}"#).expect("valid json should parse");
+        assert_eq!(
+            resolve_omlx_endpoint(&discovered, &port_only),
+            ("10.0.0.5".to_owned(), 8123)
+        );
+    }
+
+    #[test]
+    fn endpoint_falls_back_to_discovery_then_built_in_defaults() {
+        let discovered = parse_omlx_server_env("HOST=10.0.0.5\nPORT=9000\n");
+        assert_eq!(
+            resolve_omlx_endpoint(&discovered, &Config::default()),
+            ("10.0.0.5".to_owned(), 9000)
+        );
+        assert_eq!(
+            resolve_omlx_endpoint(&DiscoveredEndpoint::default(), &Config::default()),
+            (DEFAULT_OMLX_HOST.to_owned(), DEFAULT_OMLX_PORT)
+        );
+
+        let port_only: Config =
+            serde_json::from_str(r#"{"omx":{"port":8123}}"#).expect("valid json should parse");
+        assert_eq!(
+            resolve_omlx_endpoint(&DiscoveredEndpoint::default(), &port_only),
+            (DEFAULT_OMLX_HOST.to_owned(), 8123)
+        );
+    }
+
+    #[test]
+    fn server_env_discovery_ignores_wildcard_hosts_and_invalid_ports() {
+        let discovered =
+            parse_omlx_server_env("# oMLX server\nOMLX_HOST=\"0.0.0.0\"\nOMLX_PORT=not-a-port\n");
+        assert_eq!(discovered, DiscoveredEndpoint::default());
+
+        let blank_host: Config =
+            serde_json::from_str(r#"{"omx":{"host":"  "}}"#).expect("valid json should parse");
+        assert_eq!(
+            resolve_omlx_endpoint(&parse_omlx_server_env("HOST=10.0.0.5\n"), &blank_host),
+            ("10.0.0.5".to_owned(), DEFAULT_OMLX_PORT)
+        );
+    }
+
+    #[test]
+    fn out_of_range_config_values_fall_back_instead_of_refusing_to_start() {
+        let valid: Config = serde_json::from_str(r#"{"interval":5,"history":500}"#)
+            .expect("valid json should parse");
+        assert_eq!(config_interval(&valid), (5, false));
+        assert_eq!(config_history(&valid), (500, false));
+
+        let out_of_range: Config =
+            serde_json::from_str(r#"{"interval":0,"history":5}"#).expect("valid json should parse");
+        assert_eq!(config_interval(&out_of_range), (INTERVAL_DEFAULT, true));
+        assert_eq!(config_history(&out_of_range), (HISTORY_DEFAULT, true));
+
+        assert_eq!(
+            config_interval(&Config::default()),
+            (INTERVAL_DEFAULT, false)
+        );
+        assert_eq!(config_history(&Config::default()), (HISTORY_DEFAULT, false));
+    }
+
+    /**
+     * Every field in `Config` must reach the value mlxtop actually runs with.
+     *
+     * The destructuring below is exhaustive on purpose: adding a field to
+     * `Config` stops this test from compiling until the field is named here,
+     * and an unused binding fails `clippy -D warnings`, so a new setting
+     * cannot be merged without an assertion that something reads it.
+     */
+    #[test]
+    fn every_config_field_reaches_the_resolved_settings() {
+        let config: Config =
+            serde_json::from_str(CONFIG_WITH_EVERY_FIELD_SET).expect("the fixture should parse");
+
+        let Config {
+            interval,
+            history,
+            omx,
+            memory_warn_load,
+            memory_critical_load,
+            gpu_warn_load,
+            gpu_critical_load,
+            swap_warn_rate,
+            swap_critical_rate,
+            compression_warn_rate,
+            swap_warn_exit,
+            compression_warn_exit,
+            gpu_warn_exit,
+        } = config.clone();
+        let OmxConfig { host, port } = omx.expect("the fixture sets omx");
+
+        assert_eq!(
+            config_interval(&config).0,
+            interval.expect("the fixture sets interval")
+        );
+        assert_eq!(
+            config_history(&config).0,
+            history.expect("the fixture sets history")
+        );
+        assert_eq!(
+            resolve_omlx_endpoint(&DiscoveredEndpoint::default(), &config),
+            (
+                host.expect("the fixture sets omx.host"),
+                port.expect("the fixture sets omx.port")
+            )
+        );
+
+        let thresholds = Thresholds::from_config(&config);
+        assert_eq!(
+            thresholds,
+            Thresholds {
+                memory_warn_load: memory_warn_load.expect("fixture"),
+                memory_critical_load: memory_critical_load.expect("fixture"),
+                gpu_warn_load: gpu_warn_load.expect("fixture"),
+                gpu_critical_load: gpu_critical_load.expect("fixture"),
+                gpu_warn_exit: gpu_warn_exit.expect("fixture"),
+                swap_warn_rate: swap_warn_rate.expect("fixture"),
+                swap_critical_rate: swap_critical_rate.expect("fixture"),
+                swap_warn_exit: swap_warn_exit.expect("fixture"),
+                compression_warn_rate: compression_warn_rate.expect("fixture"),
+                compression_warn_exit: compression_warn_exit.expect("fixture"),
+            },
+            "a Config field was parsed but never reached Thresholds"
+        );
+    }
+
+    /**
+     * Every field in `Thresholds` must change something the user can see.
+     *
+     * This is the regression guard for the "deserialized and then ignored"
+     * class of bug: each probe reports an observable result — a chart tone, a
+     * load label, a classified impact — and the test fails unless configuring
+     * the field changes it. Reverting any field to a hard-coded constant
+     * fails here even though parsing still succeeds.
+     *
+     * The destructuring and the `all_fields` array are exhaustive on purpose:
+     * a new `Thresholds` field stops the test compiling, and the length
+     * assertion then fails until the field is given a probe below.
+     */
+    #[test]
+    fn every_threshold_field_changes_an_observable_result() {
+        struct Probe {
+            field: &'static str,
+            config: &'static str,
+            observe: fn(Thresholds) -> String,
+        }
+
+        fn tone_name(tone: Tone) -> String {
+            format!("{tone:?}")
+        }
+
+        fn impact_after_classify(
+            thresholds: Thresholds,
+            previous_impact: Option<&str>,
+            prepare: fn(&mut Sample),
+        ) -> String {
+            let mut sample = Sample {
+                rate_ready: true,
+                total_memory: 32 * 1024 * 1024 * 1024,
+                availability: Some(50),
+                pressure: "GREEN".into(),
+                vm_available: true,
+                swap_available: true,
+                thermal: "no warning".into(),
+                llm_count: 1,
+                ..Sample::default()
+            };
+            prepare(&mut sample);
+            let previous = previous_impact.map(|impact| Sample {
+                impact: impact.into(),
+                ..Sample::default()
+            });
+            classify(&mut sample, previous.as_ref(), thresholds);
+            sample.impact
+        }
+
+        let probes = [
+            Probe {
+                field: "memory_warn_load",
+                config: r#"{"memory_warn_load":55}"#,
+                observe: |thresholds| tone_name(ChartMetric::Memory.tone(60, thresholds)),
+            },
+            Probe {
+                field: "memory_critical_load",
+                config: r#"{"memory_critical_load":95}"#,
+                observe: |thresholds| tone_name(ChartMetric::Memory.tone(85, thresholds)),
+            },
+            Probe {
+                field: "gpu_warn_load",
+                config: r#"{"gpu_warn_load":70}"#,
+                observe: |thresholds| gpu_load_label(Some(72), thresholds).to_owned(),
+            },
+            Probe {
+                field: "gpu_critical_load",
+                config: r#"{"gpu_warn_load":70,"gpu_critical_load":85}"#,
+                observe: |thresholds| gpu_load_label(Some(88), thresholds).to_owned(),
+            },
+            Probe {
+                field: "gpu_warn_exit",
+                config: r#"{"gpu_warn_exit":60}"#,
+                observe: |thresholds| {
+                    impact_after_classify(thresholds, Some("GPU BUSY"), |sample| {
+                        sample.gpu_util = Some(65);
+                    })
+                },
+            },
+            Probe {
+                field: "swap_warn_rate",
+                config: r#"{"swap_warn_rate":4194304}"#,
+                observe: |thresholds| tone_name(ChartMetric::Swap.tone(2 * MIB, thresholds)),
+            },
+            Probe {
+                field: "swap_critical_rate",
+                config: r#"{"swap_critical_rate":33554432}"#,
+                observe: |thresholds| tone_name(ChartMetric::Swap.tone(16 * MIB, thresholds)),
+            },
+            Probe {
+                field: "swap_warn_exit",
+                config: r#"{"swap_warn_exit":4194304}"#,
+                observe: |thresholds| {
+                    impact_after_classify(thresholds, Some("PAGING ACTIVE"), |sample| {
+                        sample.swap_in = 3 * MIB;
+                    })
+                },
+            },
+            Probe {
+                field: "compression_warn_rate",
+                config: r#"{"compression_warn_rate":134217728}"#,
+                observe: |thresholds| {
+                    impact_after_classify(thresholds, None, |sample| {
+                        sample.compress = 64 * MIB;
+                    })
+                },
+            },
+            Probe {
+                field: "compression_warn_exit",
+                config: r#"{"compression_warn_exit":50331648}"#,
+                observe: |thresholds| {
+                    impact_after_classify(thresholds, Some("COMPRESSION ACTIVE"), |sample| {
+                        sample.compress = 40 * MIB;
+                    })
+                },
+            },
+        ];
+
+        let Thresholds {
+            memory_warn_load,
+            memory_critical_load,
+            gpu_warn_load,
+            gpu_critical_load,
+            gpu_warn_exit,
+            swap_warn_rate,
+            swap_critical_rate,
+            swap_warn_exit,
+            compression_warn_rate,
+            compression_warn_exit,
+        } = defaults();
+        let all_fields = [
+            memory_warn_load,
+            memory_critical_load,
+            gpu_warn_load,
+            gpu_critical_load,
+            gpu_warn_exit,
+            swap_warn_rate,
+            swap_critical_rate,
+            swap_warn_exit,
+            compression_warn_rate,
+            compression_warn_exit,
+        ];
+        assert_eq!(
+            probes.len(),
+            all_fields.len(),
+            "every field in Thresholds needs a probe proving it changes behaviour"
+        );
+
+        for probe in probes {
+            let config: Config = serde_json::from_str(probe.config)
+                .unwrap_or_else(|error| panic!("{} fixture should parse: {error}", probe.field));
+            let configured = (probe.observe)(Thresholds::from_config(&config));
+            let built_in = (probe.observe)(defaults());
+            assert_ne!(
+                configured, built_in,
+                "setting {} changed nothing observable — it is parsed but not applied",
+                probe.field
+            );
+        }
     }
 }

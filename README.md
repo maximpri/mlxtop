@@ -41,6 +41,69 @@ The installer checks the download’s SHA-256 checksum and places `mlxtop` in
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 
+## Configuration
+
+Create `~/.config/mlxtop/config.json` to customize mlxtop. All fields are optional,
+and anything you leave out keeps its built-in default.
+
+```json
+{
+  "interval": 2,
+  "history": 500,
+  "omx": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "memory_warn_load": 70,
+  "memory_critical_load": 85,
+  "gpu_warn_load": 75,
+  "gpu_critical_load": 90,
+  "gpu_warn_exit": 70,
+  "swap_warn_rate": 1048576,
+  "swap_critical_rate": 16777216,
+  "swap_warn_exit": 2097152,
+  "compression_warn_rate": 67108864,
+  "compression_warn_exit": 33554432
+}
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `interval` | integer | 1 | Refresh interval in seconds (1–60) |
+| `history` | integer | 300 | Chart/journal history size (20–3600) |
+| `omx.host` | string | "127.0.0.1" | oMLX server host |
+| `omx.port` | integer | 8080 | oMLX server port |
+| `memory_warn_load` | integer | 70 | Memory load (%) that turns the memory indicator yellow |
+| `memory_critical_load` | integer | 85 | Memory load (%) that turns it red |
+| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded" and shown yellow |
+| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated", shown red, and correlated as GPU saturation |
+| `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
+| `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
+| `swap_critical_rate` | integer | 16 MiB/s | Swap churn that counts as thrashing |
+| `swap_warn_exit` | integer | 2 MiB/s | Swap churn below which "PAGING ACTIVE" clears |
+| `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
+| `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
+
+Rates are bytes per second; loads are percentages.
+
+### Precedence
+
+- **CLI arguments override config file values.** `--interval` and `--history` win
+  over `interval` and `history`.
+- **Explicit endpoint settings override discovery.** mlxtop reads
+  `~/.config/omlx-coding/server.env` to find a running oMLX server, but a host or
+  port you set under `omx` always wins. Each field resolves on its own, so setting
+  only `omx.port` keeps the discovered host.
+- **Out-of-range `interval` or `history` in the file falls back to the default**
+  and is recorded in the diagnostics log, so a typo in `config.json` cannot stop
+  mlxtop from starting. The same value passed on the command line is still a hard
+  error, because you can see the message straight away.
+- **Nonsensical thresholds are clamped, not rejected.** Percentages are held to
+  0–100, a critical level is never allowed below its warning level, and a
+  hysteresis exit is never allowed above the level that turns the state on, so a
+  stray value cannot silently remove a severity band. A config file that fails to
+  parse is logged to the diagnostics log and ignored in full.
+
 ## Usage
 
 You should see live memory and GPU readings as soon as the dashboard opens.
