@@ -433,8 +433,9 @@ do not establish that successive requests belong to the same tool loop.
 ### Runtime detection and endpoint references
 
 Process detection includes Python's `-m mlx_lm.server`, `KoboldCpp.py`, `local-ai`,
-LM Studio desktop/engine paths and its `llmster` daemon. If several runtimes are
-running, use `MLXTOP_PROVIDER` to choose which provider supplies telemetry.
+LM Studio desktop/engine paths, its `llmster` daemon, and the Bionic app executable
+(`Bionic.app/Contents/MacOS/Bionic`). Bionic is labeled as LM Studio. If several
+runtimes are running, use `MLXTOP_PROVIDER` to choose which provider supplies telemetry.
 Detection alone does not expose request tokens from process memory.
 
 The adapters follow the upstream [llama-server monitoring API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)

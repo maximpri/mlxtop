@@ -6252,11 +6252,22 @@ fn process_provider(name: &str, command: &str) -> Option<String> {
         .filter(|token| !token.contains("mlxtop"))
         .collect();
     let has = |marker: &str| candidates.iter().any(|token| token.contains(marker));
+    // Bionic uses LM Studio's runtime but has a different app executable name.
+    // Match the executable's bundle path, not unrelated uses of "bionic".
+    let is_bionic = std::iter::once(name)
+        .chain(command_tokens.first().copied())
+        .any(|token| {
+            token
+                .trim_matches(['"', '\''])
+                .to_ascii_lowercase()
+                .ends_with("/bionic.app/contents/macos/bionic")
+        });
     // LM Studio can host a llama-server worker; retain the owning runtime.
     let provider = if has("lmstudio")
         || has("llmster")
         || prefix.contains("lm studio")
         || prefix.contains(".lmstudio/")
+        || is_bionic
     {
         "LM Studio"
     } else if has("omlx") {
@@ -8683,6 +8694,49 @@ mod tests {
         }
         assert!(!is_llm_process("python", "python client.py --model ollama"));
         assert!(!is_llm_process("mlxtop", "mlxtop --help"));
+    }
+
+    #[test]
+    fn detects_bionic_and_lmstudio_helpers_with_resource_totals() {
+        let snapshot = parse_processes(
+            "101 4096 12.5 0.1 S 0 Bionic /Applications/Bionic.app/Contents/MacOS/Bionic\n\
+             102 2048 2.0 0.1 S 0 lmlink-connector /Users/test/.lmstudio/extensions/frameworks/lmlink-connector-test/lmlink-connector\n\
+             103 1024 0.5 0.1 S 0 node /Users/test/.lmstudio/.internal/utils/node script.js --lmstudio-window-key=test",
+        );
+        assert_eq!(snapshot.provider.as_deref(), Some("LM Studio"));
+        assert_eq!(snapshot.llm_count, 3);
+        assert_eq!(snapshot.llm_rss, 7168 * 1024);
+        assert_eq!(snapshot.llm_cpu, 15.0);
+        assert_eq!(snapshot.llm_processes.len(), 3);
+        assert_eq!(snapshot.top_llm.as_ref().unwrap().pid, 101);
+
+        // The app is enough to detect LM Studio even without its helpers.
+        for (name, command) in [
+            ("Bionic", "/Applications/Bionic.app/Contents/MacOS/Bionic"),
+            (
+                "Bionic",
+                "/Users/test/Applications/Bionic.app/Contents/MacOS/Bionic --some-option",
+            ),
+        ] {
+            let snapshot = parse_processes(&format!("101 4096 12.5 0.1 S 0 {name} {command}"));
+            assert_eq!(snapshot.provider.as_deref(), Some("LM Studio"));
+            assert_eq!(snapshot.llm_count, 1);
+        }
+    }
+
+    #[test]
+    fn bionic_detection_does_not_match_unrelated_names_or_arguments() {
+        for (name, command) in [
+            ("bionic", "/usr/local/bin/bionic"),
+            ("python", "python bionic.py"),
+            ("cat", "cat /Applications/Bionic.app/Contents/MacOS/Bionic"),
+            (
+                "Bionic-tools",
+                "/Applications/Bionic.app/Contents/MacOS/Bionic-tools",
+            ),
+        ] {
+            assert!(!is_llm_process(name, command), "{command}");
+        }
     }
 
     #[test]

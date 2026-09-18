@@ -206,7 +206,7 @@ as unavailable. Build from source with `cargo install --path . --locked`.
 | oMLX | Models, processes, prompt and response speed, requests, cache activity, and extra memory counters when available |
 | llama.cpp / llama-server | Active slots and summed output counts; average rates and active/deferred queue counts when `/metrics` is enabled. Optional usage file adds full prompt history alongside native polling. |
 | KoboldCpp | Last reported input/output counts and rates through `/api/extra/perf` |
-| MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints and LM Studio's `llmster`); completed request counts through an optional client-written usage file |
+| MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints, LM Studio's `llmster`, and the Bionic app); completed request counts through an optional client-written usage file |
 
 Overview integrates prompt load with generation and prefill on wide terminals.
 It shows the latest count, change from the previous observed request, freshness,
