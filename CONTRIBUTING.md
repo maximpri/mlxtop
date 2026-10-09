@@ -77,15 +77,20 @@ Update the package version in `Cargo.toml` and the `mlxtop` entry in
 The CLI and dashboard obtain their version from Cargo. Rebuild with
 `cargo build --locked` and check `./target/debug/mlxtop --version`.
 
-Use matching Git tags such as `v1.1.2-rc.1` when publishing; RC tags become
-GitHub prereleases. The README links and `scripts/install.sh` follow GitHub's
-latest release, which never includes prereleases, so they need no per-release
-edits.
+Build and test candidates on your own machine: `python3 scripts/rc.py push
+HOST` builds a native RC locally, stages it on a matching remote test host
+(for example an Apple Silicon Mac running the runtime under test) and leaves
+stable installs untouched; `python3 scripts/rc.py run HOST` opens it there.
+See [Private RC testing over SSH](docs/USER_GUIDE.md#private-rc-testing-over-ssh).
+Candidates get no Git tag and no GitHub release; only final versions are
+tagged and built on GitHub-hosted runners. The README links and
+`scripts/install.sh` follow GitHub's latest release, so they need no
+per-release edits.
 
 ## Publishing a release
 
-GitHub-hosted runners build every release asset; nothing is built on a
-maintainer's machine.
+GitHub-hosted runners build every final release asset; release candidates
+stay local (see above).
 
 1. Update the version in `Cargo.toml` and `Cargo.lock`, add a
    `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md`, and merge the change
@@ -102,7 +107,8 @@ maintainer's machine.
    license texts once for all targets, `scripts/package-release.sh` assembles
    each archive with `BUILD-INFO.json`, and one `SHA256SUMS` covers all four
    downloads. The workflow creates a **draft** release whose notes start from
-   the version's changelog section.
+   the version's changelog section. Only `vX.Y.Z` tags trigger it; RC tags
+   such as `vX.Y.Z-rc.N` do not.
 4. Review the draft's notes and assets, then publish it:
 
    ~~~sh
