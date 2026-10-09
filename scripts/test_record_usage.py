@@ -10,7 +10,7 @@ from record_usage import append_usage, usage_record
 
 class UsageWriterTests(unittest.TestCase):
     def test_all_runtimes_and_response_content_is_excluded(self):
-        for provider in ("omlx", "mlx_lm.server", "llama-server", "koboldcpp", "localai", "vllm", "sglang", "jan", "gpt4all"):
+        for provider in ("omlx", "mlx_lm.server", "llama-server", "koboldcpp", "localai", "vllm", "sglang", "jan", "gpt4all", "mlx-serve"):
             response = {"usage": {"prompt_tokens": 1024, "completion_tokens": 12},
                         "messages": ["private"], "choices": ["secret"], "api_key": "key"}
             record = usage_record(provider, response, request_id="req-1", observed_at=1700000000)

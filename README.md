@@ -285,6 +285,7 @@ build from source with `cargo install --path . --locked`.
 | Ollama | Loaded models, resident VRAM and context capacity from `/api/ps`; completed counts and decode speed through the usage recorder |
 | LM Studio / llmster | Loaded instances and context capacity from native APIs, with older API fallback; completed counts, speed and first-token timing through the usage recorder |
 | vLLM, SGLang | Prometheus active/waiting queues, sampled server token rates, cache statistics, KV occupancy and cumulative mean first-token timing |
+| mlx-serve | Prometheus active/waiting queues, live generation rate (running requests included), prefill rate and progress while a prompt is being processed, prefix-token cache reuse and MLX memory; the model and each running request's prompt, cached and output counts from `/metrics.json`. Start the server with `--metrics`. |
 | MLX-LM, LocalAI, Jan, GPT4All | Process detection and available-model catalogue; completed request counts and explicitly supplied timing through the usage recorder |
 
 Provider URLs, bearer authentication, default ports and client setup are covered

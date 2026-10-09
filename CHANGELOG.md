@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add mlx-serve (`MLXTOP_PROVIDER=mlx-serve`, default port 11234) with process
+  detection. It polls `/metrics` for queues, a live generation rate that counts
+  tokens of requests still running, a prefill rate that follows the prompt being
+  processed now, interval and cumulative cache reuse, and MLX active memory. It reads
+  `/metrics.json` for the model and the running requests' prompt, cached and
+  output counts; sessions that only hold a prefix cache are not listed. The
+  server needs `--metrics`, and an API key goes in `MLXTOP_PROVIDER_API_KEY`.
+
 ## 2.1.1 — 2026-10-09
 
 Stable release of the 2.1 candidates below (2.1.0-rc.1 through rc.5).

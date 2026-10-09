@@ -907,3 +907,75 @@ fn recorder_only_reports_usage_without_claiming_an_api_connection() {
     assert!(adapter.report().usage.contains("no valid"));
     assert!(!adapter.report().failed());
 }
+
+#[test]
+fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let start = Arc::new(Mutex::new(1_700_000_000_u64));
+    let (log, boot) = (paths.clone(), start.clone());
+    let server = thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = [0; 2048];
+            let n = stream.read(&mut bytes).unwrap_or(0);
+            let request = String::from_utf8_lossy(&bytes[..n]).to_string();
+            let Some(path) = request.split_whitespace().nth(1).map(str::to_owned) else {
+                break;
+            };
+            log.lock().unwrap().push(path.clone());
+            let (status, body) = if path == "/metrics" {
+                ("200 OK", format!("vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nprocess_start_time_seconds {}\n", boot.lock().unwrap()))
+            } else {
+                ("404 Not Found", String::new())
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let mut adapter = Adapter {
+        configured: Some("mlx-serve".into()),
+        usage_file: None,
+        selected: Some("mlx-serve".into()),
+        port: Some(port),
+        cached: None,
+        next_poll: Instant::now(),
+        backoff: Duration::from_secs(1),
+        kobold_uptime: None,
+        kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
+    };
+    for _ in 0..3 {
+        adapter.next_poll = Instant::now();
+        assert!(adapter.poll().is_some());
+    }
+    *start.lock().unwrap() += 60; // the server restarted: it may have been upgraded
+    adapter.next_poll = Instant::now();
+    assert!(adapter.poll().is_some());
+    drop(std::net::TcpStream::connect(("127.0.0.1", port)));
+    server.join().unwrap();
+    let json_requests = paths
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| *p == "/metrics.json")
+        .count();
+    assert_eq!(
+        json_requests,
+        2,
+        "one probe, then one more after the restart: {:?}",
+        paths.lock().unwrap()
+    );
+}

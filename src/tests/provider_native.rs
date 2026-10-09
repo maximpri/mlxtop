@@ -55,6 +55,171 @@ fn vllm(generated: u64, prompt: u64) -> String {
     format!("# HELP ignored\nvllm:num_requests_running{{model_name=\"test model\",engine=\"0\"}} 1\nvllm:num_requests_waiting 2\nvllm:generation_tokens_total{{model_name=\"test model\"}} {generated}\nvllm:prompt_tokens_total{{model_name=\"test model\"}} {prompt}\nvllm:kv_cache_usage_perc 0.25\nvllm:prefix_cache_queries_total 100\nvllm:prefix_cache_hits_total 60\nvllm:time_to_first_token_seconds_sum 4\nvllm:time_to_first_token_seconds_count 2\n")
 }
 
+/// `prefill` is the finished-prefill total, which only moves when a request ends;
+/// `in_flight` is the live gauge for the prefill running now.
+fn mlx_serve(live: u64, prefill: u64, cached: u64, in_flight: u64) -> String {
+    format!("# HELP ignored\nvllm:num_requests_running 2\nvllm:num_requests_waiting 1\nvllm:generation_tokens_total 7\nvllm:prompt_tokens_total {}\nmlx_serve:generation_tokens_live {live}\nmlx_serve:prefill_tokens_total {prefill}\nmlx_serve:prefill_tokens_live {in_flight}\nmlx_serve:prefill_tokens_expected 1000\nmlx_serve:requests_prefilling {}\nmlx_serve:prefix_cache_tokens_total {cached}\nmlx_serve:mlx_active_bytes 4096\n", prefill + cached, u8::from(in_flight > 0))
+}
+
+/// Only the prefill series: the live gauge, whether a request is prefilling, and the finished-request counters.
+fn mlx_serve_prefill(live: u64, prefilling: bool, tokens: u64, seconds: f64) -> String {
+    format!("vllm:num_requests_running 1\nmlx_serve:generation_tokens_live 0\nmlx_serve:prefill_tokens_live {live}\nmlx_serve:requests_prefilling {}\nmlx_serve:prefill_tokens_total {tokens}\nvllm:request_prefill_time_seconds_sum {seconds}\n", u8::from(prefilling))
+}
+
+#[test]
+fn mlx_serve_rates_come_from_the_live_series() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let first = history
+        .observe("mlx-serve", &mlx_serve(1000, 400, 1600, 100), now)
+        .unwrap();
+    assert_eq!(first.provider.as_deref(), Some("mlx-serve"));
+    assert_eq!(
+        (first.active_requests, first.waiting_requests),
+        (Some(2), Some(1))
+    );
+    assert_eq!((first.generation_tps, first.prefill_tps), (None, None));
+    assert_eq!(first.prefix_hit_rate, Some(80.0));
+    assert_eq!(first.model_memory, Some(4096));
+    assert!(first
+        .details
+        .as_deref()
+        .unwrap()
+        .contains("prefill 100 / 1000 tokens (10%)"));
+    let second = history
+        .observe(
+            "mlx-serve",
+            &mlx_serve(1300, 400, 1600, 300),
+            now + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(second.generation_tps, Some(150.0));
+    assert_eq!(second.prefill_tps, Some(100.0));
+    assert!(second.generation_tps_live && second.prefill_tps_live);
+    let restart = history
+        .observe(
+            "mlx-serve",
+            &mlx_serve(5, 5, 5, 5),
+            now + Duration::from_secs(3),
+        )
+        .unwrap();
+    assert_eq!(restart.generation_tps, None);
+    assert_eq!(restart.prefill_tps, None, "a restart clears the window");
+}
+
+#[test]
+fn a_long_prefill_reads_its_average_speed_not_the_chunk_size() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let (mut live, mut rate) = (0, None);
+    for second in 0..12_u64 {
+        // The gauge gains one 8192-token chunk every other second, like the server's.
+        if second % 2 == 1 {
+            live += 8192;
+        }
+        let text = mlx_serve_prefill(live, true, 100, 1.0);
+        rate = history
+            .observe("mlx-serve", &text, now + Duration::from_secs(second))
+            .unwrap()
+            .prefill_tps;
+    }
+    let rate = rate.unwrap();
+    assert!(
+        (3500.0..4700.0).contains(&rate),
+        "{rate}: one second would read 0, 8192 or 16384"
+    );
+}
+
+#[test]
+fn a_prefill_that_ends_between_polls_shows_briefly_as_a_last_sample_and_then_reads_zero() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let mut poll = |second: u64, tokens: u64, seconds: f64| {
+        let text = mlx_serve_prefill(0, false, tokens, seconds).replace("running 1", "running 0");
+        let result = history
+            .observe("mlx-serve", &text, now + Duration::from_secs(second))
+            .unwrap();
+        (result.prefill_tps, result.prefill_tps_live)
+    };
+    assert_eq!(poll(0, 0, 0.0), (None, false));
+    assert_eq!(poll(1, 0, 0.0), (Some(0.0), true));
+    let (rate, live) = poll(2, 500, 0.15);
+    assert!(
+        (rate.unwrap() - 3333.33).abs() < 1.0 && !live,
+        "a finished request's speed is not live"
+    );
+    let (rate, live) = poll(4, 500, 0.15);
+    assert!(rate.unwrap() > 3000.0 && !live, "still held two seconds on");
+    assert_eq!(poll(7, 500, 0.15), (Some(0.0), true), "gone after the hold");
+}
+
+#[test]
+fn an_idle_server_reads_a_live_zero_after_a_long_gap_too() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    for second in 0..3_u64 {
+        let text = mlx_serve_prefill(0, false, 100, 1.0);
+        let result = history
+            .observe("mlx-serve", &text, now + Duration::from_secs(second))
+            .unwrap();
+        let expected = if second == 0 {
+            (None, false)
+        } else {
+            (Some(0.0), true)
+        };
+        assert_eq!((result.prefill_tps, result.prefill_tps_live), expected);
+    }
+    let text = mlx_serve_prefill(0, false, 100, 1.0);
+    let later = history
+        .observe("mlx-serve", &text, now + Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(
+        (later.prefill_tps, later.prefill_tps_live),
+        (Some(0.0), true)
+    );
+}
+
+#[test]
+fn mlx_serve_sessions_name_the_model_and_list_only_running_requests() {
+    let now = SystemTime::now();
+    let mut result = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut result,
+        &json!({"sessions":[
+            {"model":"Qwen", "phase":"decode", "context_tokens":1500, "generated_tokens":300, "cached_tokens":1000, "request_id":7},
+            {"model":"Qwen", "phase":"prefill", "context_tokens":900, "generated_tokens":0, "cached_tokens":0},
+            {"model":"Qwen", "phase":"cached", "context_tokens":50000, "generated_tokens":0, "cached_tokens":50000}
+        ]}),
+        now,
+    );
+    assert_eq!(result.model.as_deref(), Some("Qwen"));
+    let requests = &result.requests;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].id, "7");
+    assert_eq!(
+        (requests[0].prompt, requests[0].cached, requests[0].output),
+        (1200, Some(1000), Some(300))
+    );
+    assert_eq!(requests[1].id, "slot-1");
+    assert!(requests
+        .iter()
+        .all(|r| !r.completed && r.provider == "mlx-serve"));
+    assert_eq!(
+        result.prompt_tokens, None,
+        "two requests: no single-request totals"
+    );
+    let mut one = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut one,
+        &json!({"sessions":[{"phase":"decode","context_tokens":50,"generated_tokens":20}]}),
+        now,
+    );
+    assert_eq!((one.prompt_tokens, one.output_tokens), (Some(30), Some(20)));
+    let mut none = LlmTelemetry::default();
+    apply_mlx_serve_sessions(&mut none, &json!({}), now);
+    assert!(none.requests.is_empty() && none.model.is_none());
+}
+
 #[test]
 fn prometheus_rates_need_two_fresh_matching_counter_sets() {
     let now = Instant::now();
@@ -311,4 +476,119 @@ fn http_errors_redirects_and_oversized_bodies_never_become_telemetry() {
         assert!(Endpoint::default().get(port, "/models").is_err());
         server.join().unwrap();
     }
+}
+
+fn poll_at(
+    history: &mut MetricsHistory,
+    now: Instant,
+    second: u64,
+    text: &str,
+) -> (Option<f64>, bool) {
+    let r = history
+        .observe("mlx-serve", text, now + Duration::from_secs(second))
+        .unwrap();
+    (r.prefill_tps, r.prefill_tps_live)
+}
+
+#[test]
+fn mlx_serve_prefill_is_not_live_once_the_prefill_ends() {
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    for (t, live) in [(0, 0), (1, 4096), (2, 8192), (3, 12288), (4, 16384)] {
+        poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
+    }
+    for t in 5..=15 {
+        let (rate, live) = poll_at(&mut h, now, t, &mlx_serve_prefill(0, false, 0, 0.0));
+        assert!(
+            !(live && rate.unwrap_or(0.0) > 0.0),
+            "t={t}: {rate:?} still live"
+        );
+    }
+}
+
+#[test]
+fn mlx_serve_slow_chunked_prefill_reads_its_true_speed() {
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    // 512 tok/s: an 8192-token chunk lands every 16 s, polled every second.
+    for t in 0..48_u64 {
+        let live = (t / 16) * 8192;
+        let (rate, is_live) = poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
+        match rate {
+            Some(rate) => assert!(is_live && (460.0..=565.0).contains(&rate), "t={t}: {rate}"),
+            None => assert!(t < 16, "t={t}: no reading once a chunk has landed"),
+        }
+    }
+}
+
+#[test]
+fn mlx_serve_prefill_reading_does_not_reappear_when_a_long_decode_ends() {
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    for (t, live) in [(0, 0), (1, 8192), (2, 16384)] {
+        poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
+    }
+    for t in 3..60 {
+        poll_at(&mut h, now, t, &mlx_serve_prefill(0, false, 0, 0.0));
+    }
+    let (rate, live) = poll_at(&mut h, now, 60, &mlx_serve_prefill(0, false, 16384, 2.0));
+    assert!(
+        live || rate.is_none(),
+        "a stale prefill speed shows at decode end: {rate:?}"
+    );
+}
+
+#[test]
+fn mlx_serve_prefill_rate_ignores_the_raw_gauge_and_missing_series() {
+    // A restart mid-prefill: the first poll has nothing to measure from.
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    poll_at(&mut h, now, 0, &mlx_serve_prefill(0, false, 50_000, 10.0));
+    let (rate, live) = poll_at(&mut h, now, 1, &mlx_serve_prefill(4096, true, 0, 0.0));
+    assert!(!(live && rate.is_some()), "restart reads {rate:?} live");
+    // An older build without the finished-request counters reads like one with them.
+    let full = |live: u64| mlx_serve_prefill(live, true, 0, 0.0);
+    let bare = |live: u64| {
+        format!("vllm:num_requests_running 1\nmlx_serve:generation_tokens_live 0\nmlx_serve:prefill_tokens_live {live}\nmlx_serve:requests_prefilling 1\n")
+    };
+    let (mut with, mut without) = (MetricsHistory::default(), MetricsHistory::default());
+    for (t, live) in [(0, 0), (1, 8192), (2, 8192), (3, 16384)] {
+        assert_eq!(
+            poll_at(&mut with, now, t, &full(live)),
+            poll_at(&mut without, now, t, &bare(live)),
+            "t={t}"
+        );
+    }
+    // No requests_prefilling gauge: a growing prefill is still live.
+    let flagless = |live: u64| {
+        format!("vllm:num_requests_running 1\nmlx_serve:generation_tokens_live 0\nmlx_serve:prefill_tokens_live {live}\nmlx_serve:prefill_tokens_total 0\nvllm:request_prefill_time_seconds_sum 0\n")
+    };
+    let mut h = MetricsHistory::default();
+    let mut last = (None, false);
+    for (t, live) in [(0, 0), (1, 4096), (2, 8192), (3, 12288)] {
+        last = poll_at(&mut h, now, t, &flagless(live));
+    }
+    assert!(last.1 && last.0.is_some_and(|rate| rate > 0.0), "{last:?}");
+}
+
+#[test]
+fn mlx_serve_fallback_ids_follow_the_running_request() {
+    let now = SystemTime::now();
+    let ids = |sessions: Value| {
+        let mut r = LlmTelemetry::default();
+        apply_mlx_serve_sessions(&mut r, &json!({ "sessions": sessions }), now);
+        r.requests.iter().map(|q| q.id.clone()).collect::<Vec<_>>()
+    };
+    let decode = |generated: u64| json!({"phase":"decode","context_tokens":700,"generated_tokens":generated});
+    let cached = json!({"phase":"cached","context_tokens":50000});
+    let with_cached = ids(json!([cached, decode(30), decode(40)]));
+    let evicted = ids(json!([decode(31), decode(41)]));
+    assert_eq!(with_cached.len(), 2);
+    assert_ne!(with_cached[0], with_cached[1]);
+    assert_eq!(
+        with_cached, evicted,
+        "a cached row ahead of a request must not rename it"
+    );
+    // The server's id 0 means "none", not a request named "0".
+    let zero = ids(json!([
+        {"phase":"decode","context_tokens":700,"generated_tokens":3,"request_id":0},
+        {"phase":"decode","context_tokens":900,"generated_tokens":5,"request_id":0}
+    ]));
+    assert_ne!(zero[0], zero[1]);
 }

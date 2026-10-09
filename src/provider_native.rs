@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Native model inventories and Prometheus telemetry. No inference requests.
-use crate::domain::{LlmTelemetry, TelemetrySource};
+use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
 use crate::formatting::bytes;
 use crate::omlx::is_loopback_host;
 use crate::providers::{counter, identifier};
@@ -296,34 +296,214 @@ pub(super) fn metric_sum(text: &str, name: &str) -> Option<f64> {
     Metrics::parse(text).sum(name)
 }
 
+/// How long the speed of a request that just finished stays shown once nothing is prefilling.
+const PREFILL_HOLD: Duration = Duration::from_secs(3);
+
+/// The prefill in flight: where its gauge started, where it last advanced, and where it is now.
+struct PrefillRun {
+    start: (Instant, f64),
+    advanced: (Instant, f64),
+    live: f64,
+}
+
+/// mlx-serve's prefill speed.
+#[derive(Default)]
+struct PrefillWindow {
+    run: Option<PrefillRun>,
+    polled: bool,
+    /// Prompt tokens and prefill seconds of finished requests. Both move only when a request ends.
+    finished: Option<(f64, f64)>,
+    /// When a prefill was last seen in flight.
+    last_prefilling: Option<Instant>,
+    /// Whether the previous poll saw nothing running.
+    was_idle: bool,
+    /// The latest measured speed and when it was taken.
+    last: Option<(f64, Instant)>,
+}
+
+impl PrefillWindow {
+    /// Prefill tokens/s and whether it is live.
+    ///
+    /// The live gauge advances in chunks of thousands of tokens, so a fixed window reads 0 or twice the
+    /// true speed. Instead, while a prefill is in flight, divide its growth since the prefill was first
+    /// seen by the time from then to the gauge's latest advance: that reads the true speed between
+    /// chunks, and nothing until the first chunk lands. Once nothing is prefilling the last speed stays
+    /// shown, not live, for `PREFILL_HOLD`. A request that ends right after a prefill, or after an idle
+    /// poll, replaces it with its own speed from the finished-request counters; one that ends after a
+    /// long decode is not a prefill reading. Otherwise report a live 0.
+    fn rate(&mut self, now: Instant, metrics: &Metrics) -> Option<(f64, bool)> {
+        let live = metrics.sum("mlx_serve:prefill_tokens_live")?;
+        // A server without the flag is prefilling whenever the gauge is above 0.
+        let prefilling = metrics
+            .sum("mlx_serve:requests_prefilling")
+            .map_or(live > 0.0, |n| n > 0.0);
+        let finished = metrics
+            .sum("mlx_serve:prefill_tokens_total")
+            .zip(metrics.sum("vllm:request_prefill_time_seconds_sum"));
+        let idle = !prefilling
+            && metrics
+                .sum("vllm:num_requests_running")
+                .is_some_and(|n| n == 0.0);
+        let was_idle = std::mem::replace(&mut self.was_idle, idle);
+        let polled = std::mem::replace(&mut self.polled, true);
+        let counters = std::mem::replace(&mut self.finished, finished);
+        if prefilling {
+            return self.in_flight(now, live);
+        }
+        self.run = None;
+        let held = |at: Instant| now.saturating_duration_since(at) <= PREFILL_HOLD;
+        if let Some(((tokens, seconds), (old_tokens, old_seconds))) = finished.zip(counters) {
+            let fresh = was_idle || self.last_prefilling.is_some_and(held);
+            if fresh && tokens > old_tokens && seconds > old_seconds {
+                self.last = Some(((tokens - old_tokens) / (seconds - old_seconds), now));
+            }
+        }
+        if let Some((rate, _)) = self.last.filter(|(_, at)| held(*at)) {
+            return Some((rate, false));
+        }
+        polled.then_some((0.0, true))
+    }
+
+    fn in_flight(&mut self, now: Instant, live: f64) -> Option<(f64, bool)> {
+        self.last_prefilling = Some(now);
+        // The gauge falling means that prefill ended and another began.
+        let mut run = self
+            .run
+            .take()
+            .filter(|run| live >= run.live)
+            .unwrap_or(PrefillRun {
+                start: (now, live),
+                advanced: (now, live),
+                live,
+            });
+        if live > run.live {
+            run.advanced = (now, live);
+        }
+        run.live = live;
+        let ((start, from), (advanced, to)) = (run.start, run.advanced);
+        let seconds = advanced.saturating_duration_since(start).as_secs_f64();
+        self.run = Some(run);
+        let rate = (to - from) / seconds;
+        rate.is_finite().then(|| {
+            self.last = Some((rate, now));
+            (rate, true)
+        })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct MetricsHistory {
     previous: Option<(String, Instant, Metrics)>,
+    prefill: PrefillWindow,
+    /// Start time of the mlx-serve process that answered `/metrics.json` with a 404.
+    no_sessions: Option<f64>,
+}
+
+/// The metric names one engine publishes, so `observe` has no per-engine branches.
+struct Series {
+    prefix: &'static str,
+    active: &'static str,
+    waiting: &'static str,
+    kv: &'static str,
+    generation: String,
+    prompt: String,
+    hits: String,
+    queries: String,
+}
+
+fn series(provider: &str) -> Option<Series> {
+    let (prefix, active, waiting, kv) = match provider {
+        "vLLM" | "mlx-serve" => (
+            "vllm",
+            "num_requests_running",
+            "num_requests_waiting",
+            "kv_cache_usage_perc",
+        ),
+        "SGLang" => (
+            "sglang",
+            "num_running_reqs",
+            "num_queue_reqs",
+            "token_usage",
+        ),
+        _ => return None,
+    };
+    let key = |suffix: &str| format!("{prefix}:{suffix}");
+    let mut series = Series {
+        prefix,
+        active,
+        waiting,
+        kv,
+        generation: key("generation_tokens_total"),
+        prompt: key("prompt_tokens_total"),
+        hits: key("prefix_cache_hits_total"),
+        queries: key("prefix_cache_queries_total"),
+    };
+    if provider == "mlx-serve" {
+        // vLLM-named queues, plus its own series for what vLLM's lack: tokens generated so far
+        // by running requests, tokens prefilled so far by the request in flight, and the tokens
+        // restored from the prefix cache (over all prompt tokens).
+        series.generation = "mlx_serve:generation_tokens_live".into();
+        series.prompt = "mlx_serve:prefill_tokens_live".into();
+        series.hits = "mlx_serve:prefix_cache_tokens_total".into();
+        series.queries = key("prompt_tokens_total");
+    }
+    Some(series)
 }
 
 impl MetricsHistory {
+    fn start_time(&self) -> Option<f64> {
+        let (_, _, metrics) = self.previous.as_ref()?;
+        metrics.sum("process_start_time_seconds")
+    }
+
+    /// A build without `/metrics.json` is asked again only after the server restarts.
+    pub fn sessions_known_missing(&self) -> bool {
+        self.no_sessions.is_some() && self.no_sessions == self.start_time()
+    }
+
+    pub fn note_sessions_missing(&mut self) {
+        self.no_sessions = self.start_time();
+    }
+
+    /// What mlx-serve adds to the shared vLLM-shaped result: MLX memory, the prefill rate, and the
+    /// progress of the prefill in flight.
+    fn mlx_serve_extras(
+        &mut self,
+        metrics: &Metrics,
+        details: &mut Vec<String>,
+        result: &mut LlmTelemetry,
+        now: Instant,
+    ) {
+        let done = metrics.sum("mlx_serve:prefill_tokens_live");
+        let expected = metrics.sum("mlx_serve:prefill_tokens_expected");
+        if let Some((done, expected)) = done.zip(expected).filter(|(_, expected)| *expected > 0.0) {
+            details.push(format!(
+                "prefill {done:.0} / {expected:.0} tokens ({:.0}%)",
+                done / expected * 100.0
+            ));
+        }
+        result.model_memory = metrics.count("mlx_serve:mlx_active_bytes");
+        // Always assigned: the generic gauge delta must never stand in for the prefill speed.
+        let (tps, live) = self.prefill.rate(now, metrics).unzip();
+        result.prefill_tps = tps;
+        result.prefill_tps_live = live.unwrap_or(false);
+    }
+
     pub fn observe(&mut self, provider: &str, text: &str, now: Instant) -> Option<LlmTelemetry> {
         let metrics = Metrics::parse(text);
-        let (prefix, active, waiting, kv) = match provider {
-            "vLLM" => (
-                "vllm",
-                "num_requests_running",
-                "num_requests_waiting",
-                "kv_cache_usage_perc",
-            ),
-            "SGLang" => (
-                "sglang",
-                "num_running_reqs",
-                "num_queue_reqs",
-                "token_usage",
-            ),
-            _ => return None,
-        };
+        let Series {
+            prefix,
+            active,
+            waiting,
+            kv,
+            generation,
+            prompt,
+            hits: hits_name,
+            queries: queries_name,
+        } = series(provider)?;
         let key = |suffix: &str| format!("{prefix}:{suffix}");
         let active = metrics.count(&key(active));
         let waiting = metrics.count(&key(waiting));
-        let generation = key("generation_tokens_total");
-        let prompt = key("prompt_tokens_total");
         if active.is_none()
             && waiting.is_none()
             && metrics.sum(&generation).is_none()
@@ -361,8 +541,8 @@ impl MetricsHistory {
             if old_provider == provider && elapsed > 0.0 && elapsed <= 5.0 && same_start {
                 result.generation_tps = metrics.delta(previous, &generation).map(|n| n / elapsed);
                 result.prefill_tps = metrics.delta(previous, &prompt).map(|n| n / elapsed);
-                let queries = metrics.delta(previous, &key("prefix_cache_queries_total"));
-                let hits = metrics.delta(previous, &key("prefix_cache_hits_total"));
+                let queries = metrics.delta(previous, &queries_name);
+                let hits = metrics.delta(previous, &hits_name);
                 result.cache_interval_efficiency = hits
                     .zip(queries)
                     .filter(|(hits, queries)| *queries > 0.0 && hits <= queries)
@@ -378,8 +558,8 @@ impl MetricsHistory {
         {
             details.push(format!("KV occupancy max {:.1}%", usage * 100.0));
         }
-        let hits = metrics.sum(&key("prefix_cache_hits_total"));
-        let queries = metrics.sum(&key("prefix_cache_queries_total"));
+        let hits = metrics.sum(&hits_name);
+        let queries = metrics.sum(&queries_name);
         if let Some((hits, queries)) = hits.zip(queries).filter(|(h, q)| *q > 0.0 && h <= q) {
             result.prefix_hit_rate = Some(hits / queries * 100.0);
             result.cache_efficiency = result.prefix_hit_rate;
@@ -403,9 +583,51 @@ impl MetricsHistory {
                 sum / count * 1000.0
             ));
         }
+        if provider == "mlx-serve" {
+            self.mlx_serve_extras(&metrics, &mut details, &mut result, now);
+        }
         result.details = Some(details.join(" · "));
         self.previous = Some((provider.to_owned(), now, metrics));
         Some(result)
+    }
+}
+
+/// Fill in the model and the live requests from mlx-serve's `/metrics.json` sessions. Sessions that
+/// only hold a prefix cache are not requests and are skipped.
+pub(super) fn apply_mlx_serve_sessions(result: &mut LlmTelemetry, value: &Value, now: SystemTime) {
+    let Some(sessions) = value.get("sessions").and_then(Value::as_array) else {
+        return;
+    };
+    if let Some(model) = sessions.iter().find_map(|s| identifier(s, "model")) {
+        result.model = Some(model);
+    }
+    result.requests = sessions
+        .iter()
+        .filter(|s| matches!(s["phase"].as_str(), Some("prefill" | "decode")))
+        .enumerate()
+        .filter_map(|(index, s)| {
+            let context = counter(s, &["context_tokens"])?;
+            let output = counter(s, &["generated_tokens"])?;
+            Some(RequestUsage {
+                provider: "mlx-serve".into(),
+                model: identifier(s, "model").unwrap_or_default(),
+                // The server's id 0 means none.
+                id: identifier(s, "request_id")
+                    .filter(|id| id != "0")
+                    .unwrap_or_else(|| format!("slot-{index}")),
+                prompt: context.saturating_sub(output),
+                cached: counter(s, &["cached_tokens"]),
+                output: Some(output),
+                output_tps: None,
+                completed: false,
+                ttft_ms: None,
+                observed_at: Some(now),
+            })
+        })
+        .collect();
+    if let [only] = result.requests.as_slice() {
+        result.prompt_tokens = Some(only.prompt);
+        result.output_tokens = only.output;
     }
 }
 

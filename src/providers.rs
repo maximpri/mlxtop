@@ -16,6 +16,7 @@ use std::{env, fs};
 mod native;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
+const MLX_SERVE_PORT: u16 = 11234;
 
 pub(super) fn new_request_summary(
     seen: &mut VecDeque<(String, u64)>,
@@ -249,6 +250,7 @@ fn canonical_provider(name: &str) -> Option<&'static str> {
         "koboldcpp" => Some("KoboldCpp"),
         "localai" => Some("LocalAI"),
         "vllm" => Some("vLLM"),
+        "mlx-serve" | "mlx_serve" | "mlxserve" => Some("mlx-serve"),
         "sglang" => Some("SGLang"),
         "jan" => Some("Jan"),
         "gpt4all" => Some("GPT4All"),
@@ -384,6 +386,7 @@ impl Adapter {
                     let body = self.get(port, "/metrics");
                     body.and_then(|body| self.metrics.observe(provider, &body, now))
                 }
+                Some("mlx-serve") => self.poll_mlx_serve(now),
                 Some("Ollama") => self
                     .get_json(11434, "/api/ps")
                     .and_then(|value| native::ollama(&value)),
@@ -463,6 +466,34 @@ impl Adapter {
             path,
             serde_json::from_str(&body).map_err(|_| ProbeIssue::InvalidResponse),
         )
+    }
+
+    /// mlx-serve: Prometheus counters for rates and queues, and `/metrics.json`
+    /// for the model and the live requests. Both need `--metrics`; the second is
+    /// optional so an older server still reports rates.
+    fn poll_mlx_serve(&mut self, now: Instant) -> Option<LlmTelemetry> {
+        let body = self.get(MLX_SERVE_PORT, "/metrics")?;
+        let mut result = self.metrics.observe("mlx-serve", &body, now)?;
+        if self.metrics.sessions_known_missing() {
+            return Some(result);
+        }
+        let reply = self
+            .endpoint
+            .get(self.port.unwrap_or(MLX_SERVE_PORT), "/metrics.json");
+        if matches!(reply, Err(ProbeIssue::Http(404))) {
+            self.metrics.note_sessions_missing();
+        }
+        let mut diagnostics = self.diagnostics.borrow_mut();
+        let value = diagnostics.record("/metrics.json", reply).and_then(|body| {
+            diagnostics.record(
+                "/metrics.json",
+                serde_json::from_str(&body).map_err(|_| ProbeIssue::InvalidResponse),
+            )
+        });
+        if let Some(value) = value {
+            native::apply_mlx_serve_sessions(&mut result, &value, SystemTime::now());
+        }
+        Some(result)
     }
 
     fn poll_models(&self, provider: &str, port: u16) -> Option<LlmTelemetry> {

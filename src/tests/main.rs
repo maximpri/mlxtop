@@ -2201,6 +2201,11 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             "LM Studio",
         ),
         ("local-ai", "local-ai run", "LocalAI"),
+        (
+            "mlx-serve",
+            "/home/user/.local/bin/mlx-serve --serve --port 11234",
+            "mlx-serve",
+        ),
     ] {
         assert!(is_llm_process(name, command), "{command}");
         assert_eq!(
@@ -2213,6 +2218,16 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
     }
     assert!(!is_llm_process("python", "python client.py --model ollama"));
     assert!(!is_llm_process("mlxtop", "mlxtop --help"));
+    for (name, command) in [
+        ("mlx-server", "/usr/local/bin/mlx-server --port 8080"),
+        ("python3", "python3 -m mlx_server --port 8080"),
+    ] {
+        assert_ne!(
+            process_provider(name, command).as_deref(),
+            Some("mlx-serve"),
+            "{command}"
+        );
+    }
 }
 
 #[test]

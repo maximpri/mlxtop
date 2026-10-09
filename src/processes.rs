@@ -192,6 +192,8 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         "Jan"
     } else if has("llamaserver") || has("llamacpp") {
         "llama.cpp"
+    } else if candidates.iter().any(|token| token == "mlxserve") {
+        "mlx-serve"
     } else if has("mlxlm") {
         "mlx-lm"
     } else {

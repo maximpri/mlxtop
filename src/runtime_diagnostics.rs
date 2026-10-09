@@ -388,6 +388,14 @@ fn capabilities(provider: &str) -> Vec<Capability> {
             "client recorder",
             "native aggregate / client recorder",
         ),
+        "mlx-serve" => (
+            "native /metrics.json model",
+            "native live rate of running requests",
+            "native live prompt gauge (advances in chunks)",
+            "native running / waiting",
+            "native /metrics.json running requests",
+            "native interval / cumulative",
+        ),
         "mlx-lm" | "LocalAI" | "Jan" | "GPT4All" => (
             "native available-model catalogue",
             "client recorder",
@@ -417,9 +425,10 @@ fn setup(provider: &str) -> &'static [&'static str] {
         "oMLX" => &["Endpoint: ~/.config/mlxtop/config.json → omx.host / omx.port, or discovered oMLX server.env.", "Admin statistics require the existing oMLX API key configuration; health alone supplies partial monitoring.", "See docs/USER_GUIDE.md#omlx-telemetry for monitoring credentials."],
         "llama.cpp" => &["Enable the server's --metrics endpoint; /slots and /metrics can work independently.", "Select with MLXTOP_PROVIDER=llama.cpp; set MLXTOP_PROVIDER_PORT for a custom port.", "For full request history, integrate the client usage recorder and set MLXTOP_USAGE_FILE to its JSONL file."],
         "vLLM" | "SGLang" => &["Expose /metrics (SGLang requires --enable-metrics); rates need two matching counter samples.", "Set MLXTOP_PROVIDER=vllm or MLXTOP_PROVIDER=sglang and MLXTOP_PROVIDER_URL for a custom server root.", "Aggregate first-token timing is not individual request latency; request history requires client recording."],
+        "mlx-serve" => &["Start mlx-serve with --metrics; mlxtop reads /metrics for rates and queues and /metrics.json for running requests.", "Select with MLXTOP_PROVIDER=mlx-serve (default port 11234); set MLXTOP_PROVIDER_PORT for a custom port.", "Bearer keys use MLXTOP_PROVIDER_API_KEY. Sessions that only hold a prefix cache are not listed as requests."],
         "KoboldCpp" => &["Enable the local server and check /api/extra/perf; it describes the last result, not a live request.", "Select with MLXTOP_PROVIDER=koboldcpp; set MLXTOP_PROVIDER_PORT for a custom port."],
         "Ollama" | "LM Studio" | "mlx-lm" | "LocalAI" | "Jan" | "GPT4All" => &["Enable the runtime's local API server and select it with MLXTOP_PROVIDER.", "Use MLXTOP_PROVIDER_PORT or MLXTOP_PROVIDER_URL for a custom endpoint; bearer keys use MLXTOP_PROVIDER_API_KEY.", "Integrate scripts/record_usage.py in the calling client so completed responses write counters to a JSONL file.", "Set MLXTOP_USAGE_FILE=/absolute/path/usage.jsonl when starting mlxtop. This variable alone does not record requests.", "Recorder setup: https://github.com/maximpri/mlxtop/blob/main/docs/USER_GUIDE.md#client-reported-usage-file"],
-        _ => &["Start a supported runtime, or select an existing server with MLXTOP_PROVIDER.", "Providers: omlx, ollama, lmstudio, llama.cpp, koboldcpp, mlx-lm, localai, vllm, sglang, jan, gpt4all.", "Example: MLXTOP_PROVIDER=ollama mlxtop doctor. Monitoring never sends inference requests."],
+        _ => &["Start a supported runtime, or select an existing server with MLXTOP_PROVIDER.", "Providers: omlx, ollama, lmstudio, llama.cpp, koboldcpp, mlx-lm, mlx-serve, localai, vllm, sglang, jan, gpt4all.", "Example: MLXTOP_PROVIDER=ollama mlxtop doctor. Monitoring never sends inference requests."],
     }
 }
 
@@ -441,6 +450,7 @@ pub(crate) fn default_port(provider: Option<&str>) -> u16 {
         Some("KoboldCpp") => 5001,
         Some("vLLM") => 8000,
         Some("SGLang") => 30000,
+        Some("mlx-serve") => 11234,
         Some("Jan") => 6767,
         Some("GPT4All") => 4891,
         _ => 8080,

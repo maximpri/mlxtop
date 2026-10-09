@@ -547,6 +547,7 @@ sessions to monitor independent endpoints concurrently.
 | `sglang` | 30000 | `/metrics` (requires `--enable-metrics`) |
 | `llama.cpp` | 8080 | `/slots`, `/metrics` (requires `--metrics`) |
 | `koboldcpp` | 5001 | `/api/extra/perf` |
+| `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
 | `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
@@ -615,6 +616,17 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   Top shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
+- **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
+  `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
+  one entry per running request (prompt, cached and output counts; cache-only sessions
+  are skipped). Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
+  includes tokens of requests still running. Prefill rate is the growth of
+  `mlx_serve:prefill_tokens_live` since the prefill was first seen, over the time to its
+  latest advance, because the gauge moves in coarse chunks; it shows nothing until the
+  first chunk lands and is live only while a prefill is running. The last speed stays
+  shown, not live, for three seconds, replaced by the finished request's own speed when
+  it ends inside that time. A server without `/metrics.json` is asked once per restart. Cache reuse is tokens
+  restored from the prefix cache over all prompt tokens. Sampling follows the vLLM rules.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
@@ -649,7 +661,7 @@ optional. Example shape (replace the timestamp with the completion time):
 
 Supported provider names: `omlx`, `mlx-lm` (also `mlx_lm.server`), `ollama`,
 `llama.cpp` (also `llama-server`), `lmstudio` (also `LM Studio`), `koboldcpp`,
-`localai`, `vllm`, `sglang`, `jan`, and `gpt4all`.
+`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, and `mlx-serve`.
 
 Copy only usage counters from the response, with the required envelope above:
 
