@@ -8,7 +8,7 @@ in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, vLLM or
 SGLang, you can also follow generation speed and request activity as your model
 responds.
 
-![mlxtop Overview prioritizing memory pressure and paging, with token rates and a readable recent Journal](docs/screenshots/overview.png)
+![mlxtop 2.1.1 Overview on Apple Silicon: memory pressure with RAM composition, compression and paging first, then prompt load and a compact throughput row, colored by threshold](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
