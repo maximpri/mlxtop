@@ -16,7 +16,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 python3 -m unittest discover -s scripts -p 'test_*.py'
-shellcheck scripts/cicd.sh scripts/coverage.sh scripts/install.sh scripts/package-dmg.sh
+shellcheck scripts/cicd.sh scripts/coverage.sh scripts/install.sh scripts/package-dmg.sh scripts/package-release.sh
 cargo build --release --locked
 ~~~
 
@@ -77,12 +77,58 @@ Update the package version in `Cargo.toml` and the `mlxtop` entry in
 The CLI and dashboard obtain their version from Cargo. Rebuild with
 `cargo build --locked` and check `./target/debug/mlxtop --version`.
 
-Use matching Git tags such as `v1.1.2-rc.1` when publishing and mark GitHub
-RC releases as prereleases. `scripts/package-dmg.sh` accepts both final and
-RC versions and uses the full version in the package and artifact names.
-The README links and `scripts/install.sh` follow GitHub's latest release,
-which never includes prereleases, so they need no per-release edits. Attach
-each platform's download and one `SHA256SUMS` covering all of them.
+Use matching Git tags such as `v1.1.2-rc.1` when publishing; RC tags become
+GitHub prereleases. The README links and `scripts/install.sh` follow GitHub's
+latest release, which never includes prereleases, so they need no per-release
+edits.
+
+## Publishing a release
+
+GitHub-hosted runners build every release asset; nothing is built on a
+maintainer's machine.
+
+1. Update the version in `Cargo.toml` and `Cargo.lock`, add a
+   `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md`, and merge the change
+   through a pull request.
+2. Tag the merge commit on `main` and push the tag:
+
+   ~~~sh
+   git tag -a vX.Y.Z -m "mlxtop X.Y.Z" && git push origin vX.Y.Z
+   ~~~
+
+3. The `Release` workflow tests and builds on native runners: the Apple
+   Silicon macOS archive and DMG installer, and static musl archives for Linux
+   x86_64 and ARM64. `scripts/collect_licenses.py` bundles the dependency
+   license texts once for all targets, `scripts/package-release.sh` assembles
+   each archive with `BUILD-INFO.json`, and one `SHA256SUMS` covers all four
+   downloads. The workflow creates a **draft** release whose notes start from
+   the version's changelog section.
+4. Review the draft's notes and assets, then publish it:
+
+   ~~~sh
+   gh release edit vX.Y.Z --draft=false --latest
+   ~~~
+
+Pull requests that change the workflow or packaging scripts run the same
+builds without publishing; the assets are attached to the run as artifacts.
+
+Deploy a published or draft release to a test host with
+`scripts/cicd.sh --release vX.Y.Z --host HOST`. It picks the archive for the
+host's platform and verifies it against `SHA256SUMS` before installing.
+
+### Homebrew
+
+The [maximpri/tap](https://github.com/maximpri/homebrew-tap) formula installs
+with `brew install maximpri/tap/mlxtop`. After a release, open a version bump
+on the tap, let its CI build bottles, then publish them:
+
+~~~sh
+brew bump-formula-pr --url https://github.com/maximpri/mlxtop/archive/refs/tags/vX.Y.Z.tar.gz maximpri/tap/mlxtop
+gh workflow run publish.yml --repo maximpri/homebrew-tap -f pull_request=PR_NUMBER
+~~~
+
+`packaging/homebrew-core/` holds the formula and steps for submitting to
+homebrew-core.
 
 ## Source layout
 

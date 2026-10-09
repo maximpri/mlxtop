@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 # shellcheck disable=SC2029
-# Build and deploy this repository to a remote machine over SSH.
+# Build and deploy this repository to a remote machine over SSH, or deploy a
+# release that GitHub-hosted runners built (--release TAG).
 #
 # A release is unpacked and built in a private staging directory first. The
 # stable "current" symlink is changed only after the build and health check
@@ -33,6 +34,8 @@ known_hosts_file="${SSH_KNOWN_HOSTS:-}"
 strict_host_key_checking="${SSH_STRICT_HOST_KEY_CHECKING:-accept-new}"
 keep_releases="${KEEP_RELEASES:-5}"
 build_on_remote="${BUILD_ON_REMOTE:-1}"
+release_tag="${RELEASE_TAG:-}"
+release_repo="${RELEASE_REPO:-maximpri/mlxtop}"
 restart_command="${RESTART_COMMAND:-}"
 healthcheck_command="${HEALTHCHECK_COMMAND:-}"
 dry_run=0
@@ -55,6 +58,8 @@ Environment:
   SSH_STRICT_HOST_KEY_CHECKING  SSH policy (default: accept-new)
   KEEP_RELEASES                 Number of releases to retain (default: 5)
   BUILD_ON_REMOTE               Build on target, 1 or 0 (default: 1)
+  RELEASE_TAG                   Deploy this GitHub release instead of building
+  RELEASE_REPO                  Repository for RELEASE_TAG (default: maximpri/mlxtop)
   RESTART_COMMAND               Optional command run from the current release
   HEALTHCHECK_COMMAND           Optional command run after restart
 
@@ -63,6 +68,7 @@ Examples:
   REMOTE_HOST=10.0.0.12 SSH_KEY="$HOME/.ssh/deploy" scripts/cicd.sh
   REMOTE_HOST=mac.example.com \
     RESTART_COMMAND='systemctl --user restart mlxtop' scripts/cicd.sh
+  REMOTE_HOST=10.0.0.12 scripts/cicd.sh --release v2.1.1
 
 Options:
   --host HOST                   Override REMOTE_HOST
@@ -72,6 +78,8 @@ Options:
   --ssh-key PATH                Override SSH_KEY
   --keep-releases N             Override KEEP_RELEASES
   --skip-build                  Use target/release/mlxtop from this checkout
+  --release TAG                 Deploy the GitHub-runner build of release TAG for
+                                the remote platform, verified against SHA256SUMS
   --no-healthcheck              Skip the post-deploy health check
   --restart COMMAND             Override RESTART_COMMAND
   --healthcheck COMMAND         Override HEALTHCHECK_COMMAND
@@ -147,6 +155,11 @@ while (($#)); do
       build_on_remote=0
       shift
       ;;
+    --release)
+      (($# >= 2)) || die "--release requires a tag"
+      release_tag="$2"
+      shift 2
+      ;;
     --no-healthcheck)
       healthcheck_command=:
       shift
@@ -192,7 +205,13 @@ for path in "${DEPLOY_PATHS[@]}"; do
     die "deploy path does not exist: $path"
 done
 
-if ((build_on_remote == 0)); then
+if [[ -n "$release_tag" ]]; then
+  [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
+    die "--release expects a tag such as v2.1.1 or v2.2.0-rc.1"
+  reject_whitespace RELEASE_REPO "$release_repo"
+  # A release deploys a prebuilt binary; never build on the remote.
+  build_on_remote=0
+elif ((build_on_remote == 0)); then
   [[ -x "$PROJECT_ROOT/target/release/mlxtop" ]] ||
     die "--skip-build requires target/release/mlxtop; run cargo build --release first"
 fi
@@ -231,6 +250,9 @@ log "release: $release_id"
 log "target: $remote_target"
 log "remote root: $remote_dir"
 log "build on remote: $build_on_remote"
+if [[ -n "$release_tag" ]]; then
+  log "release: $release_repo $release_tag (built on GitHub runners)"
+fi
 if ((dry_run)); then
   log "dry run: no files were transferred"
   exit 0
@@ -239,8 +261,12 @@ fi
 archive="$(mktemp "${TMPDIR:-/tmp}/mlxtop-deploy.XXXXXX.tar.gz")"
 remote_prepare_output="$(mktemp "${TMPDIR:-/tmp}/mlxtop-remote.XXXXXX")"
 remote_upload_dir=""
+download_dir=""
 cleanup() {
   rm -f "$archive"
+  if [[ -n "$download_dir" ]]; then
+    rm -rf "$download_dir"
+  fi
   if [[ -n "$remote_prepare_output" ]]; then
     rm -f "$remote_prepare_output"
   fi
@@ -254,7 +280,56 @@ REMOTE_CLEANUP
 }
 trap cleanup EXIT
 
-if ((build_on_remote)); then
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# Fetch the GitHub-runner build for the remote's platform and check it against
+# the release's SHA256SUMS before anything is transferred.
+fetch_release_binary() {
+  local platform target version asset expected actual base
+  platform="$(ssh "${ssh_args[@]}" "$remote_target" 'uname -sm')"
+  case "$platform" in
+    "Darwin arm64") target=aarch64-apple-darwin ;;
+    "Linux x86_64") target=x86_64-unknown-linux-musl ;;
+    "Linux aarch64" | "Linux arm64") target=aarch64-unknown-linux-musl ;;
+    *) die "no release build for remote platform: $platform" ;;
+  esac
+  version="${release_tag#v}"
+  asset="mlxtop-$version-$target.tar.gz"
+  download_dir="$(mktemp -d "${TMPDIR:-/tmp}/mlxtop-release.XXXXXX")"
+  log "downloading $asset from $release_repo $release_tag"
+  if command -v gh >/dev/null 2>&1; then
+    # gh also reads draft releases, which are not public yet.
+    gh release download "$release_tag" --repo "$release_repo" --dir "$download_dir" \
+      --pattern "$asset" --pattern SHA256SUMS
+  else
+    require_command curl
+    base="https://github.com/$release_repo/releases/download/$release_tag"
+    curl -fsSL -o "$download_dir/$asset" "$base/$asset"
+    curl -fsSL -o "$download_dir/SHA256SUMS" "$base/SHA256SUMS"
+  fi
+  expected="$(awk -v name="$asset" '$2 == name {print $1}' "$download_dir/SHA256SUMS")"
+  [[ -n "$expected" ]] || die "SHA256SUMS does not list $asset"
+  actual="$(sha256_of "$download_dir/$asset")"
+  [[ "$actual" == "$expected" ]] || die "checksum mismatch for $asset"
+  tar -xzf "$download_dir/$asset" -C "$download_dir"
+  release_binary="$download_dir/mlxtop-$version-$target/mlxtop"
+  [[ -x "$release_binary" ]] || die "release archive has no mlxtop binary"
+  log "verified $asset ($target)"
+}
+
+if [[ -n "$release_tag" ]]; then
+  require_command awk
+  log "checking SSH connectivity"
+  ssh "${ssh_args[@]}" "$remote_target" true
+  fetch_release_binary
+  tar -czf "$archive" -C "$(dirname "$release_binary")" mlxtop
+elif ((build_on_remote)); then
   archive_paths=()
   for path in "${DEPLOY_PATHS[@]}"; do
     [[ -e "$PROJECT_ROOT/$path" ]] && archive_paths+=("$path")
@@ -291,7 +366,7 @@ remote_prepare_output=""
 [[ -n "$remote_upload_dir" ]] || die "remote staging directory was not returned"
 reject_whitespace REMOTE_UPLOAD_DIR "$remote_upload_dir"
 
-log "uploading source archive"
+log "uploading deploy archive"
 scp "${scp_args[@]}" "$archive" "$remote_target:$remote_upload_dir/archive.tar.gz"
 
 log "installing release"
