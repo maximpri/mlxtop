@@ -826,12 +826,21 @@ cargo build --release --locked
 BUILD_ON_REMOTE=0 ./scripts/cicd.sh --host example.local --user deploy
 ```
 
+To deploy a release that GitHub-hosted runners built instead of building at
+all, pass its tag. The script picks the archive for the remote's platform and
+verifies it against the release's `SHA256SUMS` before installing:
+
+```sh
+./scripts/cicd.sh --release v2.1.1 --host example.local --user deploy
+```
+
 Useful overrides:
 
 ```text
 REMOTE_DIR                 remote install root (default: $HOME/mlxtop)
 SSH_KEY                    private key for SSH/SCP
 BUILD_ON_REMOTE            1 to build on target, 0 for binary-only install
+RELEASE_TAG                deploy this GitHub release (same as --release)
 KEEP_RELEASES              release count to retain
 RESTART_COMMAND            optional restart hook
 HEALTHCHECK_COMMAND        optional post-deploy check
