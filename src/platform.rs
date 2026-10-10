@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-//! macOS and Linux host-counter collection through the injectable Host interface.
+//! macOS, Linux and Windows host-counter collection through the injectable Host interface.
 use crate::config::Thresholds;
 use crate::domain::{ChartMetric, MetalTelemetry, Sample, Tone, VmCounters};
 use crate::gpu;
-use crate::host::Host;
+use crate::host::{Host, WindowsReading};
 use crate::parsing::{
     find_named_number, find_named_numbers, find_named_string, find_number, parse_unit,
 };
@@ -321,6 +321,64 @@ pub(crate) fn sample_linux_gpu_thermal(
     sample.metal.tiler_util = None;
     let hottest_gpu = sample.gpus.iter().filter_map(|gpu| gpu.temperature).max();
     sample.thermal = linux_thermal_label(linux_thermal_celsius(host, hottest_gpu));
+}
+
+// --- Windows sampling -----------------------------------------------------
+// Memory, commit charge and processes come from the Windows APIs through
+// `Host::windows`; GPUs from `nvidia-smi`, which ships with the driver.
+// Windows exposes no page-in/page-out counters through those APIs, so paging
+// rates stay unavailable rather than reading as a healthy zero.
+
+pub(crate) fn sample_windows_memory(
+    reading: Option<&WindowsReading>,
+    sample: &mut Sample,
+    thresholds: Thresholds,
+) {
+    sample.paging_unavailable = true;
+    let Some(reading) = reading.filter(|reading| reading.total > 0) else {
+        return;
+    };
+    let total = reading.total;
+    let available = reading.available.min(total);
+    sample.total_memory = total;
+    // Windows reports available (free plus standby) memory, not free alone.
+    sample.resident_memory = Some(total - available);
+    sample.vm_available = true;
+    sample.anonymous = total - available;
+    sample.file_backed = 0;
+    sample.wired = 0;
+    sample.compressor = 0;
+    sample.compressed_logical = 0;
+    let free_percent = (u128::from(available) * 100 / u128::from(total)).min(100) as u64;
+    sample.availability = u8::try_from(free_percent).ok();
+    let (pressure, tone) = linux_pressure_state(100 - free_percent, None, thresholds);
+    sample.pressure = pressure.into();
+    sample.pressure_meaning = match pressure {
+        "GREEN" => "normal",
+        "YELLOW" => "warning",
+        _ => "critical",
+    }
+    .into();
+    sample.pressure_tone = tone;
+    sample.swap_total = reading.swap_total;
+    sample.swap_used = reading.swap_used.min(reading.swap_total);
+    sample.swap_available = true;
+}
+
+pub(crate) fn sample_windows_gpu_thermal(
+    host: &dyn Host,
+    sample: &mut Sample,
+    previous: &[gpu::Device],
+) {
+    sample.gpus = gpu::collect(host, previous);
+    sample.gpu_util = gpu::peak_utilization(&sample.gpus);
+    sample.gpu_in_use = None;
+    sample.gpu_alloc = None;
+    sample.metal.renderer_util = None;
+    sample.metal.tiler_util = None;
+    // Windows has no unprivileged CPU temperature source; report the GPUs.
+    let hottest_gpu = sample.gpus.iter().filter_map(|gpu| gpu.temperature).max();
+    sample.thermal = linux_thermal_label(hottest_gpu);
 }
 
 pub(crate) fn parse_vm_stat(text: &str, page_size: u64) -> VmCounters {

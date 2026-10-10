@@ -12,6 +12,8 @@ that remain under their respective licenses.
 | serde_json | 1.0.151 | MIT OR Apache-2.0 |
 | ureq | 3.4.2 | MIT OR Apache-2.0 |
 | libproc (macOS only) | 0.14.11 | MIT |
+| sysinfo (Windows only) | 0.38.4 | MIT |
+| chrono (Windows only) | 0.4.45 | MIT OR Apache-2.0 |
 
 The complete dependency graph and exact versions are recorded in `Cargo.lock`.
 CI evaluates every resolved dependency with `cargo-deny`. The current graph is

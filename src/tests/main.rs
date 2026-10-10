@@ -1357,7 +1357,7 @@ fn nvidia_selection_follows_uuid_and_missing_utilization_remains_visible() {
 fn nvidia_dashboard_requires_linux_and_detected_cards() {
     for count in [0, 2] {
         let mut app = nvidia_app(count);
-        let expected = cfg!(target_os = "linux") && count > 0;
+        let expected = cfg!(any(target_os = "linux", target_os = "windows")) && count > 0;
         assert_eq!(app.collector.current.has_nvidia_gpus(), expected);
         for (width, height) in [(80, 24), (180, 50)] {
             let screen = render_app(&app, width, height);

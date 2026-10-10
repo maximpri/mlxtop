@@ -15,6 +15,7 @@ on:
       - scripts/collect_licenses.py
       - scripts/package-release.sh
       - scripts/package-dmg.sh
+      - scripts/install.ps1
   workflow_dispatch:
 
 permissions:
@@ -107,8 +108,38 @@ jobs:
           name: assets-${{ matrix.target }}
           path: dist/*.tar.gz
 
+  windows:
+    needs: licenses
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: licenses
+          path: dist-licenses
+      - name: Test
+        run: cargo test --locked --all-targets
+      - name: Build
+        run: cargo build --release --locked
+      - name: Smoke test
+        run: |
+          target/release/mlxtop.exe --version
+          target/release/mlxtop.exe --once --interval 1 | head -5
+      - name: Package archive
+        run: scripts/package-release.sh x86_64-pc-windows-msvc target/release/mlxtop.exe dist dist-licenses
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-x86_64-pc-windows-msvc
+          path: dist/*.zip
+
   release:
-    needs: [macos, linux]
+    needs: [macos, linux, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -122,9 +153,9 @@ jobs:
       - name: Checksums
         working-directory: dist
         run: |
-          sha256sum mlxtop-*.dmg mlxtop-*.tar.gz > SHA256SUMS
+          sha256sum mlxtop-*.dmg mlxtop-*.tar.gz mlxtop-*.zip > SHA256SUMS
           cat SHA256SUMS
-          test "$(wc -l < SHA256SUMS)" -eq 4
+          test "$(wc -l < SHA256SUMS)" -eq 5
       - name: Check the tag matches the packaged version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -133,6 +164,7 @@ jobs:
             test -f "dist/mlxtop-$version-$target.tar.gz"
           done
           test -f "dist/mlxtop-$version-aarch64-apple-darwin.dmg"
+          test -f "dist/mlxtop-$version-x86_64-pc-windows-msvc.zip"
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/v')
         env:

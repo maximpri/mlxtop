@@ -11,7 +11,7 @@ jobs:
   rust:
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +26,7 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
       - name: Test client usage helper
+        if: runner.os != 'Windows'
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Build release
         run: cargo build --release --locked

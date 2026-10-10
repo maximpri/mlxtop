@@ -1,10 +1,13 @@
 # mlxtop
 
-**A `top` for your local LLM on Mac and Linux.**
+**A `top` for your local LLM on Mac, Linux and Windows.**
 
 See which models are running, how much memory they use, and how busy your
-GPUs are. Linux NVIDIA systems show each card's utilization, VRAM and temperature
-in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, vLLM or
+GPUs are. NVIDIA systems on Linux and Windows show each card's utilization, VRAM,
+temperature and clock limits in Overview, with `[` / `]` navigation for larger
+GPU sets. The assessment names the NVIDIA problems that slow local models: a
+model partly running on the CPU, a card whose VRAM is full, and clocks held down
+by heat or power. With oMLX, vLLM or
 SGLang, you can also follow generation speed and request activity as your model
 responds.
 
@@ -56,8 +59,8 @@ for request statistics.
 
 ## Try it
 
-You’ll need an Apple Silicon Mac or a Linux machine and a terminal with
-Unicode and color support.
+You’ll need an Apple Silicon Mac, a Linux machine or a Windows PC (x86_64)
+and a terminal with Unicode and color support.
 The macOS binary targets macOS 11 or later. The
 [latest release notes](https://github.com/maximpri/mlxtop/releases/latest)
 list the versions each release was tested on.
@@ -87,6 +90,20 @@ Linux downloads are static binaries with no runtime dependencies. Then run:
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
 example `curl -fsSL … | MLXTOP_VERSION=2.1.1 sh`.
+
+### Install on Windows
+
+Windows builds start with mlxtop 3.0. In PowerShell, without administrator
+rights:
+
+```powershell
+irm https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/install.ps1 | iex
+```
+
+The installer checks the download's SHA-256 checksum, places `mlxtop.exe` in
+`%LOCALAPPDATA%\Programs\mlxtop` and adds that folder to your user `PATH`
+(set `MLXTOP_NO_MODIFY_PATH=1` to skip). Open a new terminal and run `mlxtop`.
+Windows Terminal gives the best rendering.
 
 ## Diagnose a connection or missing reading
 
@@ -265,8 +282,8 @@ If your shell can’t find `mlxtop`, run `~/.cargo/bin/mlxtop` or add
 
 ## Runtime support and limitations
 
-mlxtop is built for macOS on Apple Silicon and for Linux (x86_64 and
-aarch64). Windows and Intel Macs aren’t supported targets for this release.
+mlxtop is built for macOS on Apple Silicon, Linux (x86_64 and aarch64) and
+Windows (x86_64). Intel Macs aren’t a supported target.
 
 On Linux, memory and swap come from `/proc/meminfo`, paging rates from
 `/proc/vmstat`, pressure level from the `MemAvailable` ratio blended with
@@ -276,6 +293,13 @@ as unavailable. Install the prebuilt static binary with the
 [terminal installer](#install-from-terminal), download it from the
 [latest release](https://github.com/maximpri/mlxtop/releases/latest), or
 build from source with `cargo install --path . --locked`.
+
+On Windows, memory, commit charge and processes come from the Windows APIs and
+GPU readings from `nvidia-smi`, which ships with the NVIDIA driver. Windows
+offers no page-in or page-out counters through those APIs, so paging rates
+show as unavailable, never as zero, and memory has no compression panel.
+Temperatures are the GPUs' own; CPU temperature needs administrator access
+and isn't read.
 
 | Runtime | Available information |
 | --- | --- |
@@ -348,8 +372,8 @@ process information, and supported provider APIs and logs. Your project files
 and model settings stay untouched, and it doesn’t send inference requests.
 
 Diagnostic logs are saved locally at `~/Library/Logs/mlxtop/mlxtop.log` on
-macOS and `~/.local/state/mlxtop/mlxtop.log` on Linux (following
-`XDG_STATE_HOME` when set). They
+macOS, `~/.local/state/mlxtop/mlxtop.log` on Linux (following
+`XDG_STATE_HOME` when set) and `%LOCALAPPDATA%\mlxtop\mlxtop.log` on Windows. They
 include counters and model or provider names, but exclude prompts, model output,
 request bodies, and API keys. These logs aren’t uploaded. By default, provider
 credentials are sent only to endpoints on your own machine.

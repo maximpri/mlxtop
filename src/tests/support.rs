@@ -134,6 +134,7 @@ struct FakeState {
     dirs: HashMap<PathBuf, Vec<PathBuf>>,
     calls: Vec<String>,
     panic_on: Option<String>,
+    windows: VecDeque<crate::host::WindowsReading>,
 }
 
 fn next(queue: &mut VecDeque<String>) -> Option<String> {
@@ -182,6 +183,12 @@ impl FakeHost {
         self
     }
 
+    /// Queue a Windows API reading; the last one repeats like commands do.
+    pub(crate) fn windows(self, reading: crate::host::WindowsReading) -> Self {
+        self.state.lock().unwrap().windows.push_back(reading);
+        self
+    }
+
     /// Panic when this command runs, to exercise the sampler's isolation.
     pub(crate) fn panic_on(self, key: &str) -> Self {
         self.state.lock().unwrap().panic_on = Some(key.into());
@@ -214,6 +221,17 @@ impl Host for FakeHost {
     fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
         let state = self.state.lock().unwrap();
         state.dirs.get(path).cloned().unwrap_or_default()
+    }
+
+    fn windows(&self) -> Option<crate::host::WindowsReading> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push("windows".into());
+        let queue = &mut state.windows;
+        if queue.len() > 1 {
+            queue.pop_front()
+        } else {
+            queue.front().cloned()
+        }
     }
 }
 
@@ -421,6 +439,48 @@ pub(crate) fn linux_host() -> FakeHost {
         )
         .command("/bin/date +%H:%M:%S %z", "08:00:00\n")
         .command("/bin/date +%H:%M:%S %z", "08:00:01\n")
+}
+
+pub(crate) fn windows_row(pid: u32, gib: u64, name: &str, command: &str) -> ProcessRow {
+    ProcessRow {
+        pid,
+        rss: gib * 1024 * MIB,
+        cpu: 12.5,
+        memory_percent: Some(gib as f64 * 100.0 / 32.0),
+        state: "?".into(),
+        pageins: None,
+        name: name.into(),
+        command: command.into(),
+    }
+}
+
+/// A Windows workstation: 32 GiB RAM with 8 available, Ollama serving.
+pub(crate) fn windows_host() -> FakeHost {
+    FakeHost::default()
+        .windows(crate::host::WindowsReading {
+            total: 32 * 1024 * MIB,
+            available: 8 * 1024 * MIB,
+            swap_total: 16 * 1024 * MIB,
+            swap_used: 2 * 1024 * MIB,
+            processes: vec![
+                windows_row(
+                    4012,
+                    9,
+                    "ollama.exe",
+                    r"C:\Users\me\AppData\Local\Programs\Ollama\ollama.exe serve",
+                ),
+                windows_row(5120, 3, "chrome.exe", r"C:\Program Files\Google\Chrome\chrome.exe"),
+                windows_row(77, 1, "mlxtop.exe", "mlxtop.exe"),
+            ],
+        })
+        .command(
+            "nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits",
+            "0, GPU-win0, NVIDIA GeForce RTX 4080, 91, 15900, 16376, 83\n",
+        )
+        .command(
+            "nvidia-smi --query-gpu=uuid,clocks_throttle_reasons.active --format=csv,noheader",
+            "GPU-win0, 0x0000000000000020\n",
+        )
 }
 
 /// A config that points the oMLX client at a port nothing listens on.

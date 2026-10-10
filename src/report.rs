@@ -32,12 +32,16 @@ pub(crate) fn write_static(
             .unwrap_or_else(|| "—".into()),
         bytes(sample.total_memory)
     )?;
+    // Windows has no paging counters: unknown, not zero.
+    let (paging_in, paging_out) = if sample.paging_unavailable {
+        ("—".to_string(), "—".to_string())
+    } else {
+        (rate(sample.swap_in), rate(sample.swap_out))
+    };
     if sample.swap_available && sample.swap_total == 0 {
         writeln!(
             out,
-            "PAGING       SWAP 0 B · not allocated · in {} · out {}",
-            rate(sample.swap_in),
-            rate(sample.swap_out)
+            "PAGING       SWAP 0 B · not allocated · in {paging_in} · out {paging_out}"
         )?;
     } else if sample.swap_available {
         let used_percent = sample
@@ -47,12 +51,10 @@ pub(crate) fn write_static(
             .unwrap_or(0);
         writeln!(
             out,
-            "PAGING       {} / {} · {}% used · in {} · out {}",
+            "PAGING       {} / {} · {}% used · in {paging_in} · out {paging_out}",
             bytes(sample.swap_used),
             bytes(sample.swap_total),
             used_percent,
-            rate(sample.swap_in),
-            rate(sample.swap_out)
         )?;
     } else {
         writeln!(out, "PAGING       —")?;

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+Next major version (3.0), developed on the `next/3.0` branch.
+
+- Windows (x86_64) support: memory, commit charge, processes and runtime
+  detection through the Windows APIs, NVIDIA GPUs through `nvidia-smi`, logs in
+  `%LOCALAPPDATA%\mlxtop`, a PowerShell installer (`scripts/install.ps1`) and a
+  release zip. Windows exposes no paging counters through those APIs, so paging
+  rates show as unavailable rather than zero.
+- NVIDIA findings: the assessment names a model partly or fully on CPU
+  (Ollama placement), a card with full VRAM (97%, held until below 94%), and
+  thermal, power-brake or hardware clock slowdowns on a busy card. The GPU
+  panel's STATE column shows the clock-limit reason, and full VRAM turns the
+  card's memory reading yellow.
 - Add mlx-serve (`MLXTOP_PROVIDER=mlx-serve`, default port 11234) with process
   detection. It polls `/metrics` for queues, a live generation rate that counts
   tokens of requests still running, a prefill rate that follows the prompt being

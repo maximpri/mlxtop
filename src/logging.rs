@@ -102,11 +102,18 @@ pub(crate) fn install_diagnostics(path: PathBuf) -> Option<&'static Diagnostics>
 }
 
 pub(crate) fn diagnostics_path() -> Option<PathBuf> {
+    let platform = Platform::current();
     diagnostics_path_from(
         env::var(DIAGNOSTICS_LOG_ENV).ok(),
-        env::var("XDG_STATE_HOME").ok(),
-        env::var_os("HOME").map(PathBuf::from),
-        Platform::current(),
+        // Windows keeps per-user state in %LOCALAPPDATA%.
+        env::var(if platform == Platform::Windows {
+            "LOCALAPPDATA"
+        } else {
+            "XDG_STATE_HOME"
+        })
+        .ok(),
+        crate::config::home_dir(),
+        platform,
     )
 }
 
@@ -121,6 +128,14 @@ pub(crate) fn diagnostics_path_from(
         if !path.is_empty() {
             return Some(PathBuf::from(path));
         }
+    }
+    if platform == Platform::Windows {
+        return state_home
+            .map(|dir| dir.trim().to_owned())
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| PathBuf::from(dir).join("mlxtop").join("mlxtop.log"))
+            .or_else(|| home.map(|home| home.join("AppData/Local/mlxtop/mlxtop.log")))
+            .or_else(|| Some(PathBuf::from("mlxtop.log")));
     }
     if platform == Platform::Linux {
         if let Some(state_home) = state_home {
@@ -138,10 +153,10 @@ pub(crate) fn diagnostics_path_from(
 }
 
 pub(crate) fn diagnostics_default_hint(platform: Platform) -> &'static str {
-    if platform == Platform::Linux {
-        "~/.local/state/mlxtop/mlxtop.log"
-    } else {
-        "~/Library/Logs/mlxtop/mlxtop.log"
+    match platform {
+        Platform::Linux => "~/.local/state/mlxtop/mlxtop.log",
+        Platform::MacOs => "~/Library/Logs/mlxtop/mlxtop.log",
+        Platform::Windows => r"%LOCALAPPDATA%\mlxtop\mlxtop.log",
     }
 }
 

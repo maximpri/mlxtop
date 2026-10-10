@@ -5,7 +5,7 @@ use crate::completion_log::read_llm_stats;
 use crate::config::{Config, Thresholds, GPU_BUSY_ENTER_LOAD};
 use crate::domain::{
     ChartMetric, ChartPoint, EventKind, LlmLogStats, LlmTelemetry, MetalTelemetry, Sample,
-    SignalEvent, TelemetrySource, Tone, MIB,
+    SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
 };
 use crate::formatting::{
     bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
@@ -24,8 +24,9 @@ use crate::platform::{
     linux_counters_for_rates, linux_metal_init, linux_page_size, linux_total_memory,
     macos_counters_for_rates, parse_metal_hardware, resident_memory_percent,
     sample_linux_gpu_thermal, sample_linux_memory, sample_macos_gpu_thermal, sample_macos_memory,
+    sample_windows_gpu_thermal, sample_windows_memory,
 };
-use crate::processes::{annotate_process_pagein_rates, parse_processes};
+use crate::processes::{annotate_process_pagein_rates, parse_processes, snapshot};
 use crate::{host, operator_history, process_memory, providers, request_history};
 use std::collections::VecDeque;
 use std::env;
@@ -97,9 +98,9 @@ impl Collector {
         Self::with_host(
             history_limit,
             config,
-            Box::new(host::System),
+            host::system(),
             Platform::current(),
-            env::var_os("HOME").map(PathBuf::from),
+            crate::config::home_dir(),
         )
     }
 
@@ -142,6 +143,14 @@ impl Collector {
                 linux_page_size(host.as_ref()),
                 linux_metal_init(host.as_ref()),
             ),
+            Platform::Windows => (
+                host.windows().map(|reading| reading.total).unwrap_or(0),
+                4096,
+                MetalTelemetry {
+                    architecture: Some(env::consts::ARCH.into()),
+                    ..MetalTelemetry::default()
+                },
+            ),
         };
         Self {
             llm_client: LlmTelemetryClient::from_config(&config, home.clone()),
@@ -181,7 +190,13 @@ impl Collector {
         };
 
         let host = self.host.as_ref();
+        let windows = (self.platform == Platform::Windows)
+            .then(|| host.windows())
+            .flatten();
         match self.platform {
+            Platform::Windows => {
+                sample_windows_memory(windows.as_ref(), &mut sample, self.thresholds)
+            }
             Platform::MacOs => sample_macos_memory(host, &mut sample, self.page_size),
             Platform::Linux => sample_linux_memory(
                 host,
@@ -194,6 +209,7 @@ impl Collector {
         let counters = match self.platform {
             Platform::MacOs => macos_counters_for_rates(host, self.page_size),
             Platform::Linux => linux_counters_for_rates(host),
+            Platform::Windows => VmCounters::default(),
         };
         let process_elapsed = self
             .previous
@@ -243,6 +259,7 @@ impl Collector {
         match self.platform {
             Platform::MacOs => sample_macos_gpu_thermal(host, &mut sample),
             Platform::Linux => sample_linux_gpu_thermal(host, &mut sample, &self.current.gpus),
+            Platform::Windows => sample_windows_gpu_thermal(host, &mut sample, &self.current.gpus),
         }
 
         let process_snapshot = match self.platform {
@@ -264,6 +281,9 @@ impl Collector {
                     )
                     .unwrap_or_default(),
             ),
+            Platform::Windows => {
+                snapshot(windows.map(|reading| reading.processes).unwrap_or_default())
+            }
         };
         sample.llm_count = process_snapshot.llm_count;
         sample.llm_rss = process_snapshot.llm_rss;
@@ -421,7 +441,7 @@ impl Collector {
         sample.llm_model_memory_max = llm_stats.and_then(|stats| stats.model_memory_max);
         sample.llm_model_offloaded = llm_stats.and_then(|stats| stats.model_offloaded);
         sample.llm_model_size = llm_stats.and_then(|stats| stats.model_size);
-        (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref());
+        (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref(), self.platform);
         let previous = if self.current.updated == "waiting" {
             None
         } else {
@@ -483,7 +503,8 @@ impl Collector {
         );
         // Captured tones follow the assessment's states, so a chart never
         // shows a severity the headline does not report.
-        let paging = (sample.swap_available && sample.rate_ready)
+        let paging = sample
+            .paging_measured()
             .then_some(sample.swap_in.saturating_add(sample.swap_out));
         push_history_with_tone(
             &mut self.swap_history,

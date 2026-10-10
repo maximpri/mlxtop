@@ -106,13 +106,30 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
 }
 
 /// Local wall-clock time and the local offset from UTC (`+HHMM`) in seconds.
-pub(crate) fn now_clock(host: &dyn Host) -> (String, Option<i32>) {
+pub(crate) fn now_clock(host: &dyn Host, platform: Platform) -> (String, Option<i32>) {
+    if platform == Platform::Windows {
+        return windows_clock();
+    }
     let Some(value) = host.command("/bin/date", &["+%H:%M:%S %z"]) else {
         return ("??:??:??".into(), None);
     };
     let mut fields = value.split_whitespace();
     let clock = fields.next().unwrap_or("??:??:??").to_string();
     (clock, fields.next().and_then(parse_utc_offset))
+}
+
+#[cfg(windows)]
+fn windows_clock() -> (String, Option<i32>) {
+    let now = chrono::Local::now();
+    (
+        now.format("%H:%M:%S").to_string(),
+        Some(now.offset().local_minus_utc()),
+    )
+}
+
+#[cfg(not(windows))]
+fn windows_clock() -> (String, Option<i32>) {
+    ("??:??:??".into(), None)
 }
 
 fn parse_utc_offset(text: &str) -> Option<i32> {
@@ -142,9 +159,38 @@ pub(crate) trait Host: Send {
     fn read_file(&self, path: &Path) -> Option<String>;
     /// Entries of a directory; empty when it cannot be listed.
     fn read_dir(&self, path: &Path) -> Vec<PathBuf>;
+    /// Memory and processes from the Windows APIs; `None` on other systems,
+    /// where the same readings come from commands and files.
+    fn windows(&self) -> Option<WindowsReading> {
+        None
+    }
 
     fn command_u64(&self, program: &str, args: &[&str]) -> Option<u64> {
         self.command(program, args)?.trim().parse().ok()
+    }
+}
+
+/// One Windows sample. Windows has no `ps` or `/proc`, so the host returns
+/// structured values and the collectors stay free of platform APIs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct WindowsReading {
+    pub total: u64,
+    pub available: u64,
+    /// Commit charge above physical memory, which the page file backs.
+    pub swap_total: u64,
+    pub swap_used: u64,
+    pub processes: Vec<crate::processes::ProcessRow>,
+}
+
+/// The production host for this build target.
+pub(crate) fn system() -> Box<dyn Host> {
+    #[cfg(windows)]
+    {
+        Box::new(windows::WindowsSystem::default())
+    }
+    #[cfg(not(windows))]
+    {
+        Box::new(System)
     }
 }
 
@@ -166,17 +212,99 @@ impl Host for System {
     }
 }
 
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use crate::processes::ProcessRow;
+    use std::sync::Mutex;
+    use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+
+    /// Keeps one `sysinfo::System` so CPU use is measured between samples.
+    #[derive(Default)]
+    pub(crate) struct WindowsSystem(Mutex<sysinfo::System>);
+
+    impl Host for WindowsSystem {
+        fn command(&self, program: &str, args: &[&str]) -> Option<String> {
+            command_text(program, args)
+        }
+
+        fn read_file(&self, path: &Path) -> Option<String> {
+            System.read_file(path)
+        }
+
+        fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
+            System.read_dir(path)
+        }
+
+        fn windows(&self) -> Option<WindowsReading> {
+            let mut system = self.0.lock().ok()?;
+            system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram().with_swap());
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing()
+                    .with_memory()
+                    .with_cpu()
+                    .with_exe(UpdateKind::OnlyIfNotSet)
+                    .with_cmd(UpdateKind::OnlyIfNotSet),
+            );
+            let total = system.total_memory();
+            let processes = system
+                .processes()
+                .iter()
+                .map(|(pid, process)| {
+                    let name = process.name().to_string_lossy().into_owned();
+                    let command = process
+                        .cmd()
+                        .iter()
+                        .map(|part| part.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    ProcessRow {
+                        pid: pid.as_u32(),
+                        rss: process.memory(),
+                        cpu: f64::from(process.cpu_usage()),
+                        memory_percent: (total > 0)
+                            .then(|| process.memory() as f64 * 100.0 / total as f64),
+                        state: "?".into(),
+                        pageins: None,
+                        command: if command.is_empty() {
+                            process
+                                .exe()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| name.clone())
+                        } else {
+                            command
+                        },
+                        name,
+                    }
+                })
+                .collect();
+            Some(WindowsReading {
+                total,
+                available: system.available_memory(),
+                swap_total: system.total_swap(),
+                swap_used: system.used_swap(),
+                processes,
+            })
+        }
+    }
+}
+
 /// Which collector family samples the host. Chosen once from the build target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Platform {
     MacOs,
     Linux,
+    Windows,
 }
 
 impl Platform {
     pub(crate) fn current() -> Self {
         if cfg!(target_os = "macos") {
             Self::MacOs
+        } else if cfg!(windows) {
+            Self::Windows
         } else {
             Self::Linux
         }

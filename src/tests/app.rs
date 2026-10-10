@@ -80,8 +80,22 @@ fn diagnostics_path_prefers_override_then_platform_locations() {
         Some(PathBuf::from("mlxtop.log"))
     );
     assert_eq!(
-        diagnostics_path_from(None, Some("/state".into()), home, Platform::MacOs),
+        diagnostics_path_from(None, Some("/state".into()), home.clone(), Platform::MacOs),
         Some(PathBuf::from("/home/u/Library/Logs/mlxtop/mlxtop.log"))
+    );
+    // Windows: %LOCALAPPDATA%, then the profile's AppData\Local.
+    assert_eq!(
+        diagnostics_path_from(
+            None,
+            Some("/appdata".into()),
+            home.clone(),
+            Platform::Windows
+        ),
+        Some(PathBuf::from("/appdata").join("mlxtop").join("mlxtop.log"))
+    );
+    assert_eq!(
+        diagnostics_path_from(None, Some(" ".into()), home, Platform::Windows),
+        Some(PathBuf::from("/home/u/AppData/Local/mlxtop/mlxtop.log"))
     );
     assert_eq!(
         diagnostics_path_from(None, None, None, Platform::MacOs),
@@ -330,7 +344,7 @@ fn static_report_marks_missing_swap_and_unknown_hardware() {
         ..Sample::default()
     };
     assert!(report(&unallocated, Platform::Linux).contains("PAGING       SWAP 0 B · not allocated"));
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "windows")) {
         let nvidia = Sample {
             gpus: gpu::parse("0, GPU-1, RTX, 50, 1000, 2000, 60\n"),
             ..Sample::default()

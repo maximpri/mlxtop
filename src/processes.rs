@@ -3,7 +3,72 @@
 use crate::domain::{Consumer, LlmProcess, ProcessSnapshot};
 use crate::history::delta;
 use std::time::Duration;
+/// One process as reported by `ps` or the Windows process list.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProcessRow {
+    pub pid: u32,
+    /// Resident memory in bytes.
+    pub rss: u64,
+    pub cpu: f64,
+    pub memory_percent: Option<f64>,
+    pub state: String,
+    pub pageins: Option<u64>,
+    /// Executable name without its directory.
+    pub name: String,
+    pub command: String,
+}
+
 pub(crate) fn parse_processes(text: &str) -> ProcessSnapshot {
+    snapshot(text.lines().filter_map(parse_ps_line).collect())
+}
+
+fn parse_ps_line(line: &str) -> Option<ProcessRow> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 4 {
+        return None;
+    }
+    let pid = fields[0].parse::<u32>().ok()?;
+    let rss_kib = fields[1].parse::<u64>().ok()?;
+    let cpu = fields[2].parse::<f64>().ok()?;
+    let modern_memory_percent = fields
+        .get(3)
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0);
+    let (memory_percent, state, pageins, name_index, command_index) =
+        if modern_memory_percent.is_some() {
+            (
+                modern_memory_percent,
+                fields.get(4).copied().unwrap_or("?").to_string(),
+                fields.get(5).and_then(|value| value.parse::<u64>().ok()),
+                6,
+                7,
+            )
+        } else {
+            (None, "?".into(), None, 3, 4)
+        };
+    let name_field = fields.get(name_index)?;
+    let name = name_field
+        .rsplit('/')
+        .next()
+        .unwrap_or(name_field)
+        .to_string();
+    let command = fields
+        .get(command_index..)
+        .map(|parts| parts.join(" "))
+        .unwrap_or_else(|| name.clone());
+    Some(ProcessRow {
+        pid,
+        rss: rss_kib * 1024,
+        cpu,
+        memory_percent,
+        state,
+        pageins,
+        name,
+        command,
+    })
+}
+
+pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
     let mut llm_count = 0;
     let mut llm_rss = 0;
     let mut llm_cpu = 0.0;
@@ -11,62 +76,28 @@ pub(crate) fn parse_processes(text: &str) -> ProcessSnapshot {
     let mut consumers: Vec<Consumer> = Vec::new();
     let mut llm_processes: Vec<LlmProcess> = Vec::new();
 
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 4 {
-            continue;
-        }
-        let Ok(pid) = fields[0].parse::<u32>() else {
-            continue;
-        };
-        let Ok(rss_kib) = fields[1].parse::<u64>() else {
-            continue;
-        };
-        let Ok(cpu) = fields[2].parse::<f64>() else {
-            continue;
-        };
-        let modern_memory_percent = fields
-            .get(3)
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value >= 0.0);
-        let (memory_percent, state, pageins, name_index, command_index) =
-            if modern_memory_percent.is_some() {
-                (
-                    modern_memory_percent,
-                    fields.get(4).copied().unwrap_or("?").to_string(),
-                    fields.get(5).and_then(|value| value.parse::<u64>().ok()),
-                    6,
-                    7,
-                )
-            } else {
-                (None, "?".into(), None, 3, 4)
-            };
-        let Some(name_field) = fields.get(name_index) else {
-            continue;
-        };
-        let name = name_field
-            .rsplit('/')
-            .next()
-            .unwrap_or(name_field)
-            .to_string();
-        let command = fields
-            .get(command_index..)
-            .map(|parts| parts.join(" "))
-            .unwrap_or_else(|| name.clone());
-        let lower = line.to_ascii_lowercase();
-        let is_llm = is_llm_process(&name, &command);
-        if is_llm {
-            if provider.is_none() {
-                provider = process_provider(&name, &command);
-            }
+    for row in rows {
+        let ProcessRow {
+            pid,
+            rss,
+            cpu,
+            memory_percent,
+            state,
+            pageins,
+            name,
+            command,
+        } = row;
+        let lower = format!("{name} {command}").to_ascii_lowercase();
+        if let Some(detected) = process_provider(&name, &command) {
+            provider.get_or_insert(detected);
             llm_count += 1;
-            llm_rss += rss_kib * 1024;
+            llm_rss += rss;
             llm_cpu += cpu;
             llm_processes.push(LlmProcess {
                 pid,
                 name: name.clone(),
-                command: command.clone(),
-                rss: rss_kib * 1024,
+                command,
+                rss,
                 cpu,
                 memory_percent,
                 state,
@@ -79,12 +110,12 @@ pub(crate) fn parse_processes(text: &str) -> ProcessSnapshot {
             continue;
         }
         if let Some(consumer) = consumers.iter_mut().find(|c| c.name == name) {
-            consumer.rss += rss_kib * 1024;
+            consumer.rss += rss;
             consumer.processes += 1;
         } else {
             consumers.push(Consumer {
                 name,
-                rss: rss_kib * 1024,
+                rss,
                 processes: 1,
             });
         }
@@ -122,6 +153,7 @@ pub(crate) fn annotate_process_pagein_rates(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn is_llm_process(name: &str, command: &str) -> bool {
     process_provider(name, command).is_some()
 }
@@ -129,7 +161,7 @@ pub(crate) fn is_llm_process(name: &str, command: &str) -> bool {
 pub(crate) fn normalize_process_token(value: &str) -> String {
     value
         .trim_matches(['"', '\''])
-        .rsplit('/')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(value)
         .chars()

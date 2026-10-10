@@ -314,6 +314,30 @@ a busy GPU alone never becomes the finding. A measured drop shows the rate
 change, an associated signal with confidence, and a short suggested check.
 Linux temperature readings are shown as measurements, not inferred throttling.
 
+### NVIDIA findings
+
+On Linux and Windows with NVIDIA cards, the assessment names three GPU
+problems that limit local inference. They rank below critical host memory,
+swap thrashing, heavy paging and page-in recovery, and above memory stress
+and host thermal limits:
+
+| Finding | Measured from | Suggested check |
+| --- | --- | --- |
+| `Model partly on CPU` / `Model running on CPU` | Ollama `/api/ps`: `size` minus `size_vram` is at least 2% of the model | Smaller quantization or context; if nothing is on the GPU, the GPU driver |
+| `GPU N VRAM full` | A card at 97% memory or more, held until it falls below 94% | Unload unused models or reduce context and KV cache |
+| `GPU N thermal slowdown`, `power brake`, `hardware slowdown` | `nvidia-smi` clock-limit reasons on a card above 20% load | GPU cooling, power supply and cables |
+
+Placement ranks first, then VRAM, then clocks. vLLM and SGLang reserve 90% of
+VRAM by default, below the full threshold. A power cap under load is the card
+running at its configured limit: the GPU panel's STATE column shows
+`power cap`, but it is not a finding. Clock-limit reasons come from a separate
+`nvidia-smi` query (`clocks_throttle_reasons.active`, then
+`clocks_event_reasons.active` on newer drivers), so a driver without them
+still shows utilization, VRAM and temperature. On Windows a full card may
+spill into shared system memory, which the driver does not report; the
+finding says so. Offload is not reported for a remote runtime, whose
+placement says nothing about local cards.
+
 ### MLX Top
 
 The process table fills the view, with aggregate CPU/RSS for the current filter.
@@ -743,7 +767,8 @@ llama-server router mode and authenticated monitoring endpoints are not supporte
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 `ioreg`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
 `/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present)
-and `ps`. It reads configured provider endpoints and local logs only for
+and `ps`. On Windows it reads memory, commit charge and the process list
+through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
 supported adapters. The application does not contain analytics, upload
 collected metrics, modify model state or send synthetic inference requests.
 

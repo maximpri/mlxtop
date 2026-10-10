@@ -109,7 +109,15 @@ pub(crate) fn config_history(config: &Config) -> (usize, bool) {
 }
 
 pub(crate) fn config_path() -> PathBuf {
-    config_path_in(env::var_os("HOME").map(PathBuf::from))
+    config_path_in(home_dir())
+}
+
+/// `HOME`, or `USERPROFILE` on Windows where `HOME` is usually unset.
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 pub(crate) fn config_path_in(home: Option<PathBuf>) -> PathBuf {

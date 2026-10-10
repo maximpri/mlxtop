@@ -117,12 +117,12 @@ fn linux_collector_reads_proc_nvidia_and_thermal_zones() {
         (first.swap_total, first.swap_used),
         (4_000_000 * 1024, 1_000_000 * 1024)
     );
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "windows")) {
         assert_eq!(first.gpus.len(), 1);
         assert_eq!(first.gpus[0].uuid, "GPU-aaaa");
         assert_eq!(first.gpu_util, Some(64));
     } else {
-        assert!(first.gpus.is_empty(), "NVIDIA collection is Linux-only");
+        assert!(first.gpus.is_empty(), "NVIDIA collection is off on macOS");
         assert_eq!(first.gpu_util, None);
         assert!(!host
             .calls()
@@ -140,7 +140,7 @@ fn linux_collector_reads_proc_nvidia_and_thermal_zones() {
     assert!(second.rate_ready);
     assert_eq!(second.compress, 0, "Linux has no compressor counters");
     assert!(second.swap_in > 0 && second.swap_out > second.swap_in);
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "windows")) {
         assert_eq!(second.gpus[0].temperature, Some(61));
     } else {
         assert!(second.gpus.is_empty());
@@ -148,11 +148,66 @@ fn linux_collector_reads_proc_nvidia_and_thermal_zones() {
 }
 
 #[test]
+fn windows_collector_reads_memory_processes_and_nvidia_without_inventing_paging() {
+    let host = windows_host();
+    let mut collector = collector(host.clone(), Platform::Windows, None);
+    assert_eq!(collector.total_memory, 32 * 1024 * MIB);
+    assert_eq!(collector.page_size, 4096);
+    assert!(collector.metal.architecture.is_some());
+
+    let first = collector.sample();
+    assert_eq!(first.availability, Some(25));
+    assert_eq!(first.pressure, "YELLOW", "75% in use warns");
+    assert_eq!(first.resident_memory, Some(24 * 1024 * MIB));
+    assert_eq!(
+        (first.swap_total, first.swap_used),
+        (16 * 1024 * MIB, 2 * 1024 * MIB)
+    );
+    assert_eq!(first.llm_provider, "Ollama");
+    assert_eq!(first.llm_count, 1);
+    assert_eq!(first.llm_pid, 4012);
+    assert_eq!(first.llm_rss, 9 * 1024 * MIB);
+    assert_eq!(first.largest_consumer.as_deref(), Some("ollama.exe"));
+    // mlxtop does not count itself as a memory consumer.
+    assert_eq!(collector.current.llm_processes.len(), 1);
+    assert!(!host.calls().iter().any(|call| call.contains("/bin/date")));
+    assert_ne!(first.updated, "waiting");
+
+    let second = collector.sample();
+    assert!(second.rate_ready);
+    assert!(second.paging_unavailable);
+    assert!(!second.paging_measured());
+    assert_eq!(second.swap_in, 0);
+    let mut report = Vec::new();
+    crate::report::write_static(
+        &mut report,
+        &second,
+        1,
+        Thresholds::default(),
+        Platform::Windows,
+    )
+    .unwrap();
+    let report = String::from_utf8(report).unwrap();
+    assert!(report.contains("in — · out —"), "{report}");
+    if cfg!(any(target_os = "linux", target_os = "windows")) {
+        assert_eq!(second.gpus[0].name, "NVIDIA GeForce RTX 4080");
+        assert_eq!(second.thermal, "83°C measured");
+        // 97% VRAM outranks the thermal slowdown on the same card.
+        assert_eq!(second.impact, "VRAM FULL");
+    } else {
+        assert!(second.gpus.is_empty());
+        assert_eq!(second.thermal, "unavailable");
+    }
+}
+
+#[test]
 fn missing_host_telemetry_stays_unavailable_instead_of_zero() {
-    for platform in [Platform::Linux, Platform::MacOs] {
+    for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
         let mut collector = collector(FakeHost::default(), platform, None);
         let sample = collector.sample();
-        assert_eq!(sample.updated, "??:??:??");
+        if platform != Platform::Windows {
+            assert_eq!(sample.updated, "??:??:??");
+        }
         assert_eq!(sample.pressure, "UNKNOWN");
         assert_eq!(sample.availability, None);
         assert_eq!(sample.resident_memory, None);

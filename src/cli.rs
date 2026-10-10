@@ -66,9 +66,14 @@ pub(crate) fn help_text(platform: Platform) -> String {
          -1, --once         static report\n\
          -V, --version      show version\n\
          -h, --help         show help\n\
-         Config file: ~/.config/mlxtop/config.json\n\
+         Config file: {}\n\
          Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
          Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · d diagnostics · ? help",
+        if platform == Platform::Windows {
+            r"%USERPROFILE%\.config\mlxtop\config.json"
+        } else {
+            "~/.config/mlxtop/config.json"
+        },
         diagnostics_default_hint(platform)
     )
 }

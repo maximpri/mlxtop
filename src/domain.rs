@@ -383,6 +383,9 @@ pub(crate) struct Sample {
     pub(crate) swap_total: u64,
     pub(crate) swap_used: u64,
     pub(crate) swap_available: bool,
+    /// The platform has no page-in/page-out counters (Windows), so paging
+    /// rates are unknown rather than zero.
+    pub(crate) paging_unavailable: bool,
     pub(crate) swap_in: u64,
     pub(crate) swap_out: u64,
     pub(crate) swap_growth: i64,
@@ -444,6 +447,11 @@ pub(crate) struct Sample {
 }
 
 impl Sample {
+    /// Paging rates are measured and the rate baseline is ready.
+    pub(crate) fn paging_measured(&self) -> bool {
+        self.swap_available && self.rate_ready && !self.paging_unavailable
+    }
+
     pub(crate) fn has_nvidia_gpus(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "windows")) && !self.gpus.is_empty()
     }
@@ -469,6 +477,7 @@ impl Default for Sample {
             swap_total: 0,
             swap_used: 0,
             swap_available: false,
+            paging_unavailable: false,
             swap_in: 0,
             swap_out: 0,
             swap_growth: 0,

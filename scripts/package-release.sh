@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Package a built mlxtop binary as a release archive:
 #   mlxtop-VERSION-TARGET/{mlxtop,BUILD-INFO.json,docs,licenses,scripts,...}
+# Windows targets get mlxtop.exe in a .zip; the others a .tar.gz.
 # The payload directory is left next to the archive for scripts/package-dmg.sh.
 set -euo pipefail
 
@@ -26,11 +27,15 @@ version="${version#mlxtop }"
 commit="${GITHUB_SHA:-$(git -C "$root" rev-parse HEAD)}"
 name="mlxtop-$version-$target"
 stage="$output/$name"
-rm -rf "$stage" "$output/$name.tar.gz"
+case "$target" in
+    *-windows-*) executable=mlxtop.exe; extension=zip ;;
+    *) executable=mlxtop; extension=tar.gz ;;
+esac
+rm -rf "$stage" "$output/$name.$extension"
 mkdir -p "$stage/scripts"
 
-cp "$binary" "$stage/mlxtop"
-chmod 755 "$stage/mlxtop"
+cp "$binary" "$stage/$executable"
+chmod 755 "$stage/$executable"
 for file in CHANGELOG.md LICENSE README.md THIRD_PARTY_NOTICES.md; do
     cp "$root/$file" "$stage/$file"
 done
@@ -48,9 +53,9 @@ else
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
-    sha="$(sha256sum "$stage/mlxtop" | awk '{print $1}')"
+    sha="$(sha256sum "$stage/$executable" | awk '{print $1}')"
 else
-    sha="$(shasum -a 256 "$stage/mlxtop" | awk '{print $1}')"
+    sha="$(shasum -a 256 "$stage/$executable" | awk '{print $1}')"
 fi
 cat > "$stage/BUILD-INFO.json" <<JSON
 {
@@ -60,6 +65,10 @@ cat > "$stage/BUILD-INFO.json" <<JSON
   "binary_sha256": "$sha"
 }
 JSON
-# No extended attributes or AppleDouble files in the archive.
-COPYFILE_DISABLE=1 tar -C "$output" -czf "$output/$name.tar.gz" "$name"
-printf '%s\n' "$output/$name.tar.gz"
+if [[ "$extension" == zip ]]; then
+    (cd "$output" && 7z a -tzip -bso0 -bsp0 "$name.zip" "$name")
+else
+    # No extended attributes or AppleDouble files in the archive.
+    COPYFILE_DISABLE=1 tar -C "$output" -czf "$output/$name.tar.gz" "$name"
+fi
+printf '%s\n' "$output/$name.$extension"

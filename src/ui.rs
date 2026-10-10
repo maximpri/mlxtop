@@ -752,7 +752,7 @@ impl App {
                 .or_else(|| Some(format!("COMP {compress}")))
             }
             ChartMetric::Swap => {
-                let (swap_in, swap_out) = if sample.rate_ready {
+                let (swap_in, swap_out) = if sample.rate_ready && !sample.paging_unavailable {
                     (rate(sample.swap_in), rate(sample.swap_out))
                 } else {
                     ("—".into(), "—".into())
