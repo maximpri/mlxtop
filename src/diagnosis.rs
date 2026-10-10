@@ -86,6 +86,14 @@ fn assess_observation(sample: &Sample) -> Finding {
         }
         return finding;
     }
+    if let Some(issue) = &sample.gpu_issue {
+        finding.title = issue.title();
+        finding.evidence = issue.evidence();
+        finding.next = issue.next();
+        finding.actionable = true;
+        finding.tone = Tone::Yellow;
+        return finding;
+    }
     if sample.impact == "SAMPLING" || !sample.rate_ready {
         finding.title = "Collecting system baseline".into();
         finding.next = "Wait for the next sample.";

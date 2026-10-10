@@ -4,7 +4,8 @@ use crate::config::Thresholds;
 use crate::domain::ChartMetric;
 use crate::formatting::{bytes, compact_label};
 use crate::gpu;
-use crate::theme::{BLUE, CYAN, DIM, MUTED, PANEL, PANEL_RAISED};
+use crate::gpu_findings::VRAM_FULL_ENTER;
+use crate::theme::{BLUE, CYAN, DIM, MUTED, PANEL, PANEL_RAISED, YELLOW};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -41,7 +42,13 @@ pub(crate) fn memory_label(device: &gpu::Device) -> String {
     }
 }
 
+/// A clock limit names the state while the card is working; otherwise load.
 fn state(device: &gpu::Device, thresholds: Thresholds) -> &'static str {
+    if let Some(cause) = device.throttle() {
+        if device.utilization.is_some_and(|load| load >= 20) {
+            return cause.short_label();
+        }
+    }
     match device.utilization.map(u64::from) {
         None => "unavailable",
         Some(0) => "idle",
@@ -207,15 +214,32 @@ pub(crate) fn draw(
         );
         let mut next = 3;
         if header.width >= 100 {
-            text(frame, cols[next], state(device, thresholds), load_color);
+            let fault = device.throttle().is_some_and(|cause| cause.is_fault())
+                && device.utilization.is_some_and(|load| load >= 20);
+            let color = if fault { YELLOW } else { load_color };
+            text(frame, cols[next], state(device, thresholds), color);
             next += 1;
         }
+        // Memory occupancy is capacity information, not GPU compute load; it
+        // turns yellow only where the next allocation may spill or fail.
+        let full = device
+            .memory_percent()
+            .is_some_and(|percent| percent >= VRAM_FULL_ENTER);
         if header.width >= 120 {
-            // Memory occupancy is capacity information, not GPU compute load.
-            meter(frame, cols[next], device.memory_percent(), BLUE);
+            meter(
+                frame,
+                cols[next],
+                device.memory_percent(),
+                if full { YELLOW } else { BLUE },
+            );
             next += 1;
         }
-        text(frame, cols[next], memory_label(device), Color::White);
+        text(
+            frame,
+            cols[next],
+            memory_label(device),
+            if full { YELLOW } else { Color::White },
+        );
         text(
             frame,
             cols[next + 1],

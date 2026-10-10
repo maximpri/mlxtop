@@ -186,3 +186,22 @@ fn slowdown_findings_recommend_a_check_for_each_correlated_cause() {
         }
     }
 }
+
+#[test]
+fn gpu_issue_leads_with_its_own_title_evidence_and_action() {
+    let mut sample = busy_sample();
+    sample.impact = "CPU OFFLOAD".into();
+    sample.gpu_issue = Some(crate::gpu_findings::GpuIssue::Offload {
+        offloaded: 4 * 1024 * 1024 * 1024,
+        size: 8 * 1024 * 1024 * 1024,
+    });
+    let finding = assess(&sample);
+    assert!(finding.actionable);
+    assert_eq!(finding.tone, Tone::Yellow);
+    assert_eq!(finding.title, "Model partly on CPU");
+    assert!(finding.evidence.starts_with("50% of model on CPU"));
+    assert_eq!(
+        finding.next,
+        "Use a smaller quantization or context to fit VRAM."
+    );
+}

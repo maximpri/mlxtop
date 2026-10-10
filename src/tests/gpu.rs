@@ -3,9 +3,9 @@ use super::*;
 
 const TWO: &str = "1, GPU-b, NVIDIA RTX 4090, 97, 22000, 24564, 78\n0, GPU-a, NVIDIA RTX 4090, 0, 1024, 24564, 35\n";
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 #[test]
-fn nvidia_collection_is_disabled_outside_linux() {
+fn nvidia_collection_is_disabled_on_macos() {
     let host = crate::test_support::FakeHost::default();
     assert!(collect(&host, &parse(TWO)).is_empty());
 }
@@ -65,4 +65,49 @@ fn failed_poll_clears_counters_and_recovers_by_uuid() {
     assert_eq!(removed[0].index, 3);
     assert_eq!(parse(&format!("{TWO}{TWO}")).len(), 2);
     assert_eq!(peak_utilization(&[]), None);
+}
+
+#[test]
+fn throttle_reasons_attach_by_uuid_and_rank_faults_before_power_cap() {
+    let mut cards = parse(TWO);
+    apply_throttle_reasons(
+        &mut cards,
+        "GPU-a, 0x0000000000000001\nGPU-b, 0x0000000000000044\nGPU-z, 0x20\nbad\nGPU-a, [N/A]\n",
+    );
+    // Idle alone is not a limit; thermal outranks the power cap beside it.
+    assert_eq!(cards[0].throttle_reasons, Some(1));
+    assert_eq!(cards[0].throttle(), None);
+    assert_eq!(cards[1].throttle(), Some(Throttle::Thermal));
+    assert!(Throttle::Thermal.is_fault());
+    assert!(!Throttle::PowerCap.is_fault());
+    for (mask, cause) in [
+        (0x80, Throttle::PowerBrake),
+        (0x08, Throttle::HardwareSlowdown),
+        (0x04, Throttle::PowerCap),
+        (0x24, Throttle::Thermal),
+    ] {
+        cards[0].throttle_reasons = Some(mask);
+        assert_eq!(cards[0].throttle(), Some(cause), "{mask:#x}");
+    }
+    // A failed poll does not keep a stale limit.
+    assert_eq!(readings(None, &cards)[1].throttle_reasons, None);
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[test]
+fn throttle_query_falls_back_to_the_newer_field_name_and_skips_without_cards() {
+    use crate::test_support::FakeHost;
+    let core = "nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits";
+    let host = FakeHost::default().command(core, TWO).command(
+        "nvidia-smi --query-gpu=uuid,clocks_event_reasons.active --format=csv,noheader",
+        "GPU-b, 0x0000000000000040\n",
+    );
+    let cards = collect(&host, &[]);
+    assert_eq!(cards[1].throttle(), Some(Throttle::Thermal));
+    assert_eq!(cards[0].throttle_reasons, None);
+    let calls = host.calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let empty = FakeHost::default();
+    assert!(collect(&empty, &[]).is_empty());
+    assert_eq!(empty.calls().len(), 1);
 }

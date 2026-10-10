@@ -54,7 +54,7 @@ impl EventKind {
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
             | "WATCH PAGING" => Self::Paging,
-            "GPU" => Self::Gpu,
+            "GPU" | "CPU OFFLOAD" | "VRAM FULL" | "GPU THROTTLED" => Self::Gpu,
             "THERMAL" => Self::Thermal,
             _ => Self::System,
         }
@@ -350,6 +350,10 @@ pub(crate) struct LlmTelemetry {
     pub(crate) waiting_requests: Option<u64>,
     pub(crate) model_memory: Option<u64>,
     pub(crate) model_memory_max: Option<u64>,
+    /// Model weights and buffers the runtime placed outside GPU memory.
+    /// Only runtimes that report placement (Ollama) set it.
+    pub(crate) model_offloaded: Option<u64>,
+    pub(crate) model_size: Option<u64>,
     pub(crate) details: Option<String>,
     pub(crate) remote: bool,
     pub(crate) cache_interval_efficiency: Option<f64>,
@@ -419,6 +423,10 @@ pub(crate) struct Sample {
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
     pub(crate) llm_model_memory_max: Option<u64>,
+    pub(crate) llm_model_offloaded: Option<u64>,
+    pub(crate) llm_model_size: Option<u64>,
+    /// Most severe NVIDIA or placement problem, set by `classify`.
+    pub(crate) gpu_issue: Option<crate::gpu_findings::GpuIssue>,
     pub(crate) llm_details: Option<String>,
     pub(crate) llm_remote: bool,
     pub(crate) correlation: CorrelationInsight,
@@ -437,7 +445,7 @@ pub(crate) struct Sample {
 
 impl Sample {
     pub(crate) fn has_nvidia_gpus(&self) -> bool {
-        cfg!(target_os = "linux") && !self.gpus.is_empty()
+        cfg!(any(target_os = "linux", target_os = "windows")) && !self.gpus.is_empty()
     }
 }
 
@@ -501,6 +509,9 @@ impl Default for Sample {
             llm_waiting_requests: None,
             llm_model_memory: None,
             llm_model_memory_max: None,
+            llm_model_offloaded: None,
+            llm_model_size: None,
+            gpu_issue: None,
             llm_details: None,
             llm_remote: false,
             correlation: CorrelationInsight::default(),

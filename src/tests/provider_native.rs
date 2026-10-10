@@ -25,6 +25,21 @@ fn inventories_distinguish_loaded_models_from_catalogues_and_capacity() {
         "missing allocation invalidates aggregate"
     );
     assert_eq!(result.model.as_deref(), Some("2 models · a"));
+    assert_eq!(result.model_offloaded, None);
+    // Placement: `size` minus `size_vram` is the part running on CPU.
+    let split = ollama(&json!({"models":[
+        {"name":"a", "size":10000, "size_vram":6000},
+        {"name":"b", "size":2000, "size_vram":2000}
+    ]}))
+    .unwrap();
+    assert_eq!(split.model_size, Some(12000));
+    assert_eq!(split.model_offloaded, Some(4000));
+    assert!(split.details.unwrap().contains("on CPU"));
+    let resident = ollama(&json!({"models":[{"name":"a", "size":10, "size_vram":10}]})).unwrap();
+    assert_eq!(resident.model_offloaded, Some(0));
+    assert!(!resident.details.unwrap().contains("on CPU"));
+    let no_size = ollama(&json!({"models":[{"name":"a", "size_vram":10}]})).unwrap();
+    assert_eq!(no_size.model_offloaded, None);
     let lm = lm_studio(&json!({"models":[
         {"key":"downloaded", "loaded_instances":[], "size_bytes":99999},
         {"key":"loaded", "loaded_instances":[{"id":"instance", "config":{"context_length":4096}}]},

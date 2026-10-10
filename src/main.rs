@@ -16,6 +16,7 @@ mod domain;
 mod formatting;
 mod gpu;
 mod gpu_dashboard;
+mod gpu_findings;
 mod history;
 mod host;
 mod json;

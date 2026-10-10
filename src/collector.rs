@@ -419,6 +419,8 @@ impl Collector {
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
         sample.llm_model_memory = llm_stats.and_then(|stats| stats.model_memory);
         sample.llm_model_memory_max = llm_stats.and_then(|stats| stats.model_memory_max);
+        sample.llm_model_offloaded = llm_stats.and_then(|stats| stats.model_offloaded);
+        sample.llm_model_size = llm_stats.and_then(|stats| stats.model_size);
         (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref());
         let previous = if self.current.updated == "waiting" {
             None

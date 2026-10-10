@@ -25,3 +25,16 @@ fn static_report_includes_all_card_identities_and_missing_readings() {
     assert!(lines[1].contains("utilization —"));
     assert!(lines[1].contains("temperature —"));
 }
+
+#[test]
+fn state_names_a_clock_limit_only_while_the_card_works() {
+    let mut device = gpu::parse("0, GPU-a, NVIDIA RTX 4090, 95, 1024, 24564, 88").remove(0);
+    device.throttle_reasons = Some(0x40);
+    assert_eq!(state(&device, Thresholds::default()), "thermal limit");
+    device.throttle_reasons = Some(0x4);
+    assert_eq!(state(&device, Thresholds::default()), "power cap");
+    device.utilization = Some(5);
+    device.throttle_reasons = Some(0x40);
+    assert_ne!(state(&device, Thresholds::default()), "thermal limit");
+    assert!(static_lines(&[device], Thresholds::default())[0].ends_with("active"));
+}

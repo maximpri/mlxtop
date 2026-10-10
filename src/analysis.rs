@@ -87,6 +87,7 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
         GPU_BUSY_ENTER_LOAD,
         thresholds.gpu_warn_exit,
     ) && llm;
+    let gpu_issue = crate::gpu_findings::detect(sample, previous_impact);
     let native_counters_available = sample.total_memory > 0
         && sample.availability.is_some()
         && sample.pressure != "UNKNOWN"
@@ -127,6 +128,14 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
             Some(45),
             "RECOVERING",
             "page-in recovery",
+        )
+    } else if let Some(issue) = &gpu_issue {
+        (
+            issue.impact(),
+            Tone::Yellow,
+            Some(issue.health()),
+            "DEGRADED",
+            issue.limiter(),
         )
     } else if sample.pressure == "YELLOW" {
         (
@@ -182,6 +191,7 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
     };
     sample.impact = impact.into();
     sample.impact_tone = tone;
+    sample.gpu_issue = gpu_issue.filter(|issue| issue.impact() == impact);
     sample.health = health;
     sample.grade = grade.into();
     sample.limiter = limiter.into();
@@ -224,6 +234,11 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
         } else {
             format!("Pause or quit {largest}; wait for swap-out to approach zero.")
         };
+    } else if let Some(issue) = &sample.gpu_issue {
+        let (badge, cause, action) = issue.guidance();
+        sample.guidance_badge = badge.into();
+        sample.guidance_cause = cause;
+        sample.guidance_action = action.into();
     } else if paging_active {
         sample.guidance_badge = "WATCH".into();
         sample.guidance_cause = format!(
@@ -300,6 +315,9 @@ pub(crate) fn signal_summary(sample: &Sample) -> String {
             rate(sample.swap_in),
             signed_rate(sample.swap_growth)
         ),
+        "CPU OFFLOAD" | "VRAM FULL" | "GPU THROTTLED" if sample.gpu_issue.is_some() => {
+            sample.gpu_issue.as_ref().unwrap().evidence()
+        }
         "GPU BUSY" if !sample.correlation.summary.is_empty() => sample.correlation.summary.clone(),
         "GPU BUSY" => format!(
             "GPU {}% busy · {}",

@@ -119,9 +119,20 @@ pub(super) fn ollama(value: &Value) -> Option<LlmTelemetry> {
         .iter()
         .try_fold(0_u64, |sum, m| sum.checked_add(counter(m, &["size_vram"])?));
     result.model_memory = vram;
+    // `size` is the whole allocation; what is not in `size_vram` runs on CPU.
+    let size = models
+        .iter()
+        .try_fold(0_u64, |sum, m| sum.checked_add(counter(m, &["size"])?));
+    if let Some((size, vram)) = size.zip(vram).filter(|(size, _)| *size > 0) {
+        result.model_size = Some(size);
+        result.model_offloaded = Some(size.saturating_sub(vram));
+    }
     let mut details = result.details.take().unwrap();
     if let Some(vram) = vram {
         details.push_str(&format!(" · resident VRAM {}", bytes(vram)));
+    }
+    if let Some(offloaded) = result.model_offloaded.filter(|bytes| *bytes > 0) {
+        details.push_str(&format!(" · {} on CPU", bytes(offloaded)));
     }
     if let [model] = models.as_slice() {
         if let Some(context) = counter(model, &["context_length"]) {
