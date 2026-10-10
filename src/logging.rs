@@ -5,8 +5,7 @@ use crate::host::Platform;
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::fs::{File, OpenOptions};
-use std::io::SeekFrom;
-use std::io::{Seek, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -60,8 +59,14 @@ impl Diagnostics {
                     {
                         *file = replacement;
                     }
-                } else if file.set_len(0).is_ok() {
-                    let _ = file.seek(SeekFrom::Start(0));
+                } else if let Ok(truncated) = OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&self.path)
+                {
+                    // An append-only handle cannot be shortened on Windows;
+                    // a fresh truncating handle works on every platform.
+                    *file = truncated;
                 }
             }
             let _ = writeln!(
@@ -226,7 +231,8 @@ pub(crate) fn install_panic_hook() {
             .map(|location| {
                 format!(
                     "{}:{}:{}",
-                    location.file(),
+                    // Windows reports `src\x.rs`; keep one form in the log.
+                    location.file().replace('\\', "/"),
                     location.line(),
                     location.column()
                 )

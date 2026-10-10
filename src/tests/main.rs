@@ -2301,6 +2301,7 @@ fn process_pagein_rates_are_pid_scoped() {
     assert_eq!(current[0].pagein_rate, Some(10.0));
 }
 
+#[cfg(unix)]
 #[test]
 fn command_text_drains_large_child_output() {
     let output = command_text(
@@ -2312,6 +2313,23 @@ fn command_text_drains_large_child_output() {
     )
     .expect("large child output should be collected");
     assert_eq!(output.len(), 2048 * 64);
+}
+
+#[cfg(windows)]
+#[test]
+fn command_text_runs_windows_commands_and_rejects_failures() {
+    assert_eq!(
+        command_text("cmd", &["/C", "echo 42"])
+            .as_deref()
+            .map(str::trim),
+        Some("42")
+    );
+    assert_eq!(command_text("cmd", &["/C", "exit 3"]), None);
+    assert_eq!(command_text("mlxtop-no-such-program", &[]), None);
+}
+
+fn is_llm_process(name: &str, command: &str) -> bool {
+    process_provider(name, command).is_some()
 }
 
 #[test]

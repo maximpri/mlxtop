@@ -153,11 +153,6 @@ pub(crate) fn annotate_process_pagein_rates(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn is_llm_process(name: &str, command: &str) -> bool {
-    process_provider(name, command).is_some()
-}
-
 pub(crate) fn normalize_process_token(value: &str) -> String {
     value
         .trim_matches(['"', '\''])
