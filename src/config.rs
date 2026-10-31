@@ -18,8 +18,6 @@ pub(crate) const PAGING_ACTIVE_ENTER_RATE: u64 = 4 * MIB;
 /// Free memory at or below this percentage counts as tight even while macOS
 /// still reports normal pressure.
 pub(crate) const TIGHT_FREE_PERCENT: u8 = 10;
-/** GPU load that turns "GPU busy" on; `gpu_warn_exit` turns it off. */
-pub(crate) const GPU_BUSY_ENTER_LOAD: u64 = 80;
 pub(crate) const COMPRESSION_WARN_EXIT: u64 = 32 * MIB;
 pub(crate) const GPU_WARN_EXIT: u64 = 70;
 pub(crate) const DEFAULT_OMLX_HOST: &str = "127.0.0.1";
@@ -42,6 +40,20 @@ pub(crate) struct Config {
     pub(crate) gpu_warn_exit: Option<u64>,
     /// `false` silences the critical-condition bell and banner.
     pub(crate) alarms: Option<bool>,
+    pub(crate) journal: Option<JournalConfig>,
+}
+
+/// Which routine events the Journal records; unset means recorded. System
+/// rows and critical states are always recorded.
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub(crate) struct JournalConfig {
+    pub(crate) prompts: Option<bool>,
+    pub(crate) llm: Option<bool>,
+    pub(crate) queue: Option<bool>,
+    pub(crate) memory: Option<bool>,
+    pub(crate) paging: Option<bool>,
+    pub(crate) gpu: Option<bool>,
+    pub(crate) thermal: Option<bool>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
@@ -212,7 +224,7 @@ impl Thresholds {
         self.memory_critical_load = self.memory_critical_load.clamp(self.memory_warn_load, 100);
         self.gpu_warn_load = self.gpu_warn_load.min(100);
         self.gpu_critical_load = self.gpu_critical_load.clamp(self.gpu_warn_load, 100);
-        self.gpu_warn_exit = self.gpu_warn_exit.min(100);
+        self.gpu_warn_exit = self.gpu_warn_exit.min(self.gpu_warn_load);
         self.swap_critical_rate = self.swap_critical_rate.max(self.swap_warn_rate);
         self.compression_warn_exit = self.compression_warn_exit.min(self.compression_warn_rate);
         self

@@ -439,7 +439,7 @@ that a corresponding process exists on the machine running mlxtop.
 ### Settings
 
 Settings lists every [configuration](#configuration) option, grouped into
-General, oMLX server and Thresholds. A value set in `config.json` is shown in
+General, Journal, oMLX server and Thresholds. A value set in `config.json` is shown in
 white beside its default; an unset one shows the default in grey. Rates are
 entered in MiB/s and stored in bytes per second.
 
@@ -503,7 +503,10 @@ you leave out keeps its built-in default.
   "swap_critical_rate": 16777216,
   "swap_warn_exit": 2097152,
   "compression_warn_rate": 67108864,
-  "compression_warn_exit": 33554432
+  "compression_warn_exit": 33554432,
+  "journal": {
+    "gpu": false
+  }
 }
 ```
 
@@ -515,8 +518,8 @@ you leave out keeps its built-in default.
 | `omx.port` | integer | 8080 | oMLX server port |
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
-| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "busy" and shown in yellow |
-| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; considered in slowdown correlation; never an alarm by itself |
+| `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in yellow |
+| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; considered in slowdown correlation; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
 | `swap_critical_rate` | integer | 16 MiB/s | Swap rate that counts as thrashing (in and out); critical paging findings turn the paging chart red |
@@ -524,8 +527,18 @@ you leave out keeps its built-in default.
 | `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
 | `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
 | `alarms` | boolean | true | `false` turns off the critical-condition bell and banner; charts, the assessment and the Journal still show the condition |
+| `journal.prompts` | boolean | true | Record a row for each new request |
+| `journal.llm` | boolean | true | Record model, status, telemetry and request start/finish changes |
+| `journal.queue` | boolean | true | Record requests starting to wait and the queue clearing |
+| `journal.memory` | boolean | true | Record memory pressure changes; a move to critical pressure is always recorded |
+| `journal.paging` | boolean | true | Record light paging starting and clearing |
+| `journal.gpu` | boolean | true | Record GPU BUSY, saturated and eased changes |
+| `journal.thermal` | boolean | true | Record thermal warning changes |
 
-Rates are bytes per second; loads are percentages.
+Rates are bytes per second; loads are percentages. A `journal` toggle set to
+`false` stops new rows of that kind. System rows, assessment findings
+(such as HEAVY PAGING, GPU THROTTLED or VRAM FULL) and a move to critical
+memory pressure are always recorded.
 
 ### Precedence
 

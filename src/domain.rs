@@ -54,7 +54,7 @@ impl EventKind {
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
             | "WATCH PAGING" => Self::Paging,
-            "GPU" | "CPU OFFLOAD" | "VRAM FULL" | "GPU THROTTLED" => Self::Gpu,
+            "GPU" | "GPU BUSY" | "CPU OFFLOAD" | "VRAM FULL" | "GPU THROTTLED" => Self::Gpu,
             "THERMAL" => Self::Thermal,
             _ => Self::System,
         }

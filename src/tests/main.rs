@@ -49,7 +49,11 @@ pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "swap_warn_exit": 4194304,
     "compression_warn_rate": 100663296,
     "compression_warn_exit": 50331648,
-    "alarms": false
+    "alarms": false,
+    "journal": {
+        "prompts": false, "llm": false, "queue": false, "memory": false,
+        "paging": false, "gpu": false, "thermal": false
+    }
 }"#;
 
 pub(super) fn test_app(tab: usize) -> App {
@@ -1488,31 +1492,42 @@ fn nvidia_dashboard_requires_linux_and_detected_cards() {
 
 #[test]
 fn gpu_journal_uses_load_words_and_measured_recovery_colors() {
+    let transition = |previous: u8, current: u8, thresholds: Thresholds| {
+        let mut band = None;
+        gpu_journal_transition(&mut band, Some(previous), thresholds);
+        gpu_journal_transition(&mut band, Some(current), thresholds)
+    };
     for (previous, current, label, tone) in [
         (20, 95, "GPU load saturated · 95% busy", Tone::Red),
-        (98, 85, "GPU load eased · 85% busy", Tone::Yellow),
+        (98, 78, "GPU load eased · 78% busy", Tone::Yellow),
         (98, 0, "GPU idle · 0% busy", Tone::Green),
         (20, 85, "busy burst started · 85% busy", Tone::Yellow),
         (85, 40, "GPU load eased · 40% busy", Tone::Green),
     ] {
-        let (summary, actual) =
-            gpu_journal_transition(Some(previous), Some(current), defaults()).unwrap();
+        let (summary, actual) = transition(previous, current, defaults()).unwrap();
         assert_eq!(summary, label);
         assert_eq!(actual, tone);
         assert!(!summary.contains("critical"));
     }
-    assert!(gpu_journal_transition(Some(95), None, defaults()).is_none());
-    assert!(gpu_journal_transition(None, Some(0), defaults()).is_none());
-    assert!(gpu_journal_transition(Some(75), Some(74), defaults()).is_none());
+    let mut band = None;
+    assert!(gpu_journal_transition(&mut band, None, defaults()).is_none());
+    assert!(gpu_journal_transition(&mut band, Some(0), defaults()).is_none());
+    assert!(transition(75, 74, defaults()).is_none());
     let thresholds = Thresholds {
         gpu_critical_load: 95,
         ..defaults()
     };
-    assert!(gpu_journal_transition(Some(89), Some(94), thresholds).is_none());
-    assert!(gpu_journal_transition(Some(94), Some(95), thresholds)
+    assert!(transition(89, 94, thresholds).is_none());
+    assert!(transition(94, 95, thresholds)
         .unwrap()
         .0
         .contains("saturated"));
+    // A configured exit level holds the busy band down to it.
+    let thresholds = Thresholds {
+        gpu_warn_exit: 50,
+        ..defaults()
+    };
+    assert!(transition(84, 55, thresholds).is_none());
 }
 
 #[test]
@@ -3740,7 +3755,7 @@ fn configured_gpu_threshold_changes_correlation_attribution() {
         provider: "oMLX".into(),
         model: "model".into(),
         generation_tps: Some(20.0),
-        gpu_util: Some(78),
+        gpu_util: Some(72),
         ..CorrelationObservation::default()
     };
     let previous = CorrelationObservation {
@@ -3763,7 +3778,7 @@ fn configured_gpu_threshold_changes_correlation_attribution() {
         Thresholds::from_config(&config),
     );
     assert_eq!(with_lower_ceiling.cause, CorrelationCause::GpuSaturation);
-    assert!(with_lower_ceiling.details.contains("GPU 78% busy"));
+    assert!(with_lower_ceiling.details.contains("GPU 72% busy"));
 }
 
 #[test]
@@ -3903,6 +3918,7 @@ fn every_config_field_reaches_the_resolved_settings() {
         compression_warn_exit,
         gpu_warn_exit,
         alarms,
+        journal,
     } = config.clone();
     let OmxConfig { host, port } = omx.expect("the fixture sets omx");
 
@@ -3953,6 +3969,32 @@ fn every_config_field_reaches_the_resolved_settings() {
         },
     );
     assert_eq!(app.alarms, alarms.expect("the fixture sets alarms"));
+
+    let journal = journal.expect("the fixture sets journal");
+    let JournalConfig {
+        prompts,
+        llm,
+        queue,
+        memory,
+        paging,
+        gpu,
+        thermal,
+    } = journal.clone();
+    for (toggle, state) in [
+        (prompts, "PROMPT"),
+        (llm, "LLM"),
+        (queue, "QUEUE"),
+        (memory, "PRESSURE"),
+        (paging, "PAGING"),
+        (gpu, "GPU"),
+        (thermal, "THERMAL"),
+    ] {
+        assert_eq!(toggle, Some(false));
+        assert!(
+            !journal_records(&journal, state, false),
+            "journal toggle for {state} was parsed but never filters"
+        );
+    }
 }
 
 /**

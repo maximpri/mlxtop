@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Health classification and measured throughput correlation; no terminal rendering.
-use crate::config::{Thresholds, GPU_BUSY_ENTER_LOAD, PAGING_ACTIVE_ENTER_RATE};
+use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, Sample, TelemetrySource,
     ThroughputDirection, Tone, MIB,
@@ -89,7 +89,7 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
     let gpu_busy = threshold_with_hysteresis(
         sample.gpu_util.unwrap_or_default() as u64,
         was_gpu_busy,
-        GPU_BUSY_ENTER_LOAD,
+        thresholds.gpu_warn_load,
         thresholds.gpu_warn_exit,
     ) && llm;
     let gpu_issue = crate::gpu_findings::detect(sample, previous_impact);
@@ -609,7 +609,7 @@ pub(crate) fn correlate_observations(
                 if crossed { 95 } else { 72 },
                 format!("GPU {gpu}% busy"),
             );
-        } else if u64::from(gpu) >= GPU_BUSY_ENTER_LOAD {
+        } else if u64::from(gpu) >= thresholds.gpu_warn_load {
             push_correlation_factor(
                 &mut factors,
                 CorrelationCause::GpuSaturation,

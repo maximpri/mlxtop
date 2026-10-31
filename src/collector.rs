@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Combine host and provider observations into bounded histories and snapshots.
+use crate::analysis::threshold_with_hysteresis;
 use crate::analysis::{classify, signal_summary, CorrelationEngine};
 use crate::completion_log::read_llm_stats;
-use crate::config::{Config, OmxConfig, Thresholds, GPU_BUSY_ENTER_LOAD};
+use crate::config::{Config, JournalConfig, OmxConfig, Thresholds};
 use crate::domain::{
     ChartMetric, ChartPoint, EventKind, LlmLogStats, LlmTelemetry, MetalTelemetry, MlxTelemetry,
     Sample, SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
@@ -101,7 +102,22 @@ pub(crate) struct Collector {
     pub(crate) thresholds: Thresholds,
     /// The `omx` section the oMLX endpoint was resolved from.
     pub(crate) omx: Option<OmxConfig>,
+    pub(crate) journal: JournalConfig,
+    /// GPU load band the Journal last saw; `None` until the first reading.
+    pub(crate) gpu_band: Option<GpuBand>,
+    /// Provider and source last reported as "telemetry online".
+    pub(crate) telemetry_online: Option<(String, TelemetrySource)>,
 }
+
+/// Latched GPU load bands, each with an enter and a lower exit level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GpuBand {
+    pub(crate) busy: bool,
+    pub(crate) saturated: bool,
+}
+
+/// Saturation clears this many points below the level that sets it.
+const GPU_SATURATED_EXIT_GAP: u64 = 10;
 
 impl Collector {
     pub(crate) fn new(history_limit: usize, config: Config) -> Self {
@@ -189,6 +205,9 @@ impl Collector {
             history_limit,
             thresholds: Thresholds::from_config(&config),
             omx: config.omx.clone(),
+            journal: config.journal.clone().unwrap_or_default(),
+            gpu_band: None,
+            telemetry_online: None,
         }
     }
 
@@ -196,6 +215,7 @@ impl Collector {
     /// endpoint only when `omx` changed, so other edits keep runtime state.
     pub(crate) fn apply_config(&mut self, config: &Config) {
         self.thresholds = Thresholds::from_config(config);
+        self.journal = config.journal.clone().unwrap_or_default();
         if config.omx != self.omx {
             self.omx = config.omx.clone();
             self.llm_client = LlmTelemetryClient::from_config(config, self.home.clone());
@@ -481,7 +501,7 @@ impl Collector {
         sample.llm_model_offloaded = llm_stats.and_then(|stats| stats.model_offloaded);
         sample.llm_model_size = llm_stats.and_then(|stats| stats.model_size);
         if process_snapshot.hosted_splash_cpu.is_some() {
-            apply_hosted_splash(&mut sample);
+            apply_hosted_splash(&mut sample, self.thresholds);
         }
         (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref(), self.platform);
         let previous = if self.current.updated == "waiting" {
@@ -650,8 +670,16 @@ impl Collector {
             }
         }
 
+        let previous_gpu_band = self.gpu_band;
+        let gpu_transition =
+            gpu_journal_transition(&mut self.gpu_band, sample.gpu_util, self.thresholds);
+        // A server that went away and came back is online again.
+        if sample.llm_provider == "none" || sample.llm_source == TelemetrySource::None {
+            self.telemetry_online = None;
+        }
         if let Some(previous) = previous {
-            if previous.impact != sample.impact && sample.impact != "SAMPLING" {
+            let impact_changed = previous.impact != sample.impact && sample.impact != "SAMPLING";
+            if impact_changed {
                 add(&sample.impact, signal_summary(sample), sample.impact_tone);
             }
 
@@ -730,7 +758,14 @@ impl Collector {
                 );
             }
 
-            if previous.llm_generation_tps.is_none() && sample.llm_generation_tps.is_some() {
+            // An idle server can report its rate only on some polls, so
+            // "online" is news once per provider and source.
+            let telemetry_key = (sample.llm_provider.clone(), sample.llm_source);
+            if previous.llm_generation_tps.is_none()
+                && sample.llm_generation_tps.is_some()
+                && self.telemetry_online.as_ref() != Some(&telemetry_key)
+            {
+                self.telemetry_online = Some(telemetry_key);
                 add(
                     "LLM",
                     format!(
@@ -792,8 +827,14 @@ impl Collector {
                 );
             }
 
+            // GPU BUSY replaces the busy transition, but saturation is a separate change.
+            let saturation_changed = previous_gpu_band
+                .zip(self.gpu_band)
+                .is_some_and(|(previous, current)| previous.saturated != current.saturated);
+            let gpu_busy_reported =
+                impact_changed && (previous.impact == "GPU BUSY" || sample.impact == "GPU BUSY");
             if let Some((summary, tone)) =
-                gpu_journal_transition(previous.gpu_util, sample.gpu_util, self.thresholds)
+                gpu_transition.filter(|_| !gpu_busy_reported || saturation_changed)
             {
                 add("GPU", summary, tone);
             }
@@ -839,10 +880,14 @@ impl Collector {
         }
 
         for (state, summary, tone) in events {
+            if !journal_records(&self.journal, &state, sample.pressure == "RED") {
+                continue;
+            }
+            let kind = EventKind::from_state(&state);
             self.signals.push_back(SignalEvent {
                 time: sample.updated.clone(),
                 recorded_at: SystemTime::now(),
-                kind: EventKind::from_state(&state),
+                kind,
                 state,
                 summary,
                 tone,
@@ -857,6 +902,8 @@ impl Collector {
     pub(crate) fn reset(&mut self) {
         self.previous = None;
         self.previous_llm_cache = None;
+        self.gpu_band = None;
+        self.telemetry_online = None;
         self.seen_requests.clear();
         self.request_history = request_history::History::default();
         self.operator_history = operator_history::History::default();
@@ -878,7 +925,7 @@ impl Collector {
 /// so only the device facts MLX reports are kept. Requests oMLX's benchmark
 /// sends straight to Splash never reach oMLX's request counts, so a busy GPU
 /// with nothing tracked is "untracked", not idle.
-pub(crate) fn apply_hosted_splash(sample: &mut Sample) {
+pub(crate) fn apply_hosted_splash(sample: &mut Sample, thresholds: Thresholds) {
     if sample.llm_provider != "oMLX" {
         return;
     }
@@ -897,7 +944,7 @@ pub(crate) fn apply_hosted_splash(sample: &mut Sample) {
         && sample.llm_waiting_requests.unwrap_or(0) == 0
         && sample
             .gpu_util
-            .is_some_and(|load| u64::from(load) >= GPU_BUSY_ENTER_LOAD)
+            .is_some_and(|load| u64::from(load) >= thresholds.gpu_warn_load)
     {
         sample.llm_status = "untracked".into();
     }
@@ -960,28 +1007,64 @@ pub(crate) fn cache_interval_efficiency(
     Some(cached_delta as f64 / prompt_delta as f64 * 100.0)
 }
 
+/// Whether the Journal settings keep this event. A toggle mutes only its
+/// routine rows; assessment changes such as GPU THROTTLED or HEAVY PAGING,
+/// and a move to critical memory pressure, are always kept.
+pub(crate) fn journal_records(
+    journal: &JournalConfig,
+    state: &str,
+    critical_pressure: bool,
+) -> bool {
+    let toggle = match state {
+        "PROMPT" => journal.prompts,
+        "LLM" => journal.llm,
+        "QUEUE" => journal.queue,
+        "PRESSURE" if !critical_pressure => journal.memory,
+        "PAGING" => journal.paging,
+        "GPU" | "GPU BUSY" => journal.gpu,
+        "THERMAL" => journal.thermal,
+        _ => None,
+    };
+    toggle.unwrap_or(true)
+}
+
 /// Report measured GPU load transitions without declaring a critical fault.
-/// Missing readings cannot establish that a busy period ended.
+/// Each band latches: busy sets at `gpu_warn_load` and clears below
+/// `gpu_warn_exit`, saturation clears ten points below where it sets, so
+/// load wobbling around either line during processing stays quiet. The first
+/// reading sets the baseline, and a missing reading cannot end a busy period.
 pub(crate) fn gpu_journal_transition(
-    previous: Option<u8>,
+    band: &mut Option<GpuBand>,
     current: Option<u8>,
     thresholds: Thresholds,
 ) -> Option<(String, Tone)> {
-    let (previous, current) = (u64::from(previous?), u64::from(current?));
-    let saturated = current >= thresholds.gpu_critical_load;
-    let saturation_changed = (previous >= thresholds.gpu_critical_load) != saturated;
-    // Keep the existing busy-burst threshold to avoid logging every 75↔74%
-    // fluctuation. Per-sample chart bands still retain all measured changes.
-    let busy = current >= GPU_BUSY_ENTER_LOAD;
-    let busy_changed = (previous >= GPU_BUSY_ENTER_LOAD) != busy;
-    if !saturation_changed && !busy_changed {
+    let current = u64::from(current?);
+    let was = band.unwrap_or_default();
+    let next = GpuBand {
+        busy: threshold_with_hysteresis(
+            current,
+            was.busy,
+            thresholds.gpu_warn_load,
+            thresholds.gpu_warn_exit,
+        ),
+        saturated: threshold_with_hysteresis(
+            current,
+            was.saturated,
+            thresholds.gpu_critical_load,
+            thresholds
+                .gpu_critical_load
+                .saturating_sub(GPU_SATURATED_EXIT_GAP),
+        ),
+    };
+    let previous = band.replace(next)?;
+    if previous == next {
         return None;
     }
     let label = if current == 0 {
         "GPU idle"
-    } else if saturation_changed && saturated {
+    } else if next.saturated && !previous.saturated {
         "GPU load saturated"
-    } else if !saturation_changed && busy {
+    } else if next.busy && !previous.busy {
         "busy burst started"
     } else {
         "GPU load eased"

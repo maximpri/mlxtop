@@ -947,7 +947,7 @@ fn omlx_serving_through_splash_hides_mlx_readings_and_flags_untracked_work() {
 
     // The model lives in Splash: oMLX's MLX runtime readings go, device facts stay.
     let mut sample = omlx("idle", Some(0), Some(5));
-    apply_hosted_splash(&mut sample);
+    apply_hosted_splash(&mut sample, Thresholds::default());
     assert_eq!(sample.llm_engine.as_deref(), Some("Splash"));
     assert_eq!(sample.mlx.version, None);
     assert_eq!(sample.mlx.active_memory, None);
@@ -961,29 +961,29 @@ fn omlx_serving_through_splash_hides_mlx_readings_and_flags_untracked_work() {
     // benchmark talks to Splash directly), not an idle server.
     for status in ["idle", "healthy", "ready"] {
         let mut sample = omlx(status, Some(0), Some(97));
-        apply_hosted_splash(&mut sample);
+        apply_hosted_splash(&mut sample, Thresholds::default());
         assert_eq!(sample.llm_status, "untracked", "{status}");
     }
     // Tracked work, a quiet GPU or a missing reading keep oMLX's own status.
     for (status, active, gpu) in [
         ("generating", Some(1), Some(97)),
         ("healthy", Some(1), Some(97)),
-        ("idle", Some(0), Some(79)),
+        ("idle", Some(0), Some(74)),
         ("idle", Some(0), None),
     ] {
         let mut sample = omlx(status, active, gpu);
-        apply_hosted_splash(&mut sample);
+        apply_hosted_splash(&mut sample, Thresholds::default());
         assert_eq!(sample.llm_status, status, "{status} {active:?} {gpu:?}");
     }
     let mut queued = omlx("idle", Some(0), Some(97));
     queued.llm_waiting_requests = Some(2);
-    apply_hosted_splash(&mut queued);
+    apply_hosted_splash(&mut queued, Thresholds::default());
     assert_eq!(queued.llm_status, "idle");
 
     // Only oMLX hosts Splash this way.
     let mut other = omlx("idle", Some(0), Some(97));
     other.llm_provider = "Ollama".into();
-    apply_hosted_splash(&mut other);
+    apply_hosted_splash(&mut other, Thresholds::default());
     assert_eq!(other.llm_engine, None);
     assert_eq!(other.mlx.version.as_deref(), Some("0.31.4"));
 }
@@ -1007,4 +1007,272 @@ fn a_saved_config_changes_thresholds_and_the_endpoint_only_when_omx_changes() {
     });
     collector.apply_config(&config);
     assert_eq!(collector.llm_client.port, original.wrapping_add(1).max(1));
+}
+
+fn gpu_sample(load: u8) -> Sample {
+    Sample {
+        gpu_util: Some(load),
+        ..Sample::default()
+    }
+}
+
+/// Feed GPU loads one sample at a time and return the GPU journal rows.
+fn gpu_rows(collector: &mut Collector, loads: &[u8]) -> Vec<String> {
+    let mut previous = gpu_sample(loads[0]);
+    collector.record_journal_events(None, &previous);
+    for &load in &loads[1..] {
+        let next = gpu_sample(load);
+        collector.record_journal_events(Some(&previous), &next);
+        previous = next;
+    }
+    collector
+        .signals
+        .iter()
+        .filter(|event| event.kind == EventKind::Gpu)
+        .map(|event| event.summary.clone())
+        .collect()
+}
+
+#[test]
+fn gpu_journal_ignores_wobble_around_the_busy_and_saturated_lines() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    // The reported journal: 84, 79, 81, 77 logged four rows. Saturation
+    // wobbling 99 ↔ 94 is normal processing too.
+    let rows = gpu_rows(
+        &mut collector,
+        &[20, 84, 79, 81, 77, 84, 95, 99, 94, 99, 94, 96],
+    );
+    assert_eq!(
+        rows,
+        [
+            "busy burst started · 84% busy",
+            "GPU load saturated · 95% busy"
+        ]
+    );
+}
+
+#[test]
+fn gpu_journal_logs_a_real_drop_once() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    let rows = gpu_rows(&mut collector, &[20, 99, 85, 75, 65, 60, 0]);
+    assert_eq!(
+        rows,
+        [
+            "GPU load saturated · 99% busy",
+            "GPU load eased · 75% busy",
+            "GPU load eased · 65% busy",
+        ]
+    );
+}
+
+#[test]
+fn gpu_journal_latch_starts_over_after_reset() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    gpu_rows(&mut collector, &[20, 95]);
+    collector.reset();
+    // A fresh session at 95% is the baseline, not a new burst.
+    assert!(gpu_rows(&mut collector, &[95, 96]).is_empty());
+}
+
+#[test]
+fn gpu_busy_impact_is_a_gpu_event_and_replaces_the_busy_burst_row() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    let previous = Sample {
+        impact: "HEALTHY".into(),
+        ..gpu_sample(20)
+    };
+    collector.record_journal_events(None, &previous);
+    let busy = Sample {
+        impact: "GPU BUSY".into(),
+        ..gpu_sample(84)
+    };
+    collector.record_journal_events(Some(&previous), &busy);
+    let gpu: Vec<_> = collector
+        .signals
+        .iter()
+        .filter(|event| event.kind == EventKind::Gpu)
+        .map(|event| event.state.clone())
+        .collect();
+    assert_eq!(gpu, ["GPU BUSY"]);
+}
+
+#[test]
+fn journal_toggles_drop_routine_events_but_keep_system_and_critical() {
+    let config = Config {
+        journal: Some(JournalConfig {
+            gpu: Some(false),
+            llm: Some(false),
+            memory: Some(false),
+            paging: Some(false),
+            ..JournalConfig::default()
+        }),
+        ..offline_config()
+    };
+    let mut collector = Collector::with_host(
+        60,
+        config,
+        Box::new(FakeHost::default()),
+        Platform::Linux,
+        None,
+    );
+    let previous = Sample {
+        impact: "HEALTHY".into(),
+        llm_status: "idle".into(),
+        ..gpu_sample(20)
+    };
+    collector.record_journal_events(None, &previous);
+    let next = Sample {
+        impact: "HEAVY PAGING".into(),
+        llm_status: "generating".into(),
+        pressure: "YELLOW".into(),
+        swap_out: 64 * MIB,
+        ..gpu_sample(95)
+    };
+    collector.record_journal_events(Some(&previous), &next);
+    let states: Vec<_> = journal(&collector).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(states, ["SYSTEM", "HEAVY PAGING"]);
+
+    // Settings turns GPU rows back on without a restart.
+    collector.apply_config(&offline_config());
+    collector.record_journal_events(Some(&next), &gpu_sample(30));
+    assert!(collector
+        .signals
+        .iter()
+        .any(|event| event.summary == "GPU load eased · 30% busy"));
+}
+
+#[test]
+fn telemetry_online_is_logged_once_while_the_rate_flickers() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    let serving = |tps: Option<f64>| Sample {
+        llm_provider: "mlx-serve".into(),
+        llm_source: TelemetrySource::Live,
+        llm_generation_tps: tps,
+        ..Sample::default()
+    };
+    let mut previous = serving(None);
+    collector.record_journal_events(None, &previous);
+    for tps in [Some(0.0), None, Some(0.0), None, Some(0.0)] {
+        let next = serving(tps);
+        collector.record_journal_events(Some(&previous), &next);
+        previous = next;
+    }
+    let online = |collector: &Collector| {
+        collector
+            .signals
+            .iter()
+            .filter(|event| event.summary.contains("telemetry online"))
+            .count()
+    };
+    assert_eq!(online(&collector), 1);
+
+    // A different provider is news again.
+    let other = Sample {
+        llm_provider: "oMLX".into(),
+        ..serving(Some(10.0))
+    };
+    collector.record_journal_events(Some(&serving(None)), &other);
+    assert_eq!(online(&collector), 2);
+}
+
+#[test]
+fn journal_toggles_keep_findings_and_critical_pressure() {
+    let config = Config {
+        journal: Some(JournalConfig {
+            gpu: Some(false),
+            memory: Some(false),
+            paging: Some(false),
+            ..JournalConfig::default()
+        }),
+        ..offline_config()
+    };
+    let mut collector = Collector::with_host(
+        60,
+        config,
+        Box::new(FakeHost::default()),
+        Platform::Linux,
+        None,
+    );
+    let mut previous = Sample {
+        impact: "HEALTHY".into(),
+        pressure: "YELLOW".into(),
+        ..Sample::default()
+    };
+    collector.record_journal_events(None, &previous);
+    for (impact, pressure) in [
+        ("GPU THROTTLED", "YELLOW"),
+        ("PAGING ACTIVE", "YELLOW"),
+        ("GPU BUSY", "YELLOW"),
+        // Counters missing: no MEMORY BOTTLENECK, only the pressure row.
+        ("DATA LIMITED", "RED"),
+    ] {
+        let next = Sample {
+            impact: impact.into(),
+            pressure: pressure.into(),
+            ..Sample::default()
+        };
+        collector.record_journal_events(Some(&previous), &next);
+        previous = next;
+    }
+    let states: Vec<_> = journal(&collector).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(
+        states,
+        [
+            "SYSTEM",
+            "GPU THROTTLED",
+            "PAGING ACTIVE",
+            "DATA LIMITED",
+            "PRESSURE"
+        ]
+    );
+}
+
+#[test]
+fn telemetry_online_is_logged_again_after_the_server_returns() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    let serving = |source, tps: Option<f64>| Sample {
+        llm_provider: "mlx-serve".into(),
+        llm_source: source,
+        llm_generation_tps: tps,
+        ..Sample::default()
+    };
+    let steps = [
+        serving(TelemetrySource::Live, None),
+        serving(TelemetrySource::Live, Some(0.0)),
+        serving(TelemetrySource::None, None),
+        serving(TelemetrySource::Live, Some(0.0)),
+    ];
+    collector.record_journal_events(None, &steps[0]);
+    for pair in steps.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let online = collector
+        .signals
+        .iter()
+        .filter(|event| event.summary.contains("telemetry online"))
+        .count();
+    assert_eq!(online, 2);
+}
+
+#[test]
+fn saturation_survives_gpu_busy_impact_deduplication() {
+    let mut c = collector(FakeHost::default(), Platform::Linux, None);
+    let before = Sample {
+        impact: "LLM READY".into(),
+        ..gpu_sample(20)
+    };
+    let after = Sample {
+        impact: "GPU BUSY".into(),
+        ..gpu_sample(99)
+    };
+    c.record_journal_events(None, &before);
+    c.record_journal_events(Some(&before), &after);
+    c.record_journal_events(Some(&after), &after);
+    assert!(
+        c.signals
+            .iter()
+            .any(|e| e.summary.contains("GPU load saturated")),
+        "{:?}",
+        journal(&c)
+    );
 }
