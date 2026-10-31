@@ -22,6 +22,7 @@ pub(crate) struct LlmTelemetryClient {
     pub(crate) session_cookie: Option<String>,
     pub(crate) cached: Option<LlmTelemetry>,
     pub(crate) mlx_metadata: MlxTelemetry,
+    model_metadata: Option<Value>,
     pub(crate) last_stats_available: Option<bool>,
     pub(crate) next_metadata_poll: Instant,
     pub(crate) next_poll: Instant,
@@ -42,6 +43,7 @@ impl LlmTelemetryClient {
             session_cookie: None,
             cached: None,
             mlx_metadata: MlxTelemetry::default(),
+            model_metadata: None,
             last_stats_available: None,
             next_metadata_poll: Instant::now(),
             next_poll: Instant::now(),
@@ -231,6 +233,7 @@ impl LlmTelemetryClient {
         }
         let now = Instant::now();
         if now >= self.next_metadata_poll {
+            self.model_metadata = self.fetch_json("/admin/api/models");
             let device_info = self.fetch_json("/admin/api/device-info");
             let settings = self
                 .fetch_json("/admin/api/global-settings")
@@ -250,6 +253,12 @@ impl LlmTelemetryClient {
             &self.mlx_metadata,
             &parse_mlx_runtime_telemetry(&health, stats.as_ref()),
         );
+        if let Some(stats) = &stats {
+            crate::runtime_features::append_details(
+                &mut telemetry.details,
+                crate::runtime_features::omlx_details(stats, self.model_metadata.as_ref()),
+            );
+        }
         telemetry.observed_at = Some(SystemTime::now());
         Some(telemetry)
     }
@@ -387,6 +396,25 @@ pub(crate) fn read_omlx_endpoint(config: &Config, home: Option<&Path>) -> (Strin
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|text| parse_omlx_server_env(&text))
         .unwrap_or_default();
+    let native = crate::provider_discovery::omlx_settings(home);
+    let discovered = DiscoveredEndpoint {
+        host: discovered.host.or_else(|| {
+            native
+                .as_ref()?
+                .pointer("/server/host")?
+                .as_str()
+                .map(crate::provider_discovery::local_bind)
+        }),
+        port: discovered.port.or_else(|| {
+            native
+                .as_ref()?
+                .pointer("/server/port")?
+                .as_u64()?
+                .try_into()
+                .ok()
+                .filter(|p| *p > 0)
+        }),
+    };
     let (host, port) = resolve_omlx_endpoint(&discovered, config);
     if discovered
         .host
@@ -418,15 +446,27 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 }
 
 pub(crate) fn read_omlx_api_key(home: Option<&Path>) -> Option<String> {
-    let path = home?.join(".config/omlx-coding/server.env");
-    let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
-        .find_map(|line| {
-            let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-            let (key, value) = line.split_once('=')?;
-            (key.trim() == "API_KEY").then(|| value.trim().trim_matches('"').to_owned())
+    env::var("MLXTOP_PROVIDER_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let text = fs::read_to_string(home?.join(".config/omlx-coding/server.env")).ok()?;
+            text.lines()
+                .find_map(|line| {
+                    let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+                    let (key, value) = line.split_once('=')?;
+                    (key.trim() == "API_KEY").then(|| value.trim().trim_matches('"').to_owned())
+                })
+                .filter(|s| !s.is_empty())
         })
-        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            crate::provider_discovery::omlx_settings(home)?
+                .pointer("/auth/api_key")?
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .filter(|s| !s.chars().any(char::is_control))
 }
 
 pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> LlmTelemetry {
@@ -533,6 +573,10 @@ pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> Llm
     if let Some(rate) = live_sum(&prefilling) {
         telemetry.prefill_tps = Some(rate);
         telemetry.prefill_tps_live = true;
+    }
+    if let [request] = prefilling.as_slice() {
+        telemetry.prefill_tokens_done = request.processed;
+        telemetry.prefill_tokens_expected = request.prompt.filter(|n| *n > 0);
     }
     telemetry.output_tokens = (!generating.is_empty())
         .then(|| {

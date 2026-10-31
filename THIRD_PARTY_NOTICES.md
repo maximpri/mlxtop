@@ -739,3 +739,13 @@ of Data, including for example machine learning models and models'
 insights.
 
 ```
+
+## Runtime compatibility test fixtures
+
+The projected Splash status fixtures under `src/tests/fixtures/splash/` are
+adapted from incoai/splash, `dev/tests/engine/status_golden.json`, tags 1.3.2,
+1.4.0, 1.4.1 and 1.5.0. Copyright Splash contributors. Licensed under the
+Apache License, Version 2.0 (license text included above). Projection removes
+unused sections; synthetic HTTP instance/transport metadata is added. See
+`src/tests/fixtures/README.md` for provenance. oMLX contract examples in that
+directory use synthetic values and the documented upstream field formats.

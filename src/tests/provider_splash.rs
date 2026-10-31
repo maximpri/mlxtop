@@ -326,7 +326,7 @@ fn a_request_decoding_alone_gets_its_own_speed_and_an_exact_final_count() {
 }
 
 #[test]
-fn concurrent_requests_share_counters_so_get_no_per_request_speed() {
+fn concurrent_requests_measure_their_own_token_growth() {
     let mut history = SplashHistory::default();
     let now = Instant::now();
     let at = |seconds| now + Duration::from_secs(seconds);
@@ -342,8 +342,8 @@ fn concurrent_requests_share_counters_so_get_no_per_request_speed() {
     let result = history
         .observe(&timed(300, 3000.0, both(110, 105)), at(1))
         .unwrap();
-    assert!(result.requests.iter().all(|r| r.output_tps.is_none()));
-    // Request 2 finishes while 1 runs on: its last observed count, no speed.
+    assert!(result.requests.iter().all(|r| r.output_tps == Some(100.0)));
+    // Request 2 finishes while 1 runs on: preserve its last measured speed/count.
     let result = history
         .observe(
             &timed(400, 4000.0, json!([request(1, "decode", 900, 900, 210)])),
@@ -354,10 +354,10 @@ fn concurrent_requests_share_counters_so_get_no_per_request_speed() {
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].id, "2");
     assert_eq!(done[0].output, Some(105));
-    assert_eq!(done[0].output_tps, None);
-    // Request 1 shared the engine before, so its speed stays unknown.
+    assert_eq!(done[0].output_tps, Some(100.0));
+    // The remaining request still uses its own counts, not the shared GPU timer.
     let running = result.requests.iter().find(|r| !r.completed).unwrap();
-    assert_eq!(running.output_tps, None);
+    assert_eq!(running.output_tps, Some(100.0));
 }
 
 #[test]
@@ -420,4 +420,60 @@ fn details_lead_with_problems_then_latency_memory_and_capacity() {
         !details.contains("capacity failures"),
         "zero is not a problem"
     );
+}
+
+#[test]
+fn splash_release_fixtures_preserve_the_monitoring_contract() {
+    for fixture in [
+        include_str!("fixtures/splash/1.3.2.json"),
+        include_str!("fixtures/splash/1.4.0.json"),
+        include_str!("fixtures/splash/1.4.1.json"),
+        include_str!("fixtures/splash/1.5.0.json"),
+    ] {
+        let value: Value = serde_json::from_str(fixture).unwrap();
+        let now = Instant::now();
+        let mut history = SplashHistory::default();
+        let result = history.observe(&value, now).unwrap();
+        assert_eq!(result.active_requests, Some(2));
+        assert_eq!(result.status.as_deref(), Some("prefilling"));
+        assert_eq!(result.model_memory, Some(4294967296));
+        assert_eq!(result.requests.len(), 2);
+        assert_eq!(result.requests[0].prompt, 4096);
+        assert_eq!(result.requests[0].prefilled, Some(2048));
+        assert_eq!(result.requests[1].output, Some(40));
+        let result = history
+            .observe(&value, now + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(result.generation_tps, Some(0.0));
+    }
+}
+
+#[test]
+fn concurrent_rates_do_not_share_tokens_or_survive_reused_request_ids() {
+    let mut history = SplashHistory::default();
+    let now = Instant::now();
+    let both = |a, b| {
+        json!([
+            request(1, "decode", 100, 100, a),
+            request(2, "decode", 200, 200, b)
+        ])
+    };
+    history
+        .observe(&status(0, 0, 0.0, both(10, 10)), now)
+        .unwrap();
+    let result = history
+        .observe(
+            &status(120, 0, 0.0, both(30, 110)),
+            now + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(result.requests[0].output_tps, Some(10.0));
+    assert_eq!(result.requests[1].output_tps, Some(50.0));
+    let result = history
+        .observe(
+            &status(130, 0, 0.0, json!([request(1, "decode", 300, 300, 1)])),
+            now + Duration::from_secs(3),
+        )
+        .unwrap();
+    assert_eq!(result.requests[0].output_tps, None);
 }

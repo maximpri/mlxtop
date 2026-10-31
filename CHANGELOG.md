@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 3.2.0-rc.1 — 2026-10-30
+
+- oMLX through Splash tracks prefilling requests whose prompt size is `total`,
+  including progress before their first output token.
+- oMLX reads native settings and moved app data roots for endpoint and credential
+  discovery. Explicit mlxtop endpoint settings and credentials take precedence.
+- oMLX engine details name configured GPU power caps, Lightning MTP, DFlash,
+  VLM MTP and expert offload for loaded models. Configuration is explicitly
+  distinguished from confirmed hardware activity.
+- Splash reports SSD expert/PLE streaming, KV spill and quota waits, ANE share,
+  fallback reasons and reruns, draft verification mode and KV deduplication.
+- Concurrent Splash requests measure their own generation speed; one request's
+  tokens are never assigned to another. A request's cached count is shown only
+  when supplied by the server or a recorded completion.
+- Splash desktop port discovery reads its preferences. Existing API-key
+  environment variables work; Keychain discovery is available on explicit opt-in.
+- Completion recording understands Splash Chat, Responses and Messages timing
+  fields, cached-input semantics and draft acceptance without saving content.
+- Engine details wrap in Processes and remain available in full in Diagnostics
+  and static reports. Versioned upstream contract fixtures guard compatibility.
+
+
 ### Journal
 
 - **GPU rows mark real load changes.** GPU load wobbling around a line during

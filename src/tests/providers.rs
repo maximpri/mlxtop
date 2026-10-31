@@ -85,6 +85,8 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -148,6 +150,8 @@ fn llama_http_polls_metrics_even_when_slots_are_disabled() {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -467,6 +471,8 @@ fn kobold_restart_does_not_reuse_request_identity() {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -547,6 +553,8 @@ fn provider_switch_drops_cached_counts() {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -596,6 +604,8 @@ fn native_poll_uses_get_and_preserves_last_result_age() {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -797,6 +807,8 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
             kobold_session: 0,
             llama: LlamaRate::default(),
             endpoint: native::Endpoint::default(),
+            discovered_endpoint: None,
+            discovered_port: None,
             metrics: native::MetricsHistory::default(),
             splash: splash::SplashHistory::default(),
             diagnostics: Default::default(),
@@ -851,6 +863,8 @@ fn diagnostic_adapter(provider: &str, port: u16) -> Adapter {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -990,6 +1004,8 @@ fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
         kobold_session: 0,
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
+        discovered_endpoint: None,
+        discovered_port: None,
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
@@ -1108,4 +1124,44 @@ fn llama_live_rate_resets_on_gaps_and_failed_reads() {
         rate.observe(Some(vec![]), start + Duration::from_secs(64)),
         None
     );
+}
+
+#[test]
+fn splash_messages_completion_has_full_prompt_cache_and_measured_timings() {
+    let record = json!({"provider":"Splash","request_id":"fixture","observed_at":1700000000_u64,
+        "usage":{"input_tokens":100,"cache_read_input_tokens":900,"output_tokens":50},
+        "timings":{"prompt_n":1000,"prompt_ms":125.5,"predicted_per_second":25.0,
+            "draft_n":80,"draft_n_accepted":60}});
+    let telemetry = parse_usage(&record).unwrap();
+    let usage = &telemetry.requests[0];
+    assert_eq!(usage.prompt, 1000);
+    assert_eq!(usage.cached, Some(900));
+    assert_eq!(usage.output, Some(50));
+    assert_eq!(usage.output_tps, Some(25.0));
+    assert_eq!(usage.ttft_ms, Some(126));
+    assert!(telemetry.details.unwrap().contains("75% (60/80)"));
+    let mut overflow = record.clone();
+    overflow["usage"]["input_tokens"] = json!(u64::MAX);
+    assert!(parse_usage(&overflow).is_none());
+}
+
+#[test]
+fn explicit_endpoint_and_port_override_splash_discovery() {
+    let mut adapter = diagnostic_adapter("Splash", 9000);
+    adapter.discovered_port = Some(8100);
+    assert_eq!(adapter.active_port(8000), 9000);
+    adapter.port = None;
+    assert_eq!(adapter.active_port(8000), 8100);
+    adapter.discovered_endpoint = Some(native::Endpoint {
+        api_key: Some("local-fixture".into()),
+        ..native::Endpoint::default()
+    });
+    assert_eq!(
+        adapter.active_endpoint().api_key.as_deref(),
+        Some("local-fixture")
+    );
+    adapter.configured = Some("Ollama".into());
+    adapter.selected(None);
+    assert!(adapter.discovered_endpoint.is_none());
+    assert!(adapter.discovered_port.is_none());
 }

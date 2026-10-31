@@ -58,6 +58,30 @@ class UsageWriterTests(unittest.TestCase):
         zero = usage_record("ollama", {"prompt_eval_count": 0, "eval_count": 0, "eval_duration": 0})
         self.assertNotIn("timings", zero)
 
+    def test_splash_messages_and_responses_timings(self):
+        messages = {"model": "fixture", "content": ["private"],
+            "usage": {"input_tokens": 100, "cache_read_input_tokens": 900, "output_tokens": 50},
+            "timings": {"prompt_n": 1000, "prompt_ms": 125.5, "predicted_per_second": 25,
+                        "draft_n": 80, "draft_n_accepted": 60}}
+        record = usage_record("splash", messages)
+        self.assertEqual(record["usage"]["prompt_tokens"], 1000)
+        self.assertEqual(record["usage"]["prompt_tokens_details"]["cached_tokens"], 900)
+        self.assertEqual(record["timings"], {"time_to_first_token_ms": 126,
+            "output_tokens_per_second": 25, "draft_n": 80, "draft_n_accepted": 60})
+        self.assertNotIn("private", json.dumps(record))
+        responses = {"usage": {"input_tokens": 1000, "output_tokens": 50,
+            "input_tokens_details": {"cached_tokens": 900, "cache_write_tokens": 0}},
+            "timings": messages["timings"]}
+        self.assertEqual(usage_record("splash", responses)["usage"], record["usage"])
+        for key, bad in [("prompt_ms", -1), ("prompt_ms", float("inf")),
+                         ("draft_n", True), ("draft_n_accepted", 81)]:
+            invalid = dict(messages, timings=dict(messages["timings"], **{key: bad}))
+            with self.assertRaises(ValueError):
+                usage_record("splash", invalid)
+        with self.assertRaises(ValueError):
+            usage_record("splash", {"usage": {"input_tokens": 2**64 - 1,
+                "cache_read_input_tokens": 1}})
+
     def test_invalid_native_timings_are_rejected(self):
         for value in (-1, True, float("nan"), float("inf"), "bad"):
             for key in ("tokens_per_second", "time_to_first_token_seconds"):

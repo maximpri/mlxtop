@@ -1646,8 +1646,13 @@ impl App {
         let details = self.collector.current.llm_details.as_deref();
         // The table title carries the totals; a panel above it only when the
         // runtime reports engine details worth reading.
+        let detail_rows = details.map_or(0, |text| {
+            let width = usize::from(area.width.saturating_sub(4)).max(1);
+            let lines = Line::from(text).width().div_ceil(width).max(1);
+            (lines.min(5) as u16 + 2).min(area.height.saturating_sub(13).max(3))
+        });
         let rows = Layout::vertical([
-            Constraint::Length(if details.is_some() { 3 } else { 0 }),
+            Constraint::Length(detail_rows),
             Constraint::Min(6),
             Constraint::Length(7),
         ])
@@ -1662,6 +1667,7 @@ impl App {
                     format!(" {text}"),
                     Style::default().fg(CYAN),
                 )))
+                .wrap(Wrap { trim: true })
                 .block(panel(
                     &format!("{} ENGINE", sample.llm_provider),
                     Tone::Cyan,

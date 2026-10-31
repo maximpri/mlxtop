@@ -147,6 +147,20 @@ the configured host, port and optional API key from:
 ~/.config/omlx-coding/server.env
 ```
 
+Native oMLX installations are also discovered from `settings.json` under
+`OMLX_BASE_PATH`, the macOS app's `~/Library/Application Support/oMLX/base-path`,
+or `~/.omlx`, in that order. The legacy `server.env` values take precedence over
+native settings, and explicit `omx.host` / `omx.port` override discovery. A native
+bind address of `0.0.0.0` or `::` is polled through loopback. Credentials resolve
+from `MLXTOP_PROVIDER_API_KEY`, then the legacy file, then native `auth.api_key`.
+Keys are never printed or copied into mlxtop's configuration.
+
+The Processes engine panel and Diagnostics show loaded models' configured GPU
+power limits, Lightning MTP, DFlash, VLM MTP and expert offload. Metadata refreshes
+with the device information, normally once a minute. A configured power cap is
+labeled **application unverified**: oMLX does not confirm hardware application
+in this API. Likewise, a configured draft is not a measured acceptance rate.
+
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
 labels that fallback with its age:
@@ -179,6 +193,42 @@ idle, the assessment says `GPU busy outside oMLX's request tracking (oMLX
 benchmark on Splash?) · no live rates`, and prompt load says it is busy outside
 oMLX. Splash's own `/status` needs the key oMLX generates, so mlxtop does not
 read it.
+
+### Direct Splash and its desktop app
+
+Direct Splash polling uses `/status`. It supports the 1.3.2–1.5.0 status contracts,
+including prefilling requests, each concurrent request's own sampled generation
+speed, aggregate rates, prefix reuse, Metal memory and DFlash acceptance. A
+request that runs alone also has the engine's decode-time speed. For concurrent
+requests, final output counts remain the last observation unless a completion
+record supplies the exact result; no shared token total is assigned to one request.
+
+For Splash's desktop app, the port is discovered from
+`~/Library/Preferences/ai.inco.splash.plist`. `MLXTOP_PROVIDER_PORT` or
+`MLXTOP_PROVIDER_URL` overrides this discovery. Local authentication accepts
+`MLXTOP_PROVIDER_API_KEY` or `SPLASH_API_KEY`. To read the desktop app's API key
+from the macOS Keychain, opt in with `MLXTOP_SPLASH_KEYCHAIN=1`; macOS may request
+Keychain access. Explicit keys take precedence and discovery never sends a
+locally discovered key to a remote endpoint.
+
+Engine details include SSD expert and PLE streaming, cumulative bytes read,
+KV spill size and quota waits, resource/concurrency waits, ANE state and FFN
+share, fallback reasons and GPU reruns, draft verification mode and deduplicated
+KV tokens. Open Diagnostics (`d`) for the full details if they do not fit the
+Processes panel. SSD streaming is runtime activity, not itself proof of OS swap
+or a memory-pressure fault; ANE fallback is reported separately from thermals.
+
+oMLX's managed Splash is monitored through oMLX, not this direct endpoint. Its
+prefill `total` field is supported when `prompt_tokens` is absent. The oMLX API
+does not forward the direct engine's complete streaming/ANE status.
+
+For exact completed-request cache counts and timings, pass the final Splash
+Chat Completions, Responses or Messages object to `scripts/record_usage.py`
+with `--provider splash`, and set `MLXTOP_USAGE_FILE` in mlxtop. The recorder
+normalizes Messages' uncached input plus cache-read counts, `prompt_ms` as TTFT,
+`predicted_per_second` as decode speed, `prompt_per_second` as prefill speed,
+and final draft/accepted counts. It never records prompts, generated content,
+reasoning text or credentials. Missing per-request cache counts remain unknown.
 
 ## MLX and Metal telemetry
 
@@ -913,13 +963,15 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   reused plus prefilled tokens. An engine restart or a gap longer than 30 seconds
   produces no rate. Memory is Splash's Metal allocations (`memory_actual`), not process
   RSS, against `memory_governor.limit_bytes`. A request decoding alone gets its own
-  output speed from the decode tokens over decode time; concurrent requests share those
-  counters and keep their last observed output instead. A request that leaves the
+  output speed from the decode tokens over decode time; concurrent requests use
+  their own generated-token growth for speed and keep their last observed final
+  output instead of sharing the aggregate counters. A request that leaves the
   engine becomes a completed record for prompt load and the Journal, with an exact
   final output when nothing else was running. The details line leads with problems
   (failed or cancelled requests, Metal health, capacity failures, requests waiting for
   memory, gated SSD cache writes, thermal state, pressure), then TTFT and inter-token
-  p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
+  p50/p95 and Metal headroom. Splash's status currently omits per-request cached
+  tokens and TTFT; the completion recorder supplies those when available.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay

@@ -157,7 +157,11 @@ pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
             result.push(OmlxRequest {
                 phase,
                 id,
-                prompt: counter(request, &["prompt_tokens"]),
+                prompt: counter(request, &["prompt_tokens"]).or_else(|| {
+                    (phase == OmlxPhase::Prefilling)
+                        .then(|| counter(request, &["total"]))
+                        .flatten()
+                }),
                 cached: counter(request, &["cached_tokens"]),
                 output: counter(request, &["generated_tokens"]),
                 rate: if phase == OmlxPhase::Prefilling {
@@ -284,6 +288,8 @@ pub(super) struct Adapter {
     kobold_session: u64,
     llama: LlamaRate,
     endpoint: native::Endpoint,
+    discovered_endpoint: Option<native::Endpoint>,
+    discovered_port: Option<u16>,
     metrics: native::MetricsHistory,
     splash: splash::SplashHistory,
     diagnostics: RefCell<RuntimeReport>,
@@ -307,6 +313,8 @@ impl Adapter {
             kobold_session: 0,
             llama: LlamaRate::default(),
             endpoint: native::Endpoint::from_env(),
+            discovered_endpoint: None,
+            discovered_port: None,
             metrics: native::MetricsHistory::default(),
             splash: splash::SplashHistory::default(),
             diagnostics: RefCell::default(),
@@ -328,6 +336,24 @@ impl Adapter {
             .map(|s| canonical_provider(s).unwrap_or("unsupported").to_owned());
         if selected != self.selected {
             self.selected = selected;
+            self.discovered_endpoint = None;
+            self.discovered_port = None;
+            if self.selected.as_deref() == Some("Splash") {
+                if self.port.is_none() && self.endpoint.url.is_none() {
+                    let home = env::var_os("HOME").map(PathBuf::from);
+                    self.discovered_port =
+                        crate::provider_discovery::splash_preferences(home.as_deref())
+                            .as_ref()
+                            .and_then(crate::provider_discovery::splash_port);
+                }
+                if self.endpoint.api_key.is_none() && !self.endpoint.is_remote() {
+                    let mut endpoint = self.endpoint.clone();
+                    endpoint.api_key = env::var("SPLASH_API_KEY")
+                        .ok()
+                        .or_else(crate::provider_discovery::splash_keychain_key);
+                    self.discovered_endpoint = Some(endpoint);
+                }
+            }
             *self.diagnostics.borrow_mut() = RuntimeReport::default();
             self.cached = None;
             self.next_poll = Instant::now();
@@ -381,11 +407,11 @@ impl Adapter {
                 "process detection"
             };
             report.endpoint = self
-                .endpoint
-                .base_url(self.port.unwrap_or(default_port(self.selected.as_deref())))
+                .active_endpoint()
+                .base_url(self.active_port(default_port(self.selected.as_deref())))
                 .unwrap_or_else(|_| "<invalid endpoint>".into());
-            report.remote = self.endpoint.is_remote();
-            report.credentials_present = self.endpoint.api_key.is_some();
+            report.remote = self.active_endpoint().is_remote();
+            report.credentials_present = self.active_endpoint().api_key.is_some();
             report.begin();
         }
         let config_error = self.config_error.clone().or_else(|| {
@@ -440,7 +466,7 @@ impl Adapter {
                     }
                 }
             }
-            result.remote = self.endpoint.is_remote();
+            result.remote = self.active_endpoint().is_remote();
             if result.remote {
                 let details = result.details.get_or_insert_with(String::new);
                 *details = format!("remote API · {details}");
@@ -470,6 +496,9 @@ impl Adapter {
             (Some(mut native), Some(reported)) if native.source == TelemetrySource::Live => {
                 // Completed prompt counts belong in request history. Never attach
                 // them to the output/queue of an unrelated active request.
+                if let Some(details) = reported.details {
+                    crate::runtime_features::append_details(&mut native.details, vec![details]);
+                }
                 native.requests.extend(reported.requests);
                 Some(native)
             }
@@ -477,10 +506,19 @@ impl Adapter {
         }
     }
 
+    fn active_endpoint(&self) -> &native::Endpoint {
+        self.discovered_endpoint.as_ref().unwrap_or(&self.endpoint)
+    }
+
+    fn active_port(&self, default: u16) -> u16 {
+        self.port.or(self.discovered_port).unwrap_or(default)
+    }
+
     fn get(&self, port: u16, path: &str) -> Option<String> {
-        self.diagnostics
-            .borrow_mut()
-            .record(path, self.endpoint.get(self.port.unwrap_or(port), path))
+        self.diagnostics.borrow_mut().record(
+            path,
+            self.active_endpoint().get(self.active_port(port), path),
+        )
     }
 
     fn get_json(&self, port: u16, path: &str) -> Option<Value> {
@@ -797,14 +835,28 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .get("usage")
         .or_else(|| record.get("stats"))
         .unwrap_or(record);
-    let prompt = counter(usage, &["prompt_tokens"])
+    let mut prompt = counter(usage, &["prompt_tokens"])
         .or_else(|| counter(usage, &["input_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_count"]))?;
+    if provider == "Splash" && usage.get("cache_read_input_tokens").is_some() {
+        prompt = prompt
+            .checked_add(counter(usage, &["cache_read_input_tokens"])?)?
+            .checked_add(
+                usage
+                    .get("cache_creation_input_tokens")
+                    .map_or(Some(0), Value::as_u64)?,
+            )?;
+    }
     let output = counter(usage, &["completion_tokens"])
         .or_else(|| counter(usage, &["output_tokens"]))
         .or_else(|| counter(usage, &["total_output_tokens"]))
         .or_else(|| counter(usage, &["eval_count"]));
     let cached = counter(usage, &["prompt_tokens_details", "cached_tokens"])
+        .or_else(|| {
+            (provider == "Splash")
+                .then(|| counter(usage, &["cache_read_input_tokens"]))
+                .flatten()
+        })
         .or_else(|| counter(usage, &["input_tokens_details", "cached_tokens"]))
         .or_else(|| counter(usage, &["cached_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_cached_count"]))
@@ -814,7 +866,13 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .unwrap_or_else(|| "unknown".into());
     let output_tps = record
         .get("timings")
-        .and_then(|timings| request_rate(timings, &["output_tokens_per_second"]))
+        .and_then(|timings| {
+            request_rate(timings, &["output_tokens_per_second"]).or_else(|| {
+                (provider == "Splash")
+                    .then(|| request_rate(timings, &["predicted_per_second"]))
+                    .flatten()
+            })
+        })
         .or_else(|| {
             (provider == "LM Studio")
                 .then(|| request_rate(usage, &["tokens_per_second"]))
@@ -830,7 +888,20 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             let count = counter(usage, &["eval_count"])?;
             Some(count as f64 / duration as f64 * 1_000_000_000.0)
         });
+    let mut details = None;
+    if provider == "Splash" {
+        if let Some((drafted, accepted)) = counter(record, &["timings", "draft_n"])
+            .zip(counter(record, &["timings", "draft_n_accepted"]))
+            .filter(|(drafted, accepted)| *drafted > 0 && accepted <= drafted)
+        {
+            details = Some(format!(
+                "last request draft acceptance {:.0}% ({accepted}/{drafted})",
+                accepted as f64 / drafted as f64 * 100.0
+            ));
+        }
+    }
     Some(LlmTelemetry {
+        details,
         source: TelemetrySource::Report,
         observed_at: Some(observed_at),
         provider: Some(provider.into()),
@@ -838,6 +909,13 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         status: Some("last result".into()),
         prompt_tokens: Some(prompt),
         output_tokens: output,
+        prefill_tps: (provider == "Splash")
+            .then(|| {
+                record.get("timings").and_then(|timings| {
+                    request_rate(timings, &["input_tokens_per_second", "prompt_per_second"])
+                })
+            })
+            .flatten(),
         requests: vec![RequestUsage {
             provider: provider.into(),
             model,
@@ -849,14 +927,24 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             completed: true,
             queued: false,
             prefilled: None,
-            ttft_ms: counter(record, &["timings", "time_to_first_token_ms"]).or_else(|| {
-                (provider == "LM Studio")
-                    .then(|| {
-                        request_rate(usage, &["time_to_first_token_seconds"])
-                            .and_then(native::seconds_to_ms)
-                    })
-                    .flatten()
-            }),
+            ttft_ms: counter(record, &["timings", "time_to_first_token_ms"])
+                .or_else(|| {
+                    (provider == "Splash")
+                        .then(|| {
+                            crate::json::json_f64(record, &["timings", "prompt_ms"])
+                                .filter(|ms| *ms >= 0.0 && *ms < u64::MAX as f64)
+                                .map(|ms| ms.round() as u64)
+                        })
+                        .flatten()
+                })
+                .or_else(|| {
+                    (provider == "LM Studio")
+                        .then(|| {
+                            request_rate(usage, &["time_to_first_token_seconds"])
+                                .and_then(native::seconds_to_ms)
+                        })
+                        .flatten()
+                }),
             observed_at: Some(observed_at),
         }],
         ..LlmTelemetry::default()

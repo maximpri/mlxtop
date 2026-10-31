@@ -4966,3 +4966,34 @@ fn reported_prefill_keeps_its_last_result_label() {
     };
     assert_eq!(llm_prefill_rate_label(&sample), "LAST PREFILL 133.2 tok/s");
 }
+
+#[test]
+fn omlx_splash_prefill_contract_uses_total_without_prompt_metadata() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/omlx/splash-prefill.json")).unwrap();
+    let result = parse_omlx_telemetry(&fixture["health"], Some(&fixture["stats"]));
+    assert_eq!(result.status.as_deref(), Some("prefilling"));
+    assert_eq!(result.prefill_tps, Some(512.0));
+    assert!(result.prefill_tps_live);
+    assert_eq!(result.requests.len(), 1);
+    assert_eq!(result.requests[0].prompt, 8192);
+    assert_eq!(result.requests[0].prefilled, Some(2048));
+    assert_eq!(result.requests[0].cached, None);
+    assert_eq!(
+        (result.prefill_tokens_done, result.prefill_tokens_expected),
+        (Some(2048), Some(8192))
+    );
+}
+
+#[test]
+fn engine_details_wrap_and_remain_complete_in_diagnostics() {
+    let mut app = test_app(2);
+    app.collector.current.llm_provider = "Splash".into();
+    let details = "SSD experts · RAM 1.0 GiB · read 10.0 GiB total · SSD PLE · KV spill · 2 waiting for SSD quota · ANE stopped · 25% FFN share · 3 GPU reruns · timed out";
+    app.collector.current.llm_details = Some(details.into());
+    let screen = render_view(100, 35, |frame| app.draw_llm_top(frame, frame.area()));
+    assert!(screen.contains("SSD experts"), "{screen}");
+    assert!(screen.contains("ANE stopped"), "{screen}");
+    let diagnostics = crate::report::diagnostic_lines(&app.collector.current).join("\n");
+    assert!(diagnostics.contains(details));
+}

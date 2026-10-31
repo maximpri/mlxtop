@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use std::collections::{BTreeMap, VecDeque};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct Endpoint {
     pub url: Option<String>,
     pub api_key: Option<String>,
@@ -414,7 +414,7 @@ const GENERATION_WINDOW: Duration = Duration::from_secs(6);
 /// Keep the points where the gauge moved instead, and divide across a span several steps wide: the
 /// gauge moves by exactly the tokens generated between two refreshes, whatever the poll rate.
 #[derive(Default)]
-struct GenerationWindow {
+pub(super) struct GenerationWindow {
     /// Each point where the gauge advanced: when, and by how much in total.
     advances: VecDeque<(Instant, f64)>,
     /// The latest measured speed and when it was taken.
@@ -443,7 +443,7 @@ impl GenerationWindow {
 
     /// The same reading for any count of generated tokens: the server-wide gauge, or one session's
     /// `generated_tokens`, which may step on the same refresh.
-    fn observe(&mut self, now: Instant, live: f64) -> Option<(f64, bool)> {
+    pub(super) fn observe(&mut self, now: Instant, live: f64) -> Option<(f64, bool)> {
         // The gauge falling means a restart or a fresh window; its speed cannot be carried over.
         if self.advances.back().is_some_and(|(_, seen)| *seen > live) {
             self.advances.clear();

@@ -69,6 +69,7 @@ struct Tracked {
     alone_from: Option<(u64, f64)>,
     /// No other request ran at any capture since it started decoding alone.
     alone: bool,
+    window: super::native::GenerationWindow,
 }
 
 impl SplashHistory {
@@ -127,17 +128,18 @@ impl SplashHistory {
         }
     }
 
-    /// Each running request's own output speed while it decodes alone, and a completed record for
-    /// each one that has left the engine. With one request decoding, the engine's decode counters
-    /// are that request's: its speed is decode tokens over decode time, and its final output is
-    /// exact even when it finished between captures. Concurrent requests share the counters, so
-    /// they get no per-request speed, and a finished one keeps its last observed output.
+    /// Each request's own output speed, and a completed record for each one that left the engine.
+    /// Concurrent rates use each request's own token counts over the capture interval. With one
+    /// request decoding alone, engine counters give its decode time and exact final output even
+    /// when it finishes between captures. Concurrent completions keep their last observed output;
+    /// a recorded completion can supply final counts and request timings.
     fn track(
         &mut self,
         current: Vec<(RequestUsage, bool)>,
         counters: Option<&Counters>,
         engine: Option<(Option<String>, Option<u64>)>,
         observed: SystemTime,
+        captured: Instant,
     ) -> (Vec<RequestUsage>, Vec<RequestUsage>) {
         if engine != self.tracked_engine {
             // A restarted engine reuses request IDs and forgets its requests.
@@ -157,22 +159,37 @@ impl SplashHistory {
         for (mut usage, decoding) in current {
             let seen = previous
                 .iter()
-                .position(|tracked| tracked.usage.id == usage.id)
+                .position(|tracked| {
+                    tracked.usage.id == usage.id && tracked.usage.prompt == usage.prompt
+                })
                 .map(|index| previous.swap_remove(index));
             let mut tracked = seen.unwrap_or(Tracked {
                 usage: usage.clone(),
                 decoded_at: None,
                 alone_from: None,
                 alone: true,
+                window: super::native::GenerationWindow::default(),
             });
             tracked.alone &= alone;
             if tracked.alone && decoding && tracked.alone_from.is_none() {
                 tracked.alone_from =
                     counters.and_then(|counters| Some((counters.decoded, counters.decode_ms?)));
             }
-            if tracked.alone {
-                usage.output_tps = speed(tracked.alone_from);
-            }
+            let request_speed = decoding
+                .then(|| {
+                    usage
+                        .output
+                        .and_then(|output| tracked.window.observe(captured, output as f64))
+                        .map(|(rate, _)| rate)
+                })
+                .flatten();
+            usage.output_tps = usage.output_tps.or_else(|| {
+                if tracked.alone {
+                    speed(tracked.alone_from).or(request_speed)
+                } else {
+                    request_speed
+                }
+            });
             tracked.decoded_at = counters.map(|counters| counters.decoded);
             tracked.usage = usage.clone();
             self.tracked.push(tracked);
@@ -193,8 +210,6 @@ impl SplashHistory {
                         usage.output = Some(usage.output.unwrap_or(0) + now.saturating_sub(then));
                     }
                     usage.output_tps = speed(tracked.alone_from).or(usage.output_tps);
-                } else if !tracked.alone {
-                    usage.output_tps = None;
                 }
                 usage.completed = true;
                 usage.observed_at = Some(observed);
@@ -285,7 +300,7 @@ impl SplashHistory {
             }
         }
 
-        let mut details = Vec::new();
+        let mut details = crate::runtime_features::splash_details(status);
         let current: Vec<(RequestUsage, bool)> = requests
             .into_iter()
             .flatten()
@@ -300,16 +315,19 @@ impl SplashHistory {
                         ));
                     }
                 }
-                let age = counter(r, &["age_ms"]).map(Duration::from_millis);
+                let age = r
+                    .get("age_ms")
+                    .and_then(Value::as_f64)
+                    .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok());
                 let decoding = phase(r) != "prefill";
                 let usage = RequestUsage {
                     provider: "Splash".into(),
                     model: model.clone().unwrap_or_default(),
                     id: identifier(r, "id")?,
                     prompt,
-                    cached: None,
+                    cached: counter(r, &["cached_tokens"]).filter(|n| *n <= prompt),
                     output: counter(r, &["generated_tokens"]),
-                    output_tps: None,
+                    output_tps: crate::json::request_rate(r, &["tokens_per_second"]),
                     completed: false,
                     queued: false,
                     prefilled: (!decoding)
@@ -326,7 +344,8 @@ impl SplashHistory {
             })
             .collect();
         let engine = counters.as_ref().map(|counters| counters.engine.clone());
-        let (running_requests, finished) = self.track(current, counters.as_ref(), engine, observed);
+        let (running_requests, finished) =
+            self.track(current, counters.as_ref(), engine, observed, captured);
         if let [only] = running_requests.as_slice() {
             result.prompt_tokens = Some(only.prompt);
             result.output_tokens = only.output;

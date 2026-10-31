@@ -670,6 +670,7 @@ fn omlx_client_logs_in_polls_stats_and_caches_metadata() {
             body: "{}".into(),
         },
         reply("GET /admin/api/stats?scope=session ", 200, STATS),
+        reply("GET /admin/api/models ", 200, r#"{"models":[]}"#),
         reply(
             "GET /admin/api/device-info ",
             200,
@@ -1275,4 +1276,42 @@ fn saturation_survives_gpu_busy_impact_deduplication() {
         "{:?}",
         journal(&c)
     );
+}
+
+#[test]
+fn omlx_fetches_loaded_model_configuration_without_claiming_an_active_cap() {
+    let home = TempDir::new("omlx-model-metadata");
+    home.write(".omlx/settings.json", r#"{"auth":{"api_key":"fixture"}}"#);
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, HEALTH),
+        Exchange {
+            request: "POST /admin/api/login ",
+            status: 200,
+            headers: "Set-Cookie: session=fixture; Path=/\r\n",
+            body: "{}".into(),
+        },
+        reply(
+            "GET /admin/api/stats?scope=session ",
+            200,
+            r#"{"active_models":{"models":[{"id":"qwen","active_requests":1,"waiting_requests":0,"generating":[{"request_id":"1","prompt_tokens":100,"generated_tokens":5,"tokens_per_second":20}]}]}}"#,
+        ),
+        reply(
+            "GET /admin/api/models ",
+            200,
+            r#"{"models":[{"id":"qwen","settings":{"gpu_power_limit_w":10,"mtp_enabled":true}}]}"#,
+        ),
+        reply(
+            "GET /admin/api/device-info ",
+            200,
+            r#"{"device_name":"fixture"}"#,
+        ),
+        reply("GET /admin/api/global-settings ", 200, "{}"),
+    ]);
+    let mut client = omlx_client(port, Some(home.0.clone()));
+    let telemetry = client.poll_once().unwrap();
+    server.join().unwrap();
+    let details = telemetry.details.unwrap();
+    assert!(details.contains("GPU cap configured 10 W (application unverified)"));
+    assert!(details.contains("Lightning MTP configured"));
+    assert_eq!(telemetry.generation_tps, Some(20.0));
 }

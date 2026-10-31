@@ -64,7 +64,19 @@ def usage_record(provider, response, *, request_id=None, model=None,
                 break
     if "prompt_tokens" not in counters:
         raise ValueError("Missing full prompt count; enable final streaming usage")
+    if provider == "Splash" and "cache_read_input_tokens" in usage:
+        # Messages counts uncached input separately; OpenAI formats include it.
+        read = usage["cache_read_input_tokens"]
+        created = usage.get("cache_creation_input_tokens", 0)
+        if not _count(read) or not _count(created):
+            raise ValueError("Invalid cache token count")
+        full_prompt = counters["prompt_tokens"] + read + created
+        if not _count(full_prompt):
+            raise ValueError("Prompt count overflow")
+        counters["prompt_tokens"] = full_prompt
     cached = usage.get("cached_tokens", usage.get("prompt_eval_cached_count"))
+    if provider == "Splash":
+        cached = usage.get("cache_read_input_tokens", cached)
     for key in ("input_tokens_details", "prompt_tokens_details"):
         if isinstance(usage.get(key), dict):
             cached = usage[key].get("cached_tokens", cached)
@@ -96,14 +108,24 @@ def usage_record(provider, response, *, request_id=None, model=None,
             raise ValueError("Invalid decode duration")
         if duration and _count(count):
             speed = count / duration * 1_000_000_000
-    if speed is None and provider == "llama.cpp":
+    if speed is None and provider in ("llama.cpp", "Splash"):
         speed = supplied.get("predicted_per_second")
     if speed is not None:
         if type(speed) not in (int, float) or not math.isfinite(speed) or speed < 0:
             raise ValueError("Invalid output throughput")
         timings["output_tokens_per_second"] = speed
+    if provider == "Splash" and "prompt_per_second" in supplied:
+        prefill = supplied["prompt_per_second"]
+        if type(prefill) not in (int, float) or not math.isfinite(prefill) or prefill < 0:
+            raise ValueError("Invalid prefill throughput")
+        timings["input_tokens_per_second"] = prefill
     if ttft_ms is None:
         ttft_ms = supplied.get("time_to_first_token_ms")
+    if ttft_ms is None and provider == "Splash" and "prompt_ms" in supplied:
+        measured = supplied["prompt_ms"]
+        if type(measured) not in (int, float) or not math.isfinite(measured) or measured < 0 or measured >= 2**64:
+            raise ValueError("Invalid first-token timing")
+        ttft_ms = int(round(measured))
     if ttft_ms is None and provider == "LM Studio":
         seconds = usage.get("time_to_first_token_seconds")
         if seconds is not None:
@@ -115,6 +137,14 @@ def usage_record(provider, response, *, request_id=None, model=None,
         if not _count(ttft_ms):
             raise ValueError("TTFT must be an explicitly measured integer in milliseconds")
         timings["time_to_first_token_ms"] = ttft_ms
+    if provider == "Splash":
+        for key in ("draft_n", "draft_n_accepted"):
+            if key in supplied:
+                if not _count(supplied[key]):
+                    raise ValueError("Invalid draft token count")
+                timings[key] = supplied[key]
+        if timings.get("draft_n_accepted", 0) > timings.get("draft_n", 0):
+            raise ValueError("Accepted draft count exceeds drafted tokens")
     if timings:
         record["timings"] = timings
     return record
