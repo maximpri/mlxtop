@@ -210,6 +210,11 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         || is_bionic
     {
         "LM Studio"
+    } else if std::iter::once(name)
+        .chain(command_tokens.first().copied())
+        .any(|token| normalize_process_token(token) == "tensorfold")
+    {
+        "TensorFold"
     } else if has("omlx") {
         "oMLX"
     } else if has("ollama") {

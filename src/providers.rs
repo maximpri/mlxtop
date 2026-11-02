@@ -256,6 +256,7 @@ pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
 fn canonical_provider(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
         "omlx" => Some("oMLX"),
+        "tensorfold" => Some("TensorFold"),
         "mlx-lm" | "mlx_lm.server" | "mlx_lm" => Some("mlx-lm"),
         "ollama" => Some("Ollama"),
         "llama.cpp" | "llama-server" => Some("llama.cpp"),
@@ -405,6 +406,18 @@ impl Adapter {
                     let port = if provider == "vLLM" { 8000 } else { 30000 };
                     let body = self.get(port, "/metrics");
                     body.and_then(|body| self.metrics.observe(provider, &body, now))
+                }
+                Some("TensorFold") => {
+                    let mut result = self
+                        .get(8080, "/metrics")
+                        .and_then(|body| self.metrics.observe("TensorFold", &body, now));
+                    let models = self.poll_models("TensorFold", 8080);
+                    if let Some(result) = &mut result {
+                        result.model = models.and_then(|models| models.model);
+                    } else {
+                        result = models;
+                    }
+                    result
                 }
                 Some("mlx-serve") => self.poll_mlx_serve(now),
                 Some("Splash") => self
