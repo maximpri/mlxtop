@@ -212,7 +212,12 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         "LM Studio"
     } else if std::iter::once(name)
         .chain(command_tokens.first().copied())
-        .any(|token| normalize_process_token(token) == "tensorfold")
+        .any(|token| {
+            matches!(
+                normalize_process_token(token).as_str(),
+                "tensorfold" | "tensorfoldnative" | "tensorfoldexe" | "tensorfoldnativeexe"
+            )
+        })
     {
         "TensorFold"
     } else if has("omlx") {

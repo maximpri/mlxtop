@@ -26,7 +26,8 @@
 
 ### Dashboards
 
-- **TensorFold is now supported.** Detects the `tensorfold` process or accepts
+- **TensorFold is now supported.** Detects the `tensorfold` or
+  `tensorfold-native` process or accepts
   `MLXTOP_PROVIDER=tensorfold`, using port 8080 by default. Reads model names,
   active and queued requests, prefix-cache reuse, KV occupancy and device memory
   through the existing authenticated provider connection. Throughput is sampled

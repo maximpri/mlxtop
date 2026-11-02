@@ -921,18 +921,19 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   (failed or cancelled requests, Metal health, capacity failures, requests waiting for
   memory, gated SSD cache writes, thermal state, pressure), then TTFT and inter-token
   p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
-- **TensorFold:** detected by the `tensorfold` executable, or selected with
-  `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
+- **TensorFold:** detected by the `tensorfold` or `tensorfold-native` executable,
+  or selected with `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
   completion-counter throughput, prefix-cache reuse, KV occupancy and device memory;
   `/v1/models` supplies model names. Throughput needs two samples and advances when
   requests finish; these rates are labeled as averages and excluded from live throughput
   charts and slowdown alarms. Request history and individual
   prompt/cache counts require the client usage recorder. No dashboard flag is required.
-  For an authenticated local server, reuse its key without storing it in mlxtop:
+  For an authenticated local server, replace `/path/to/api-key` with the key file
+  configured for that server:
 
   ```sh
   MLXTOP_PROVIDER=tensorfold \
-    MLXTOP_PROVIDER_API_KEY="$(cat "$HOME/.config/tensorfold/glm53-api-key")" mlxtop
+    MLXTOP_PROVIDER_API_KEY="$(cat "/path/to/api-key")" mlxtop
   ```
 
   Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
