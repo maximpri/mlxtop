@@ -173,7 +173,14 @@ fn first_token_timing_is_explicit_not_derived_from_provider_durations() {
 
 #[test]
 fn response_formats_preserve_full_prompt_and_cache_counts() {
-    for provider in ["omlx", "mlx_lm.server", "llama.cpp", "koboldcpp", "localai"] {
+    for provider in [
+        "omlx",
+        "mlx_lm.server",
+        "llama.cpp",
+        "koboldcpp",
+        "localai",
+        "tensorfold",
+    ] {
         let telemetry = parse_usage(&record(
             provider,
             json!({
@@ -762,6 +769,20 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
             "GPT4All",
             vec![("/v1/models", r#"{"data":[{"id":"test"}]}"#)],
         ),
+        (
+            "TensorFold",
+            vec![
+                ("/metrics", "tensorfold:requests_running 1\n"),
+                ("/v1/models", r#"{"data":[{"id":"local-glm"}]}"#),
+            ],
+        ),
+        (
+            "TensorFold",
+            vec![
+                ("/metrics", "unrelated 1\n"),
+                ("/v1/models", r#"{"data":[{"id":"local-glm"}]}"#),
+            ],
+        ),
         ("vLLM", vec![("/metrics", "vllm:num_requests_running 1\n")]),
         ("SGLang", vec![("/metrics", "sglang:num_running_reqs 1\n")]),
     ] {
@@ -805,6 +826,9 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
         assert!(adapter.selected(Some("oMLX")));
         let result = adapter.poll().unwrap();
         assert_eq!(result.provider.as_deref(), Some(provider));
+        if provider == "TensorFold" {
+            assert_eq!(result.model.as_deref(), Some("local-glm"));
+        }
         assert_eq!(result.source, TelemetrySource::Live);
         let observed = result.observed_at;
         assert_eq!(

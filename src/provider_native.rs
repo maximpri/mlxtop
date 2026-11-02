@@ -539,6 +539,13 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
     // mlx-serve publishes vLLM-named queues and its own series beside them. Sushi
     // serves the same gauges under `sushi:` instead of `mlx_serve:`.
     let (prefix, active, waiting, kv, native) = match provider {
+        "TensorFold" => (
+            "tensorfold",
+            "requests_running",
+            "requests_waiting",
+            "kv_cache_usage_ratio",
+            None,
+        ),
         "vLLM" => (
             "vllm",
             "num_requests_running",
@@ -583,6 +590,10 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
         requests_prefilling: String::new(),
         mlx_active_bytes: String::new(),
     };
+    if provider == "TensorFold" {
+        series.hits = key("prompt_tokens_cached_total");
+        series.queries = key("prompt_tokens_total");
+    }
     if let Some(namespace) = native {
         // Tokens generated so far by running requests, tokens prefilled so far by the
         // request in flight, and the tokens restored from the prefix cache (over all
@@ -767,6 +778,19 @@ impl MetricsHistory {
         }
         if provider == "mlx-serve" {
             self.native_extras(&metrics, &series, &mut details, &mut result, now);
+        }
+        if provider == "TensorFold" {
+            // Completion bursts do not measure the speed of an in-flight request.
+            result.generation_tps_live = false;
+            result.prefill_tps_live = false;
+            result.model_memory = metrics.count("tensorfold:device_memory_bytes");
+            result.total_prompt_tokens = metrics.count(&series.queries);
+            result.total_cached_tokens = metrics.count(&series.hits).filter(|hits| {
+                result
+                    .total_prompt_tokens
+                    .is_some_and(|prompt| *hits <= prompt)
+            });
+            details[0] = "throughput: completed-request token deltas".into();
         }
         result.details = Some(details.join(" · "));
         self.previous = Some((provider.to_owned(), now, metrics));

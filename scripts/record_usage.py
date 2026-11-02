@@ -17,7 +17,7 @@ import uuid
 
 
 PROVIDERS = {
-    "omlx": "oMLX", "mlx-lm": "mlx-lm", "mlx_lm": "mlx-lm",
+    "tensorfold": "TensorFold", "omlx": "oMLX", "mlx-lm": "mlx-lm", "mlx_lm": "mlx-lm",
     "mlx_lm.server": "mlx-lm", "ollama": "Ollama",
     "llama.cpp": "llama.cpp", "llama-server": "llama.cpp",
     "lmstudio": "LM Studio", "lm studio": "LM Studio",

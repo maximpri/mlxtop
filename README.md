@@ -126,6 +126,7 @@ where each reading comes from.
 | KoboldCpp | last request | Input and output counts and rates |
 | Ollama | after completion | Loaded models, VRAM, context size, CPU/GPU placement |
 | LM Studio | after completion | Loaded instances and context size |
+| TensorFold | after completion | Model catalogue, active/queued requests, sampled completion throughput, prefix-cache reuse and device memory |
 | MLX-LM, LocalAI, Jan, GPT4All | after completion | Process detection and model catalogue |
 
 "After completion" means the speed of each finished request, recorded by the
