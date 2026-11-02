@@ -36,7 +36,7 @@ use ratatui::Frame;
 use std::collections::VecDeque;
 
 /// Throughput is the outcome, shown compactly; host resources get the space.
-const RATES_HEIGHT: u16 = 7;
+/// The rates row scales with the terminal instead of holding a fixed floor.
 const RATES_MAX_HEIGHT: u16 = 10;
 /// Short terminals keep each rate in its title; Enter expands the history.
 const RATES_COMPACT_HEIGHT: u16 = 4;
@@ -462,7 +462,7 @@ impl App {
         let mut rates_height = if compact {
             RATES_COMPACT_HEIGHT
         } else {
-            (available * 15 / 100).clamp(RATES_HEIGHT, RATES_MAX_HEIGHT)
+            (available * 15 / 100).clamp(RATES_COMPACT_HEIGHT, RATES_MAX_HEIGHT)
         };
         let mut host_height =
             available.saturating_sub(journal_height + request_height + rates_height);
