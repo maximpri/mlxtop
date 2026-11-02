@@ -26,6 +26,14 @@
 
 ### Dashboards
 
+- **Strata servers are supported.** Detects the `strata` process or accepts
+  `MLXTOP_PROVIDER=strata`, using port 8080 by default. Strata serves vLLM's
+  gauge names on `/metrics/prometheus` beside its own `strata:` live-rate
+  gauges, so mlxtop shows live decode and prefill speeds, active and waiting
+  queues, KV occupancy, prefix-cache reuse, mean first-token time and engine
+  GPU memory. Model names come from the metric labels and `/v1/models`;
+  individual request history uses the client usage recorder.
+
 - **TensorFold is now supported.** Detects the `tensorfold` or
   `tensorfold-native` process or accepts
   `MLXTOP_PROVIDER=tensorfold`, using port 8080 by default. Reads model names,

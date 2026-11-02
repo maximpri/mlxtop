@@ -257,6 +257,7 @@ fn canonical_provider(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
         "omlx" => Some("oMLX"),
         "tensorfold" => Some("TensorFold"),
+        "strata" => Some("Strata"),
         "mlx-lm" | "mlx_lm.server" | "mlx_lm" => Some("mlx-lm"),
         "ollama" => Some("Ollama"),
         "llama.cpp" | "llama-server" => Some("llama.cpp"),
@@ -414,6 +415,24 @@ impl Adapter {
                     let models = self.poll_models("TensorFold", 8080);
                     if let Some(result) = &mut result {
                         result.model = models.and_then(|models| models.model);
+                    } else {
+                        result = models;
+                    }
+                    result
+                }
+                Some("Strata") => {
+                    // /metrics answers with JSON unless the scraper asks for the
+                    // text format; /metrics/prometheus always serves it.
+                    let mut result = self
+                        .get(8080, "/metrics/prometheus")
+                        .and_then(|body| self.metrics.observe("Strata", &body, now));
+                    let models = self.poll_models("Strata", 8080);
+                    if let Some(result) = &mut result {
+                        // The catalogue wins, but a failed catalogue poll never
+                        // erases the name the metric labels carried.
+                        result.model = models
+                            .and_then(|models| models.model)
+                            .or_else(|| result.model.clone());
                     } else {
                         result = models;
                     }

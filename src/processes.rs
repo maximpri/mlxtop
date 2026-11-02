@@ -220,6 +220,16 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         })
     {
         "TensorFold"
+    } else if std::iter::once(name)
+        .chain(command_tokens.first().copied())
+        .any(|token| {
+            matches!(
+                normalize_process_token(token).as_str(),
+                "strata" | "strataexe" | "strataengine" | "strataengineexe"
+            )
+        })
+    {
+        "Strata"
     } else if has("omlx") {
         "oMLX"
     } else if has("ollama") {

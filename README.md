@@ -29,8 +29,9 @@ changed when the model slowed.
 - **A plain verdict:** a single line reads `✓ Healthy`, or names the problem,
   such as heavy paging, a model partly on the CPU, a full card or heat
   throttling.
-- **14 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
-  Ollama, LM Studio, KoboldCpp, TensorFold and more, detected automatically.
+- **15 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
+  Ollama, LM Studio, KoboldCpp, TensorFold, Strata and more, detected
+  automatically.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
   prompts or touches your models or runtime settings.
 
@@ -122,6 +123,7 @@ where each reading comes from.
 | [Splash](https://github.com/incoai/splash) | ✓ | Running and waiting requests, prefill progress, decode and prefill speed, prefix-cache reuse, Metal memory, DFlash acceptance, TTFT |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | ✓ | Generation and prefill rates, running requests with their own speeds, prefix-cache reuse, MLX memory (start it with `--metrics`; sushi's `sushi:` gauges are read too) |
 | vLLM, SGLang | ✓ | Active and waiting queues, server token rates, KV-cache occupancy, mean first-token time |
+| [Strata](https://github.com/niko1221/strata) | ✓ | Live engine decode and prefill rates, active and waiting queues, KV-cache occupancy, prefix-cache reuse, mean first-token time, engine GPU memory |
 | llama.cpp | ✓ | Active slots, output counts and live generation speed; average rates and queues when `/metrics` is enabled |
 | KoboldCpp | last request | Input and output counts and rates |
 | Ollama | after completion | Loaded models, VRAM, context size, CPU/GPU placement |

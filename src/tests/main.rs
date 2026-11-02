@@ -2359,6 +2359,33 @@ fn detects_tensorfold_without_matching_model_paths() {
 }
 
 #[test]
+fn detects_strata_processes_without_matching_other_uses_of_the_name() {
+    for executable in [
+        "strata",
+        "/usr/local/bin/strata",
+        "/opt/strata/engines/cuda/strata-engine",
+        r"C:\tools\Strata.exe",
+        r"C:\tools\strata-engine.exe",
+    ] {
+        assert_eq!(
+            process_provider("unknown", &format!("{executable} serve --port 8080")).as_deref(),
+            Some("Strata"),
+            "command executable: {executable}"
+        );
+        assert_eq!(
+            process_provider(executable, "").as_deref(),
+            Some("Strata"),
+            "process name: {executable}"
+        );
+    }
+    assert_eq!(
+        process_provider("python", "python /tmp/client.py strata/model"),
+        None
+    );
+    assert_eq!(process_provider("stratagem", "stratagem run"), None);
+}
+
+#[test]
 fn detects_runtime_entrypoints_with_consistent_provider_names() {
     for (name, command, provider) in [
         ("Python", "python -m mlx_lm.server --model test", "mlx-lm"),

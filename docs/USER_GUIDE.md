@@ -802,6 +802,7 @@ sessions to monitor independent endpoints concurrently.
 | `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
 | `splash` | 8000 | `/status` |
 | `tensorfold` | 8080 | `/metrics`, `/v1/models` |
+| `strata` | 8080 | `/metrics/prometheus`, `/v1/models` |
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
 | `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
@@ -938,6 +939,23 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 
   Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
   root URL (without `/v1`). The existing remote-auth restrictions also apply.
+- **Strata:** detected by the `strata` or `strata-engine` executable,
+  or selected with `MLXTOP_PROVIDER=strata`. Reads `/metrics/prometheus` for active and waiting
+  queues, KV occupancy, prefix-cache reuse, mean first-token time and engine GPU memory;
+  `/v1/models` supplies model names beside the metric labels. Strata's own `strata:live_tok_s`
+  and `strata:live_prefill_tok_s_mean` gauges drive live decode and prefill speeds; without
+  them the completion counters give averages that are excluded from live throughput charts
+  and slowdown alarms. Request history and individual prompt/cache counts require the client
+  usage recorder. No dashboard flag is required. For an authenticated local server, replace
+  `/path/to/api-key` with the key file configured for that server:
+
+  ```sh
+  MLXTOP_PROVIDER=strata \
+    MLXTOP_PROVIDER_API_KEY="$(cat "/path/to/api-key")" mlxtop
+  ```
+
+  Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
+  root URL (without `/v1`). The existing remote-auth restrictions also apply.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
@@ -972,7 +990,7 @@ optional. Example shape (replace the timestamp with the completion time):
 
 Supported provider names: `omlx`, `mlx-lm` (also `mlx_lm.server`), `ollama`,
 `llama.cpp` (also `llama-server`), `lmstudio` (also `LM Studio`), `koboldcpp`,
-`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, `splash`, and `tensorfold`.
+`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, `splash`, `tensorfold`, and `strata`.
 
 Copy only usage counters from the response, with the required envelope above:
 
