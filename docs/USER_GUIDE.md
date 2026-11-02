@@ -801,6 +801,7 @@ sessions to monitor independent endpoints concurrently.
 | `koboldcpp` | 5001 | `/api/extra/perf` |
 | `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
 | `splash` | 8000 | `/status` |
+| `tensorfold` | 8080 | `/metrics`, `/v1/models` |
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
 | `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
@@ -920,6 +921,23 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   (failed or cancelled requests, Metal health, capacity failures, requests waiting for
   memory, gated SSD cache writes, thermal state, pressure), then TTFT and inter-token
   p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
+- **TensorFold:** detected by the `tensorfold` or `tensorfold-native` executable,
+  or selected with `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
+  completion-counter throughput, prefix-cache reuse, KV occupancy and device memory;
+  `/v1/models` supplies model names. Throughput needs two samples and advances when
+  requests finish; these rates are labeled as averages and excluded from live throughput
+  charts and slowdown alarms. Request history and individual
+  prompt/cache counts require the client usage recorder. No dashboard flag is required.
+  For an authenticated local server, replace `/path/to/api-key` with the key file
+  configured for that server:
+
+  ```sh
+  MLXTOP_PROVIDER=tensorfold \
+    MLXTOP_PROVIDER_API_KEY="$(cat "/path/to/api-key")" mlxtop
+  ```
+
+  Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
+  root URL (without `/v1`). The existing remote-auth restrictions also apply.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
@@ -954,7 +972,7 @@ optional. Example shape (replace the timestamp with the completion time):
 
 Supported provider names: `omlx`, `mlx-lm` (also `mlx_lm.server`), `ollama`,
 `llama.cpp` (also `llama-server`), `lmstudio` (also `LM Studio`), `koboldcpp`,
-`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, and `splash`.
+`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, `splash`, and `tensorfold`.
 
 Copy only usage counters from the response, with the required envelope above:
 

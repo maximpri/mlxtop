@@ -29,8 +29,8 @@ changed when the model slowed.
 - **A plain verdict:** a single line reads `✓ Healthy`, or names the problem,
   such as heavy paging, a model partly on the CPU, a full card or heat
   throttling.
-- **13 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
-  Ollama, LM Studio, KoboldCpp and more, detected automatically.
+- **14 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
+  Ollama, LM Studio, KoboldCpp, TensorFold and more, detected automatically.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
   prompts or touches your models or runtime settings.
 
@@ -126,6 +126,7 @@ where each reading comes from.
 | KoboldCpp | last request | Input and output counts and rates |
 | Ollama | after completion | Loaded models, VRAM, context size, CPU/GPU placement |
 | LM Studio | after completion | Loaded instances and context size |
+| TensorFold | after completion | Model catalogue, active/queued requests, sampled completion throughput, prefix-cache reuse and device memory |
 | MLX-LM, LocalAI, Jan, GPT4All | after completion | Process detection and model catalogue |
 
 "After completion" means the speed of each finished request, recorded by the
@@ -189,6 +190,11 @@ include the output of `mlxtop --version` and `mlxtop doctor`, plus your OS and
 runtime.
 
 mlxtop was developed with the Duet coding agent.
+
+## Credits
+
+- TensorFold runtime support contributed by Minoru Mizutani
+  ([@mmizutani](https://github.com/mmizutani)).
 
 ## License
 

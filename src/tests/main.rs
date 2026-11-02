@@ -2331,6 +2331,34 @@ fn parses_detected_llm_processes_for_top_view() {
 }
 
 #[test]
+fn detects_tensorfold_without_matching_model_paths() {
+    for executable in [
+        "tensorfold",
+        "/opt/homebrew/bin/tensorfold",
+        "/usr/local/bin/tensorfold",
+        "/home/test/.tensorfold/bin/tensorfold",
+        "/opt/homebrew/opt/tensorfold/libexec/bin/tensorfold-native",
+        r"C:\tools\tensorfold.exe",
+        r"C:\tools\tensorfold-native.exe",
+    ] {
+        assert_eq!(
+            process_provider("unknown", &format!("{executable} serve model")).as_deref(),
+            Some("TensorFold"),
+            "command executable: {executable}"
+        );
+        assert_eq!(
+            process_provider(executable, "").as_deref(),
+            Some("TensorFold"),
+            "process name: {executable}"
+        );
+    }
+    assert_eq!(
+        process_provider("python", "python /tmp/client.py TensorFold/model"),
+        None
+    );
+}
+
+#[test]
 fn detects_runtime_entrypoints_with_consistent_provider_names() {
     for (name, command, provider) in [
         ("Python", "python -m mlx_lm.server --model test", "mlx-lm"),

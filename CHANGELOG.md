@@ -26,6 +26,14 @@
 
 ### Dashboards
 
+- **TensorFold is now supported.** Detects the `tensorfold` or
+  `tensorfold-native` process or accepts
+  `MLXTOP_PROVIDER=tensorfold`, using port 8080 by default. Reads model names,
+  active and queued requests, prefix-cache reuse, KV occupancy and device memory
+  through the existing authenticated provider connection. Throughput is sampled
+  from completed-request counters and excluded from live throughput charts and
+  slowdown alarms; individual request history uses the client usage recorder.
+
 - **Sushi servers report their own generation and prefill rates.** The
   `mlx-serve` adapter now reads the `sushi:` gauge names when a server
   publishes them instead of `mlx_serve:` (`sushi serve` does), beside the

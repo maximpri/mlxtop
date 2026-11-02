@@ -952,3 +952,51 @@ fn mlx_serve_session_cache_reuse_requires_complete_counts() {
         assert_eq!(result.cache_interval_efficiency, expected);
     }
 }
+
+#[test]
+fn tensorfold_metrics_report_queues_cache_memory_and_completion_throughput() {
+    let body = |output, prompt| {
+        format!(
+            "tensorfold:requests_running 2\n\
+         tensorfold:requests_waiting 1\n\
+         tensorfold:generation_tokens_total {output}\n\
+         tensorfold:prompt_tokens_total {prompt}\n\
+         tensorfold:prompt_tokens_cached_total 40\n\
+         tensorfold:device_memory_bytes 1024\n\
+         tensorfold:kv_cache_usage_ratio{{pool=\"0\"}} 0.25\n"
+        )
+    };
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let first = history.observe("TensorFold", &body(10, 100), now).unwrap();
+    assert_eq!(first.provider.as_deref(), Some("TensorFold"));
+    assert_eq!(first.active_requests, Some(2));
+    assert_eq!(first.waiting_requests, Some(1));
+    assert_eq!(first.model_memory, Some(1024));
+    assert_eq!(first.prefix_hit_rate, Some(40.0));
+    assert_eq!(first.generation_tps, None);
+    assert!(first.requests.is_empty());
+    assert!(first.details.unwrap().contains("25.0%"));
+    let next = history
+        .observe("TensorFold", &body(50, 300), now + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(next.generation_tps, Some(20.0));
+    assert_eq!(next.prefill_tps, Some(100.0));
+    assert!(
+        !next.generation_tps_live,
+        "completion bursts are not live decode speed"
+    );
+    assert!(
+        !next.prefill_tps_live,
+        "completion bursts are not live prefill speed"
+    );
+    let reset = history
+        .observe("TensorFold", &body(0, 0), now + Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(reset.generation_tps, None);
+    assert_eq!(reset.prefill_tps, None);
+    assert_eq!(reset.prefix_hit_rate, None);
+    assert!(history
+        .observe("TensorFold", "unrelated 1\n", now)
+        .is_none());
+}
