@@ -35,11 +35,12 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
   prompts or touches your models or runtime settings.
 
-**What's new in 3.2.1:** oMLX prefill requests keep their progress bar and
-time left in prompt load for the whole prefill. 3.2.0 added Strata and
-TensorFold, dashboard panels that resize with your terminal, and the Journal
-recording overhaul. 3.1.2 gave running requests their own generation speeds
-and Linux AMD detection without ROCm.
+**What's new in 3.2.1:** the prefill progress bar and its time-left readout
+are back in prompt load — an oMLX stats change had silenced Samuel Reed's
+feature, and 3.2.1 restores it. 3.2.0 added Strata and TensorFold, dashboard
+panels that resize with your terminal, and the Journal recording overhaul.
+3.1.2 gave running requests their own generation speeds and Linux AMD
+detection without ROCm.
 [Release notes →](CHANGELOG.md)
 
 ## Install
