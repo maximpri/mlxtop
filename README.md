@@ -35,11 +35,11 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
   prompts or touches your models or runtime settings.
 
-**What's new in 3.1.2:** running requests show their own generation speeds,
-prompt load shows generated tokens, llama.cpp reports a live rate, and Linux
-detects AMD GPUs without ROCm. 3.1.1 added in-place Settings, mlx-serve
-prefill progress and smoother decode rates. 3.1 brought a redesigned Overview,
-`mlxtop update` and oMLX through Splash.
+**What's new in 3.2.0:** Strata and TensorFold join the monitored runtimes,
+every dashboard panel resizes with your terminal, and the Journal records
+what you choose. 3.1.2 gave running requests their own generation speeds,
+prompt load its generated tokens, and Linux AMD detection without ROCm.
+3.1 brought a redesigned Overview, `mlxtop update` and oMLX through Splash.
 [Release notes →](CHANGELOG.md)
 
 ## Install
