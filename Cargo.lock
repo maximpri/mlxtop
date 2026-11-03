@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "mlxtop"
-version = "3.2.0"
+version = "3.2.0-rc.6"
 dependencies = [
  "chrono",
  "crossterm",
