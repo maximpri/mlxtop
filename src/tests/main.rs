@@ -2045,16 +2045,17 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
 #[test]
 fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
     let mut app = test_app(0);
-    for (width, height) in [(80, 24), (100, 40), (170, 42), (180, 50)] {
+    for (width, height, rates_rows) in [(80, 24, 4), (100, 40, 4), (170, 42, 5), (180, 50, 6)] {
         app.collector.request_history = request_history::History::default();
         render_app(&app, width, height);
         let empty_regions = app.charts.regions.borrow().clone();
         let region = |chart| empty_regions.iter().find(|(id, _)| *id == chart).unwrap().1;
         // No requests yet: prompt load keeps only what cache and queue need.
         assert_eq!(region(Chart::Prompt).height, 6);
-        assert!(
-            region(Chart::Generation).height <= 7,
-            "throughput stays a compact row at {width}x{height}"
+        assert_eq!(
+            region(Chart::Generation).height,
+            rates_rows,
+            "throughput scales with the terminal at {width}x{height}"
         );
         assert!(
             region(Chart::Memory).height > region(Chart::Generation).height,
@@ -2097,7 +2098,8 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         );
         if height >= 40 {
             assert!(region(Chart::Memory).height >= 12);
-            assert!(region(Chart::Prefill).height >= 7);
+            // The rates row never drops below its compact floor.
+            assert!(region(Chart::Prefill).height >= 4);
         }
         // Requests arriving give prompt load its rows back; the throughput
         // row and every column edge stay where they were.
