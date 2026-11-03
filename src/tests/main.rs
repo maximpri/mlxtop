@@ -2045,13 +2045,19 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
 #[test]
 fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
     let mut app = test_app(0);
-    for (width, height, rates_rows) in [(80, 24, 4), (100, 40, 4), (170, 42, 5), (180, 50, 6)] {
+    for (width, height, rates_rows, request_rows) in [
+        (80, 24, 4, 6),
+        (100, 40, 4, 5),
+        (170, 42, 5, 5),
+        (180, 50, 6, 6),
+    ] {
         app.collector.request_history = request_history::History::default();
         render_app(&app, width, height);
         let empty_regions = app.charts.regions.borrow().clone();
         let region = |chart| empty_regions.iter().find(|(id, _)| *id == chart).unwrap().1;
-        // No requests yet: prompt load keeps only what cache and queue need.
-        assert_eq!(region(Chart::Prompt).height, 6);
+        // No requests yet: the row scales with the terminal like the Journal,
+        // instead of pinning six rows on every screen size.
+        assert_eq!(region(Chart::Prompt).height, request_rows);
         assert_eq!(
             region(Chart::Generation).height,
             rates_rows,
