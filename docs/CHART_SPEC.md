@@ -17,7 +17,7 @@ tall card.
 | Context | Three-row runtime card, a two-row borderless assessment (one line, plus one for an action or missing reading), then the compact NVIDIA table when present |
 | Grid | Three equal columns shared by every row, so panel edges align |
 | Host | Memory, compression, paging one column each on macOS (memory spans two columns on Linux and Windows); all remaining height, at least six rows; process footprint stays in Processes and the static report |
-| Requests | Prompt load spans two columns; Cache above Queue in the third; about 28% of the chart height, nine to fourteen rows (seven compact); six rows until the first request, when prompt load is one line |
+| Requests | Prompt load spans two columns; Cache above Queue in the third; about 28% of the chart height, nine to fourteen rows (seven compact); until the first request the row scales with the terminal, five to eight rows (six compact), when prompt load is one line |
 | Throughput | Generation, prefill and GPU one column each; four to ten rows, scaling with the terminal height |
 | Recent events | Five rows including borders (three event lines), growing to ten on tall terminals; omitted on compact terminals |
 

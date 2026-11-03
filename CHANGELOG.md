@@ -50,11 +50,13 @@
   and a running `sushi` process is detected as mlx-serve.
 - **Every Overview panel scales with the terminal.** The throughput row
   (generation, prefill, GPU) held seven rows on any terminal tall enough for
-  the full layout, so on a small window — a laptop beside a server, an SSH
-  session from another machine — the idle panel kept its space while the
-  memory, compression and paging charts absorbed the whole change. The row
-  now shrinks with the terminal down to its compact height and grows back
-  as room returns, at every geometry between compact and tall.
+  the full layout, and the request row held six until the first request
+  arrived, so on a small window — a laptop beside a server, an SSH session
+  from another machine — idle panels kept their space while the memory,
+  compression and paging charts absorbed the whole change. Both rows now
+  shrink with the terminal down to their compact heights and grow back as
+  room returns, the same way the Journal already did, at every geometry
+  between compact and tall.
 - **The prefill rate stays after the prefill finishes.** A finished
   request's prefill speed was held for three seconds and then replaced by a
   live zero, so a request that decoded for longer than that showed

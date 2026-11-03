@@ -445,19 +445,22 @@ impl App {
         // prompt bars, a short throughput trace and a few Journal events. The
         // host row takes every remaining row, so tall terminals widen the
         // resource histories instead of stretching sparse panels.
+        // Every row shares the same shape: a floor, a share of the height, and
+        // a ceiling, so each window resizes with the screen dimensions.
         let journal_height = if compact {
             0
         } else {
             (5 + available.saturating_sub(35) / 3).min(JOURNAL_MAX_HEIGHT)
         };
-        // With no requests yet, prompt load is one line: the row keeps only
-        // what cache and queue need in their compact forms, and the rest goes
-        // to the host charts until there is something to draw.
+        // With no requests yet, prompt load is one line: the row hugs what
+        // cache and queue need but still scales with the terminal, like the
+        // Journal, instead of pinning six rows on every screen size.
         let request_height = match (compact, devices) {
-            _ if self.collector.request_history.len() == 0 => 6,
+            (true, _) if self.collector.request_history.len() == 0 => 6,
             (true, true) => 6,
             (true, false) => 7,
-            (false, _) => (available * 28 / 100).clamp(9, REQUEST_MAX_HEIGHT),
+            _ if self.collector.request_history.len() == 0 => (available * 15 / 100).clamp(5, 8),
+            _ => (available * 28 / 100).clamp(9, REQUEST_MAX_HEIGHT),
         };
         let mut rates_height = if compact {
             RATES_COMPACT_HEIGHT
