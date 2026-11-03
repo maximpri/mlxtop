@@ -284,6 +284,16 @@ fn output_speeds_belong_to_individual_generating_requests() {
     assert_eq!(prefilling[0].prompt, 65535);
     assert_eq!(prefilling[0].prefilled, Some(4096));
     assert!(!prefilling[0].queued);
+    // Older and newer oMLX servers must produce the same row: older builds
+    // carry `prompt_tokens` beside `total`, newer ones `total` alone.
+    let old_shape = omlx_requests(&json!({"active_models":{"models":[
+        {"id":"a","prefilling":[{"request_id":"12","prompt_tokens":14479,"processed":1024,"total":14479}]}
+    ]}}));
+    let new_shape = omlx_requests(&json!({"active_models":{"models":[
+        {"id":"a","prefilling":[{"request_id":"12","processed":1024,"total":14479}]}
+    ]}}));
+    assert_eq!(old_shape[0].prompt, new_shape[0].prompt);
+    assert_eq!(old_shape[0].prefilled, new_shape[0].prefilled);
     // Only the waiting row is queued; running ones are not.
     assert_eq!(
         requests
