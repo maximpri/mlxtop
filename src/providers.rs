@@ -157,7 +157,15 @@ pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
             result.push(OmlxRequest {
                 phase,
                 id,
-                prompt: counter(request, &["prompt_tokens"]),
+                // A prefilling entry reports the prompt as `total`; once the
+                // request starts generating the same prompt lands in
+                // `prompt_tokens`. Without it the row would vanish for the
+                // whole prefill, progress bar and all.
+                prompt: counter(request, &["prompt_tokens"]).or_else(|| {
+                    (phase == OmlxPhase::Prefilling)
+                        .then(|| counter(request, &["total"]))
+                        .flatten()
+                }),
                 cached: counter(request, &["cached_tokens"]),
                 output: counter(request, &["generated_tokens"]),
                 rate: if phase == OmlxPhase::Prefilling {
