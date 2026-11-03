@@ -3136,6 +3136,49 @@ fn parses_omlx_prefill_progress_speed_as_live_rate() {
 }
 
 #[test]
+fn parses_captured_live_omlx_stats_and_keeps_prefilling_rows() {
+    // Captured from a live oMLX server mid-prefill on 2026-11-03. A stats
+    // change moved the prompt to `total` and dropped `prompt_tokens` from
+    // prefilling entries; the row then failed to survive parsing, which took
+    // prompt load's PREFILL progress bar and its time-left readout away on
+    // every 3.2.0 release candidate. This fixture is the regression net:
+    // if a row cannot be built from this exact payload again, the bug is
+    // back before it reaches a terminal.
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_prefilling.json")).unwrap();
+    let health = json!({
+        "status": "healthy",
+        "default_model": "Qwen3.8-27B-oQ4e-mtp",
+        "engine_pool": {
+            "current_model_memory": 26713869008u64,
+            "final_ceiling": 36507222016u64
+        }
+    });
+
+    let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+
+    assert_eq!(telemetry.source, TelemetrySource::Live);
+    assert_eq!(telemetry.provider.as_deref(), Some("oMLX"));
+    assert_eq!(telemetry.status.as_deref(), Some("prefilling"));
+    assert_eq!(telemetry.model.as_deref(), Some("Qwen3.8-27B-oQ4e-mtp"));
+    // The prefilling row survives on the captured shape: the prompt comes
+    // from `total` and the progress from `processed`. Losing either dropped
+    // the row, and with it the bar.
+    assert_eq!(telemetry.requests.len(), 1);
+    let request = &telemetry.requests[0];
+    assert_eq!(request.prompt, 14479);
+    assert_eq!(request.prefilled, Some(0));
+    assert!(!request.queued);
+    assert_eq!(request.provider, "oMLX");
+    assert_eq!(request.id, "2369ab37-02ca-492f-9aff-8a4280134949");
+    assert_eq!(telemetry.active_requests, Some(1));
+    assert_eq!(telemetry.waiting_requests, Some(0));
+    assert_eq!(telemetry.cache_efficiency, Some(87.2));
+    assert_eq!(telemetry.total_prompt_tokens, Some(710838));
+    assert_eq!(telemetry.model_memory, Some(26713869008));
+}
+
+#[test]
 fn omlx_prefill_initial_speed_is_missing_until_a_chunk_rate_exists() {
     let health = json!({"status":"healthy", "default_model":"model"});
     let mut stats = json!({
