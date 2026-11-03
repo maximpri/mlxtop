@@ -195,8 +195,20 @@ mlxtop was developed with the Duet coding agent.
 
 ## Credits
 
-- TensorFold runtime support contributed by Minoru Mizutani
-  ([@mmizutani](https://github.com/mmizutani)).
+External contributions are credited here, with thanks.
+
+- [Samuel Reed](https://github.com/STRML) (@STRML) — the mlx-serve runtime
+  support, per-request decode speeds, prefill progress with time left, sushi
+  gauge support, and the Journal recording overhaul (#15, #37, #38, #43, #44).
+- David ([@sandbranch](https://github.com/sandbranch)) — AMD GPU monitoring on
+  Linux from amdgpu sysfs, and live llama.cpp generation rate and slot
+  readings (#40, #41, #42).
+- Minoru Mizutani ([@mmizutani](https://github.com/mmizutani)) — the TensorFold
+  runtime support (#45).
+- Sumit Chaudhary ([@EduardoSaverin](https://github.com/EduardoSaverin)) — the
+  configuration file support (#1).
+- Prashant ([@prashant11235](https://github.com/prashant11235)) — Linux
+  monitoring via nvidia-smi (#2).
 
 ## License
 
