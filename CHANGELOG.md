@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.2.1 — 2026-11-03
+
+### Dashboards
+
+- **oMLX prefilling requests stay in prompt load.** A prefilling entry in
+  oMLX's stats reports the prompt as `total` (`processed` carrying how far
+  the prefill has got) and has no `prompt_tokens` until generation starts,
+  so the row vanished for the whole prefill — taking the PREFILL progress
+  bar and its time-remaining readout with it — and only reappeared once
+  generation began. The row now reads the prompt from `total` and keeps the
+  bar, the percentage and the time left on screen for the whole prefill.
+
 ## 3.2.0 — 2026-11-02
 
 ### Journal

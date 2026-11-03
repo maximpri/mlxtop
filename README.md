@@ -35,11 +35,11 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
   prompts or touches your models or runtime settings.
 
-**What's new in 3.2.0:** Strata and TensorFold join the monitored runtimes,
-every dashboard panel resizes with your terminal, and the Journal records
-what you choose. 3.1.2 gave running requests their own generation speeds,
-prompt load its generated tokens, and Linux AMD detection without ROCm.
-3.1 brought a redesigned Overview, `mlxtop update` and oMLX through Splash.
+**What's new in 3.2.1:** oMLX prefill requests keep their progress bar and
+time left in prompt load for the whole prefill. 3.2.0 added Strata and
+TensorFold, dashboard panels that resize with your terminal, and the Journal
+recording overhaul. 3.1.2 gave running requests their own generation speeds
+and Linux AMD detection without ROCm.
 [Release notes →](CHANGELOG.md)
 
 ## Install
