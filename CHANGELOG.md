@@ -5,13 +5,8 @@
 ### Dashboards
 
 - **The prefill progress bar is back in prompt load.** An oMLX stats change
-  stopped reporting `prompt_tokens` for prefilling requests — the prompt now
-  arrives as `total` — and the row needed it to survive, so prefilling
-  requests vanished from prompt load, taking the PREFILL progress bar and
-  its time-remaining readout with them until generation began. The bar and
-  the time left are Samuel Reed's feature (#37); this release only fixes the
-  row to read the prompt from `total`, which brings them back for the whole
-  prefill.
+  had silenced Samuel Reed's prefill progress bar and its time-left readout
+  (#37); 3.2.1 is a bug fix that brings them back.
 
 ## 3.2.0 — 2026-11-02
 
