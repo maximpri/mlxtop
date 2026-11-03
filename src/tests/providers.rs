@@ -275,6 +275,15 @@ fn output_speeds_belong_to_individual_generating_requests() {
         {"id":"a","prefilling":[{"request_id":"9","prompt_tokens":65536,"processed":8192,"total":65535}]}
     ]}}));
     assert_eq!(prefilling[0].prefilled, Some(8192));
+    // The current oMLX reports a prefilling request's prompt as `total` alone;
+    // without reading it the row would vanish for the whole prefill.
+    let prefilling = omlx_requests(&json!({"active_models":{"models":[
+        {"id":"a","prefilling":[{"request_id":"11","processed":4096,"total":65535,"speed":360.0}]}
+    ]}}));
+    assert_eq!(prefilling.len(), 1);
+    assert_eq!(prefilling[0].prompt, 65535);
+    assert_eq!(prefilling[0].prefilled, Some(4096));
+    assert!(!prefilling[0].queued);
     // Only the waiting row is queued; running ones are not.
     assert_eq!(
         requests
