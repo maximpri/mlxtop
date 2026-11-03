@@ -2047,9 +2047,9 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
     let mut app = test_app(0);
     for (width, height, rates_rows, request_rows) in [
         (80, 24, 4, 6),
-        (100, 40, 4, 5),
-        (170, 42, 5, 5),
-        (180, 50, 6, 6),
+        (100, 40, 6, 6),
+        (170, 42, 7, 7),
+        (180, 50, 8, 8),
     ] {
         app.collector.request_history = request_history::History::default();
         render_app(&app, width, height);
@@ -2174,10 +2174,10 @@ fn overview_journal_retains_three_recent_events_at_screenshot_size() {
         });
     }
     let screen = render_app(&app, 170, 42);
-    for index in 9..12 {
+    for index in 7..12 {
         assert!(screen.contains(&format!("Event {index:02}")), "{screen}");
     }
-    assert!(!screen.contains("Event 08"), "capacity is three event rows");
+    assert!(!screen.contains("Event 06"), "capacity is five event rows");
     assert!(screen.find("Event 11") < screen.find("Event 09"));
     assert!(screen.contains("3 full journal"));
     let compact = render_app(&app, 80, 24);

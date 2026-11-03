@@ -48,15 +48,16 @@
   shared vLLM-shaped queues. Decode, prefill, per-request speeds and prefill
   progress work unchanged; `MLXTOP_PROVIDER=mlx-serve` stays the selection,
   and a running `sushi` process is detected as mlx-serve.
-- **Every Overview panel scales with the terminal.** The throughput row
-  (generation, prefill, GPU) held seven rows on any terminal tall enough for
-  the full layout, and the request row held six until the first request
-  arrived, so on a small window — a laptop beside a server, an SSH session
-  from another machine — idle panels kept their space while the memory,
-  compression and paging charts absorbed the whole change. Both rows now
-  shrink with the terminal down to their compact heights and grow back as
-  room returns, the same way the Journal already did, at every geometry
-  between compact and tall.
+- **Every Overview panel scales with the terminal, in balance.** The
+  throughput row held seven rows on any terminal tall enough for the full
+  layout, and the request row held six until the first request arrived, so
+  on a small window — a laptop beside a server, an SSH session from another
+  machine — idle panels kept their space while the memory, compression and
+  paging charts absorbed the whole change and grew to half the screen. All
+  three rows now follow the same floor-share-ceiling shape the Journal
+  already had, so the host charts keep near two fifths of the height at
+  every size instead of dwarfing the rest, and each window resizes with the
+  screen dimensions between compact and tall.
 - **The prefill rate stays after the prefill finishes.** A finished
   request's prefill speed was held for three seconds and then replaced by a
   live zero, so a request that decoded for longer than that showed

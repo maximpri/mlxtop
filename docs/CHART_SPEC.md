@@ -17,13 +17,13 @@ tall card.
 | Context | Three-row runtime card, a two-row borderless assessment (one line, plus one for an action or missing reading), then the compact NVIDIA table when present |
 | Grid | Three equal columns shared by every row, so panel edges align |
 | Host | Memory, compression, paging one column each on macOS (memory spans two columns on Linux and Windows); all remaining height, at least six rows; process footprint stays in Processes and the static report |
-| Requests | Prompt load spans two columns; Cache above Queue in the third; about 28% of the chart height, nine to fourteen rows (seven compact); until the first request the row scales with the terminal, five to eight rows (six compact), when prompt load is one line |
-| Throughput | Generation, prefill and GPU one column each; four to ten rows, scaling with the terminal height |
-| Recent events | Five rows including borders (three event lines), growing to ten on tall terminals; omitted on compact terminals |
+| Requests | Prompt load spans two columns; Cache above Queue in the third; about 28% of the chart height, nine to sixteen rows (seven compact); until the first request the row scales with the terminal, five to twelve rows (six compact), when prompt load is one line |
+| Throughput | Generation, prefill and GPU one column each; four to twelve rows, scaling with the terminal height |
+| Recent events | Five rows including borders (three event lines), growing to fourteen on tall terminals; omitted on compact terminals |
 
 Keep a stable layout across workload changes. At 170×42, the host row uses
-sixteen rows, requests nine, throughput five and Journal five; at 250×80 the
-host row grows to thirty-nine while requests stop at fourteen. Compact
+fourteen rows, requests ten, throughput seven and Journal seven; at 250×80 the
+host row grows to thirty-one while requests stop at sixteen. Compact
 terminals retain seven request rows and exact readings when history cannot fit.
 The compact assessment and NVIDIA device table consume the Journal preview budget; the full
 Journal remains available with `3`. Measured latency may take 30% of a wide

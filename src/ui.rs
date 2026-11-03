@@ -36,13 +36,14 @@ use ratatui::Frame;
 use std::collections::VecDeque;
 
 /// Throughput is the outcome, shown compactly; host resources get the space.
-/// The rates row scales with the terminal instead of holding a fixed floor.
-const RATES_MAX_HEIGHT: u16 = 10;
+/// Every row scales with the terminal between a floor and a ceiling, so no
+/// single window dwarfs the rest at any size.
+const RATES_MAX_HEIGHT: u16 = 12;
 /// Short terminals keep each rate in its title; Enter expands the history.
 const RATES_COMPACT_HEIGHT: u16 = 4;
 /// Prompt bars and Journal stop growing once more rows add no information.
-const REQUEST_MAX_HEIGHT: u16 = 14;
-const JOURNAL_MAX_HEIGHT: u16 = 10;
+const REQUEST_MAX_HEIGHT: u16 = 16;
+const JOURNAL_MAX_HEIGHT: u16 = 14;
 /// The host row takes all remaining height, never less than this.
 const HOST_MIN_HEIGHT: u16 = 6;
 /// SYSINFO strip, then the borderless two-row assessment beneath it.
@@ -441,16 +442,15 @@ impl App {
         let available = area
             .height
             .saturating_sub(info_height + summary_height + device_height);
-        // Supporting rows grow slowly and stop where more height adds nothing:
-        // prompt bars, a short throughput trace and a few Journal events. The
-        // host row takes every remaining row, so tall terminals widen the
-        // resource histories instead of stretching sparse panels.
-        // Every row shares the same shape: a floor, a share of the height, and
-        // a ceiling, so each window resizes with the screen dimensions.
+        // Supporting rows grow with the terminal and stop where more height
+        // adds nothing: prompt bars, a short throughput trace and a few
+        // Journal events. The host row takes every remaining row, so the
+        // shares below keep it near two fifths of the charts' height instead
+        // of letting it swallow the screen on tall terminals.
         let journal_height = if compact {
             0
         } else {
-            (5 + available.saturating_sub(35) / 3).min(JOURNAL_MAX_HEIGHT)
+            (available * 22 / 100).clamp(5, JOURNAL_MAX_HEIGHT)
         };
         // With no requests yet, prompt load is one line: the row hugs what
         // cache and queue need but still scales with the terminal, like the
@@ -459,13 +459,13 @@ impl App {
             (true, _) if self.collector.request_history.len() == 0 => 6,
             (true, true) => 6,
             (true, false) => 7,
-            _ if self.collector.request_history.len() == 0 => (available * 15 / 100).clamp(5, 8),
+            _ if self.collector.request_history.len() == 0 => (available * 20 / 100).clamp(5, 12),
             _ => (available * 28 / 100).clamp(9, REQUEST_MAX_HEIGHT),
         };
         let mut rates_height = if compact {
             RATES_COMPACT_HEIGHT
         } else {
-            (available * 15 / 100).clamp(RATES_COMPACT_HEIGHT, RATES_MAX_HEIGHT)
+            (available * 20 / 100).clamp(RATES_COMPACT_HEIGHT, RATES_MAX_HEIGHT)
         };
         let mut host_height =
             available.saturating_sub(journal_height + request_height + rates_height);
