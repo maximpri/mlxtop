@@ -4,9 +4,8 @@
 
 ### Dashboards
 
-- **The prefill progress bar is back in prompt load.** An oMLX stats change
-  had silenced Samuel Reed's prefill progress bar and its time-left readout
-  (#37); 3.2.1 is a bug fix that brings them back.
+- **The prefill progress bar is back in prompt load.** A bug fix brings
+  Samuel Reed's prefill progress bar and its time-left readout (#37) back.
 
 ## 3.2.0 — 2026-11-02
 

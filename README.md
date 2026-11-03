@@ -36,11 +36,10 @@ changed when the model slowed.
   prompts or touches your models or runtime settings.
 
 **What's new in 3.2.1:** a bug fix brings the prefill progress bar and its
-time-left readout back to prompt load — an oMLX stats change had silenced
-Samuel Reed's feature. 3.2.0 added Strata and TensorFold, dashboard panels
-that resize with your terminal, and the Journal recording overhaul.
-3.1.2 gave running requests their own generation speeds and Linux AMD
-detection without ROCm.
+time-left readout back to prompt load. 3.2.0 added Strata and TensorFold,
+dashboard panels that resize with your terminal, and the Journal recording
+overhaul. 3.1.2 gave running requests their own generation speeds and Linux
+AMD detection without ROCm.
 [Release notes →](CHANGELOG.md)
 
 ## Install
