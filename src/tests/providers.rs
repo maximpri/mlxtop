@@ -180,6 +180,7 @@ fn response_formats_preserve_full_prompt_and_cache_counts() {
         "koboldcpp",
         "localai",
         "tensorfold",
+        "strata",
     ] {
         let telemetry = parse_usage(&record(
             provider,

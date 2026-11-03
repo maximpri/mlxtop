@@ -388,6 +388,14 @@ fn capabilities(provider: &str) -> Vec<Capability> {
             "client recorder",
             "native aggregate / client recorder",
         ),
+        "Strata" => (
+            "native available-model catalogue",
+            "live engine gauge; completion-counter averages otherwise",
+            "live engine gauge; completion-counter averages otherwise",
+            "native active / waiting",
+            "client recorder",
+            "native aggregate / client recorder",
+        ),
         "vLLM" | "SGLang" => (
             "metric labels when present",
             "sampled server rate; needs two counter samples",
@@ -444,9 +452,10 @@ fn setup(provider: &str) -> &'static [&'static str] {
         "mlx-serve" => &["Start mlx-serve with --metrics; mlxtop reads /metrics for rates and queues and /metrics.json for running requests. Sushi serves the same endpoints under `sushi:` gauge names and needs no flag.", "Select with MLXTOP_PROVIDER=mlx-serve (default port 11234); set MLXTOP_PROVIDER_PORT for a custom port.", "Bearer keys use MLXTOP_PROVIDER_API_KEY. Sessions that only hold a prefix cache are not listed as requests."],
         "Splash" => &["mlxtop reads Splash's /status: running requests, decode and prefill counters, Metal memory and prefix-cache reuse.", "Select with MLXTOP_PROVIDER=splash (default port 8000); set MLXTOP_PROVIDER_PORT to match splash serve --port.", "With splash serve --api-key or SPLASH_API_KEY, set the same key in MLXTOP_PROVIDER_API_KEY."],
         "TensorFold" => &["mlxtop reads /metrics and /v1/models; no dashboard flag is needed.", "Select with MLXTOP_PROVIDER=tensorfold (default port 8080); bearer keys use MLXTOP_PROVIDER_API_KEY.", "Token counters advance at request completion, not during decode. Individual request history requires the client usage recorder."],
+        "Strata" => &["mlxtop reads /metrics/prometheus (vLLM's gauge names plus Strata's own live rates) and /v1/models; no dashboard flag is needed.", "Select with MLXTOP_PROVIDER=strata (default port 8080); set MLXTOP_PROVIDER_PORT or MLXTOP_PROVIDER_URL for a custom server root.", "Bearer keys use MLXTOP_PROVIDER_API_KEY. Individual request history requires the client usage recorder."],
         "KoboldCpp" => &["Enable the local server and check /api/extra/perf; it describes the last result, not a live request.", "Select with MLXTOP_PROVIDER=koboldcpp; set MLXTOP_PROVIDER_PORT for a custom port."],
         "Ollama" | "LM Studio" | "mlx-lm" | "LocalAI" | "Jan" | "GPT4All" => &["Enable the runtime's local API server and select it with MLXTOP_PROVIDER.", "Use MLXTOP_PROVIDER_PORT or MLXTOP_PROVIDER_URL for a custom endpoint; bearer keys use MLXTOP_PROVIDER_API_KEY.", "Integrate scripts/record_usage.py in the calling client so completed responses write counters to a JSONL file.", "Set MLXTOP_USAGE_FILE=/absolute/path/usage.jsonl when starting mlxtop. This variable alone does not record requests.", "Recorder setup: https://github.com/maximpri/mlxtop/blob/main/docs/USER_GUIDE.md#client-reported-usage-file"],
-        _ => &["Start a supported runtime, or select an existing server with MLXTOP_PROVIDER.", "Providers: omlx, ollama, lmstudio, llama.cpp, koboldcpp, mlx-lm, mlx-serve, splash, localai, vllm, sglang, jan, gpt4all, tensorfold.", "Example: MLXTOP_PROVIDER=ollama mlxtop doctor. Monitoring never sends inference requests."],
+        _ => &["Start a supported runtime, or select an existing server with MLXTOP_PROVIDER.", "Providers: omlx, ollama, lmstudio, llama.cpp, koboldcpp, mlx-lm, mlx-serve, splash, localai, vllm, sglang, jan, gpt4all, tensorfold, strata.", "Example: MLXTOP_PROVIDER=ollama mlxtop doctor. Monitoring never sends inference requests."],
     }
 }
 

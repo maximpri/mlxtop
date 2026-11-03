@@ -1000,3 +1000,68 @@ fn tensorfold_metrics_report_queues_cache_memory_and_completion_throughput() {
         .observe("TensorFold", "unrelated 1\n", now)
         .is_none());
 }
+
+#[test]
+fn strata_metrics_report_live_gauges_queues_cache_and_memory() {
+    let body = |tok_s, prefill_s, output, prompt| {
+        format!(
+            "vllm:num_requests_running 1\n\
+         vllm:num_requests_waiting 2\n\
+         vllm:generation_tokens_total{{model_name=\"qwen3.8\"}} {output}\n\
+         vllm:prompt_tokens_total{{model_name=\"qwen3.8\"}} {prompt}\n\
+         vllm:prefix_cache_hits_total 40\n\
+         vllm:prefix_cache_queries_total {prompt}\n\
+         vllm:kv_cache_usage_perc{{model_name=\"qwen3.8\"}} 0.3\n\
+         vllm:time_to_first_token_seconds_sum 1.5\n\
+         vllm:time_to_first_token_seconds_count 3\n\
+         strata:live_tok_s {tok_s}\n\
+         strata:live_prefill_tok_s_mean {prefill_s}\n\
+         strata:live_prompt_read 512\n\
+         strata:gpu_mem_used_bytes{{gpu=\"0\"}} 4294967296\n\
+         strata:gpu_mem_used_bytes{{gpu=\"1\"}} 4294967296\n"
+        )
+    };
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let first = history
+        .observe("Strata", &body(25.5, 200.0, 10, 100), now)
+        .unwrap();
+    assert_eq!(first.provider.as_deref(), Some("Strata"));
+    assert_eq!(first.active_requests, Some(1));
+    assert_eq!(first.waiting_requests, Some(2));
+    assert_eq!(first.model.as_deref(), Some("qwen3.8"));
+    assert_eq!(first.model_memory, Some(2 * 4294967296));
+    assert_eq!(first.prefix_hit_rate, Some(40.0));
+    assert_eq!(first.generation_tps, Some(25.5));
+    assert!(first.generation_tps_live, "the engine gauge is a live rate");
+    assert_eq!(first.prefill_tps, Some(200.0));
+    assert!(first.prefill_tps_live);
+    let details = first.details.unwrap();
+    assert!(details.contains("engine live gauges"));
+    assert!(details.contains("30.0%"));
+    assert!(details.contains("server mean TTFT 500 ms"));
+    assert!(details.contains("prefill 512 tokens read"));
+    let next = history
+        .observe(
+            "Strata",
+            &body(0.0, 0.0, 50, 300),
+            now + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(next.generation_tps, Some(20.0));
+    assert!(!next.generation_tps_live, "completion deltas are not live");
+    assert_eq!(next.prefill_tps, Some(100.0));
+    assert!(!next.prefill_tps_live);
+    assert!(!next.details.unwrap().contains("engine live gauges"));
+    let reset = history
+        .observe(
+            "Strata",
+            &body(0.0, 0.0, 0, 0),
+            now + Duration::from_secs(3),
+        )
+        .unwrap();
+    assert_eq!(reset.generation_tps, None);
+    assert_eq!(reset.prefill_tps, None);
+    assert_eq!(reset.prefix_hit_rate, None);
+    assert!(history.observe("Strata", "unrelated 1\n", now).is_none());
+}

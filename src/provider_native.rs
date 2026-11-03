@@ -533,6 +533,9 @@ struct Series {
     prefill_total: String,
     requests_prefilling: String,
     mlx_active_bytes: String,
+    /// Strata's own live-rate gauges, present beside its vLLM-named counters.
+    live_generation: String,
+    live_prefill: String,
 }
 
 fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
@@ -544,6 +547,15 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
             "requests_running",
             "requests_waiting",
             "kv_cache_usage_ratio",
+            None,
+        ),
+        // Strata serves vLLM's gauge names on /metrics/prometheus and adds its
+        // own live-rate gauges under `strata:`.
+        "Strata" => (
+            "vllm",
+            "num_requests_running",
+            "num_requests_waiting",
+            "kv_cache_usage_perc",
             None,
         ),
         "vLLM" => (
@@ -589,10 +601,16 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
         prefill_total: String::new(),
         requests_prefilling: String::new(),
         mlx_active_bytes: String::new(),
+        live_generation: String::new(),
+        live_prefill: String::new(),
     };
     if provider == "TensorFold" {
         series.hits = key("prompt_tokens_cached_total");
         series.queries = key("prompt_tokens_total");
+    }
+    if provider == "Strata" {
+        series.live_generation = "strata:live_tok_s".into();
+        series.live_prefill = "strata:live_prefill_tok_s_mean".into();
     }
     if let Some(namespace) = native {
         // Tokens generated so far by running requests, tokens prefilled so far by the
@@ -791,6 +809,31 @@ impl MetricsHistory {
                     .is_some_and(|prompt| *hits <= prompt)
             });
             details[0] = "throughput: completed-request token deltas".into();
+        }
+        if provider == "Strata" {
+            // Strata's counters move when requests finish, but the engine also
+            // publishes live-rate gauges. A gauge wins; the completion deltas
+            // otherwise stay averages that never stand in for an in-flight request.
+            let live_decode = metrics
+                .sum(&series.live_generation)
+                .filter(|rate| *rate > 0.0);
+            let live_prefill = metrics.sum(&series.live_prefill).filter(|rate| *rate > 0.0);
+            result.generation_tps = live_decode.or(result.generation_tps);
+            result.generation_tps_live = live_decode.is_some();
+            result.prefill_tps = live_prefill.or(result.prefill_tps);
+            result.prefill_tps_live = live_prefill.is_some();
+            result.model_memory = metrics.count("strata:gpu_mem_used_bytes");
+            if let Some(read) = metrics
+                .sum("strata:live_prompt_read")
+                .filter(|read| *read > 0.0)
+            {
+                details.push(format!("prefill {read:.0} tokens read"));
+            }
+            details[0] = if live_decode.is_some() || live_prefill.is_some() {
+                "throughput: engine live gauges".into()
+            } else {
+                "throughput: completed-request token deltas".into()
+            };
         }
         result.details = Some(details.join(" · "));
         self.previous = Some((provider.to_owned(), now, metrics));
