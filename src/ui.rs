@@ -744,6 +744,31 @@ impl App {
                     }
                 })
                 .unwrap_or_else(|| {
+                    // The title reads what the chart's last bar shows. A
+                    // server average beside a different plotted sample
+                    // contradicts it; the average goes to the bottom border.
+                    if let Some(point) = history
+                        .iter()
+                        .filter(|_| area.width >= 38)
+                        .rev()
+                        .take(self.charts.visible_samples(
+                            Chart::from(metric),
+                            usize::from(area.width.saturating_sub(8)),
+                        ))
+                        .find(|point| point.value.is_some())
+                    {
+                        let rate =
+                            format!("{:.1} tok/s", point.value.unwrap_or_default() as f64 / 10.0);
+                        let with_age =
+                            format!("LAST {rate} · {}", telemetry_age(Some(point.observed_at)));
+                        // Narrow panels keep the state word (decoding), which
+                        // says why there is no current rate.
+                        if area.width >= 44 {
+                            return with_age;
+                        } else if area.width >= 38 {
+                            return format!("LAST {rate}");
+                        }
+                    }
                     if metric == ChartMetric::Prefill
                         && sample.llm_prefill_tps.is_some()
                         && area.width >= 38
@@ -762,8 +787,25 @@ impl App {
                     }
                 }),
             ChartMetric::Cache => {
-                let value = current.map_or_else(|| "—".into(), |value| format!("{value}%"));
-                if area.width < 28 {
+                // Hit rate is measured only over intervals that read new
+                // prompt tokens; between prompts, keep the last one, marked.
+                let last = history
+                    .iter()
+                    .rev()
+                    .take(self.charts.visible_samples(
+                        Chart::from(metric),
+                        usize::from(area.width.saturating_sub(8)),
+                    ))
+                    .find_map(|point| point.value.map(|value| (value, point.observed_at)));
+                let value = match (current, last) {
+                    (Some(value), _) => format!("{value}%"),
+                    (None, Some((value, at))) if area.width >= 44 => {
+                        format!("LAST {value}% · {}", telemetry_age(Some(at)))
+                    }
+                    (None, Some((value, _))) if area.width >= 28 => format!("LAST {value}%"),
+                    _ => "—".into(),
+                };
+                if value.starts_with("LAST") || area.width < 28 {
                     value
                 } else {
                     format!("hit {value}")
@@ -895,10 +937,24 @@ impl App {
             }
             // While a prefill runs, its position replaces the unit: the rate is already in the title,
             // and 40.9k / 61.5k tells you how long the wait is.
-            ChartMetric::Prefill => {
-                Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
-            }
-            ChartMetric::Generation => Some("tok/s".into()),
+            ChartMetric::Prefill => Some(llm_prefill_progress_label(sample).unwrap_or_else(|| {
+                match sample
+                    .llm_prefill_tps
+                    .filter(|_| !sample.llm_prefill_tps_live)
+                {
+                    Some(average) if current.is_none() && area.width >= 38 => {
+                        format!("tok/s · server avg {average:.1}")
+                    }
+                    _ => "tok/s".into(),
+                }
+            })),
+            // oMLX and Splash report generation summed over running requests;
+            // say so when there are several, since each gets only its share.
+            ChartMetric::Generation => Some(match generating_requests(sample) {
+                n if n > 1 && area.width >= 38 => format!("tok/s · total of {n} requests"),
+                n if n > 1 => format!("tok/s · {n} req"),
+                _ => "tok/s".into(),
+            }),
             ChartMetric::Memory => None,
             ChartMetric::Gpu => Some(if current == Some(0) {
                 "idle".into()
@@ -1201,6 +1257,12 @@ impl App {
             // samples exist, "yet" when none have been captured.
             let idle = sample.llm_status == "idle";
             let message = match metric {
+                // Hit rate needs prompt tokens read in the window.
+                ChartMetric::Cache
+                    if history.iter().any(|point| point.value.is_some()) && inner.width >= 30 =>
+                {
+                    "No prompts read in this window"
+                }
                 _ if history.iter().any(|point| point.value.is_some()) => {
                     if idle && inner.width >= 32 {
                         "Idle · no samples in this window"
@@ -1248,7 +1310,7 @@ impl App {
 
         // Historical observations end where sampling stopped. Explain the
         // trailing gap without drawing a zero or holding the old rate live.
-        if current.is_none() && inner.height >= 4 {
+        if current.is_none() && inner.height >= 4 && !rate_chart && metric != ChartMetric::Cache {
             if let Some((observed_at, value)) = history
                 .iter()
                 .rev()
@@ -2206,4 +2268,13 @@ impl App {
             area,
         );
     }
+}
+
+/// Requests generating now, from the runtime's request list.
+fn generating_requests(sample: &crate::domain::Sample) -> usize {
+    sample
+        .llm_requests
+        .iter()
+        .filter(|r| !r.completed && !r.queued && r.prefilled.is_none())
+        .count()
 }

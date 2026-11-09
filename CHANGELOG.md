@@ -19,6 +19,14 @@
 
 ### Dashboards
 
+- **Rate headlines match their charts.** Between prefills, the prefill title
+  showed the server's average (209 tok/s) above a chart whose last bar was
+  71.7. It now reads that last bar, `LAST 71.7 tok/s · 1s old`, and the
+  average sits underneath as `server avg 209.0`. Generation says
+  `total of 2 requests` when its rate is the sum over several, since each
+  request gets only its share. Between prompts, cache keeps its last
+  measured hit rate (`LAST 98% · 4s old`) instead of `hit —`, and an empty
+  window says `No prompts read in this window`.
 - **Queue shows what each request is doing.** Each request gets a row with
   its state: `◐ PREFILL` with a progress bar, `● GEN` with tokens out and
   tok/s, `○ QUEUED` with its prompt size. Prefilling requests come first, so

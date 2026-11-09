@@ -720,18 +720,13 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Generation,
             "generation",
             Some(400),
-            vec!["LAST SAMPLE 40.0 tok/s · 25s old", "tok/s"],
+            vec!["LAST 40.0 tok/s · 25s old", "tok/s"],
         ),
         (
             ChartMetric::Cache,
             "cache",
             Some(0),
-            vec![
-                "hit —",
-                "LAST INTERVAL 0% · 25s old",
-                "since start 62.8%",
-                "prefix 39.7%",
-            ],
+            vec!["LAST 0% · 25s old", "since start 62.8%", "prefix 39.7%"],
         ),
         (
             ChartMetric::Prefill,
@@ -4373,9 +4368,16 @@ fn cache_never_replaces_missing_interval_samples_with_cumulative_gauge() {
             !text.contains('█'),
             "aggregate must never become a gauge: {text}"
         );
-        assert!(text.contains(if missing == 0 { "hit 0%" } else { "hit —" }));
+        // The last measured interval stays marked LAST while it is in view;
+        // past the window the reading is unknown and the panel says why.
+        let reading = match missing {
+            0 => "hit 0%",
+            4 => "LAST 0%",
+            _ => "hit —",
+        };
+        assert!(text.contains(reading), "{text}");
         if missing == 80 {
-            assert!(text.contains("No samples in this window"));
+            assert!(text.contains("No prompts read in this window"), "{text}");
         }
     }
 }
@@ -4401,7 +4403,7 @@ fn server_rate_averages_are_secondary_details_in_expanded_charts() {
                 ChartMetric::Generation,
             )
         });
-        assert!(text.contains("LAST SAMPLE 24.7 tok/s"));
+        assert!(text.contains("LAST 24.7 tok/s"), "{text}");
         assert_eq!(
             text.contains("SERVER AVG GEN 35.7 tok/s"),
             expanded,
@@ -5187,4 +5189,64 @@ fn a_request_joining_explains_a_per_request_slowdown() {
         "{}",
         insight.summary
     );
+}
+
+#[test]
+fn rate_headlines_match_their_charts_and_name_a_summed_rate() {
+    // Two requests decode while the prefill that came before them is over:
+    // the screenshot that read "AVG PREFILL 209.0" above a 71.7 bar.
+    let mut app = test_app(0);
+    let request = |id: &str| domain::RequestUsage {
+        provider: "oMLX".into(),
+        model: "m".into(),
+        id: id.into(),
+        prompt: 50_705,
+        cached: None,
+        output: Some(15),
+        output_tps: Some(21.8),
+        completed: false,
+        queued: false,
+        prefilled: None,
+        ttft_ms: None,
+        observed_at: Some(SystemTime::now()),
+    };
+    app.collector.current = Sample {
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_generation_tps: Some(43.6),
+        llm_generation_tps_live: true,
+        llm_prefill_tps: Some(209.0),
+        llm_requests: vec![request("a"), request("b")],
+        ..Sample::default()
+    };
+    let generation = VecDeque::from([ChartPoint::new(Some(436), Tone::Green)]);
+    let text = render_view(60, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "generation",
+            &generation,
+            ChartMetric::Generation,
+        )
+    });
+    assert!(text.contains("LIVE 43.6 tok/s"), "{text}");
+    assert!(text.contains("tok/s · total of 2 requests"), "{text}");
+
+    let mut last = ChartPoint::new(Some(717), Tone::Green);
+    last.observed_at = SystemTime::now() - Duration::from_secs(1);
+    let prefill = VecDeque::from([last, ChartPoint::new(None, Tone::Muted)]);
+    let text = render_view(60, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &prefill,
+            ChartMetric::Prefill,
+        )
+    });
+    // The headline is the plotted sample; the server's average is labelled
+    // as such underneath, never presented as the reading.
+    assert!(text.contains("LAST 71.7 tok/s · 1s old"), "{text}");
+    assert!(text.contains("tok/s · server avg 209.0"), "{text}");
+    assert!(!text.contains("AVG PREFILL"), "{text}");
 }
