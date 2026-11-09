@@ -74,6 +74,7 @@ fn capabilities_preserve_sources_and_missing_or_stale_observations() {
         completed: true,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: Some(42),
         observed_at: sample.llm_observed_at,
     });
@@ -217,6 +218,7 @@ fn capability_freshness_belongs_to_its_source() {
         completed: true,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: Some(100),
         observed_at: Some(SystemTime::now() - std::time::Duration::from_secs(60)),
     });

@@ -332,6 +332,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
             completed: true,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: Some(150),
             observed_at: None,
         }],
@@ -1413,8 +1414,10 @@ fn correlation_engine_explains_throughput_changes_against_a_median_baseline() {
     let mut busy = live(70.0);
     busy.gpu_util = Some(85);
     let up = engine.observe(&busy, thresholds);
-    assert!(up.summary.starts_with("GEN ↑"), "{}", up.summary);
-    assert!(up.summary.ends_with("correlated: GPU 85% busy"));
+    // A busy GPU is what decoding looks like; it never explains a change.
+    assert_eq!(up.direction, ThroughputDirection::Up);
+    assert_eq!(up.summary, "", "{}", up.summary);
+    assert!(up.details.contains("GPU 85% busy"), "{}", up.details);
     let flat = engine.observe(&live(50.5), thresholds);
     assert_eq!(flat.direction, ThroughputDirection::Flat);
 

@@ -15,6 +15,7 @@ fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
         completed: false,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         output_tps: None,
         observed_at: None,

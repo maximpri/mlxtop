@@ -240,7 +240,8 @@ fn request_row(request: &Running, width: usize) -> Line<'static> {
         .add_modifier(Modifier::BOLD);
     match request.phase {
         Phase::Prefill(done) => {
-            let percent = progress_percent(done, request.prompt);
+            let cached = request.cached.min(done);
+            let percent = progress_percent(done - cached, request.prompt - cached);
             let tail = format!(" {percent:>2}%");
             let size = format!("{} ", compact_tokens(request.prompt));
             let bar_room = room.saturating_sub(tail.len());

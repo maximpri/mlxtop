@@ -14,6 +14,37 @@ pub(super) struct Finding {
     pub tone: Tone,
 }
 
+/// What to check for a measured slowdown, by its cause.
+pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
+    match sample.correlation.cause {
+        CorrelationCause::Paging => "Reduce active models; recheck paging.",
+        CorrelationCause::Compression => "Check whether paging also rises.",
+        CorrelationCause::MemoryPressure
+        | CorrelationCause::ModelMemory
+        | CorrelationCause::MetalMemory => "Free memory; recheck generation speed.",
+        CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
+        // The engine stopped with nothing on the host to show for it:
+        // the reason is inside the runtime, in its log at this time.
+        CorrelationCause::Stall
+            if sample.correlation.lead.contains("GPU idle")
+                && !sample.correlation.lead.contains("paging") =>
+        {
+            "Runtime idle mid-answer; check its log at this time."
+        }
+        CorrelationCause::Stall => "Check the signals beside the stall; recheck after it resumes.",
+        CorrelationCause::ConcurrentPrefill => {
+            "Expected while the prompt prefills; recheck after it finishes."
+        }
+        CorrelationCause::Queueing
+        | CorrelationCause::Concurrency
+        | CorrelationCause::GpuSaturation => "Compare speed with one active request.",
+        CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
+        CorrelationCause::Runtime | CorrelationCause::None => {
+            "Compare prompt size and runtime settings."
+        }
+    }
+}
+
 pub(super) fn assess(sample: &Sample) -> Finding {
     let mut finding = assess_observation(sample);
     if sample.llm_remote {
@@ -116,7 +147,11 @@ fn assess_observation(sample: &Sample) -> Finding {
         });
     let live = fresh && sample.llm_generation_tps_live;
     if live && !sample.llm_remote && sample.correlation.is_material_drop() {
-        finding.title = "Generation slowed".into();
+        finding.title = if sample.correlation.cause == CorrelationCause::Stall {
+            "Generation stalled".into()
+        } else {
+            "Generation slowed".into()
+        };
         finding.evidence = sample
             .correlation
             .summary
@@ -139,24 +174,7 @@ fn assess_observation(sample: &Sample) -> Finding {
                     sample.correlation.confidence_label()
                 )
             };
-        finding.next = match sample.correlation.cause {
-            CorrelationCause::Paging => "Reduce active models; recheck paging.",
-            CorrelationCause::Compression => "Check whether paging also rises.",
-            CorrelationCause::MemoryPressure
-            | CorrelationCause::ModelMemory
-            | CorrelationCause::MetalMemory => "Free memory; recheck generation speed.",
-            CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
-            CorrelationCause::ConcurrentPrefill => {
-                "Expected while the prompt prefills; recheck after it finishes."
-            }
-            CorrelationCause::Queueing
-            | CorrelationCause::Concurrency
-            | CorrelationCause::GpuSaturation => "Compare speed with one active request.",
-            CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
-            CorrelationCause::Runtime | CorrelationCause::None => {
-                "Compare prompt size and runtime settings."
-            }
-        };
+        finding.next = slowdown_next_step(sample);
         finding.actionable = true;
         finding.tone = sample.correlation.tone();
         return finding;

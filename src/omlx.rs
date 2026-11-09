@@ -29,6 +29,7 @@ pub(crate) struct LlmTelemetryClient {
     pub(crate) runtime: RuntimeReport,
     using_adapter: bool,
     configured_endpoint: bool,
+    decode: crate::decode_tracker::DecodeTracker,
 }
 
 impl LlmTelemetryClient {
@@ -48,6 +49,7 @@ impl LlmTelemetryClient {
             retry_backoff: Duration::from_secs(1),
             runtime: RuntimeReport::default(),
             using_adapter: false,
+            decode: Default::default(),
             configured_endpoint: config
                 .omx
                 .as_ref()
@@ -246,6 +248,12 @@ impl LlmTelemetryClient {
                 };
         }
         let mut telemetry = parse_omlx_telemetry(&health, stats.as_ref());
+        // The speed since the last poll, not oMLX's average since the request
+        // began, which hides a stall.
+        if let Some(rate) = self.decode.apply(&mut telemetry.requests, Instant::now()) {
+            telemetry.generation_tps = Some(rate);
+            telemetry.generation_tps_live = true;
+        }
         telemetry.mlx = merge_mlx_telemetry(
             &self.mlx_metadata,
             &parse_mlx_runtime_telemetry(&health, stats.as_ref()),

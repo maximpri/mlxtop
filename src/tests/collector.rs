@@ -378,7 +378,8 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
             confidence: 85,
             summary: "throughput fell".into(),
             details: "thermal".into(),
-            lead: String::new(),
+            lead: "thermal limiting began 1s before the drop".into(),
+            stall_seconds: None,
             event_key: Some(CorrelationKey {
                 direction: ThroughputDirection::Down,
                 cause: CorrelationCause::Thermal,
@@ -400,9 +401,10 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
     assert!(has("LLM", "telemetry source · completion log → live API"));
     assert!(has("LLM", "request started · 2 active"));
     assert!(has("QUEUE", "3 request(s) waiting"));
+    // What changed, how sure, and what to do, in one row.
     assert!(has(
-        "LLM",
-        "throughput diagnosis · throughput fell · high confidence"
+        "SLOWDOWN",
+        "throughput fell · thermal limiting began 1s before the drop · high confidence → Reduce concurrency; recheck thermals."
     ));
     assert!(has("PAGING", "cleared"));
     assert!(has("THERMAL", "limited 80%"));

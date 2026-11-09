@@ -1,5 +1,37 @@
 # Changelog
 
+## 3.3.0-rc.2 — 2026-11-09
+
+### Diagnosis
+
+- **Stalls are seen and named.** oMLX reports a request's speed as its
+  average since it began, which barely moves when generation stops: a
+  captured 4 s stall read as 45 → 41 tok/s and was blamed on Metal memory.
+  mlxtop now measures tokens produced between polls, so a stall drops to 0
+  on the chart. After 1.5 s without a token (`last_activity_age_seconds`),
+  the headline reads `Generation stalled`, the chart's bottom edge says
+  `▼ no new token for 4s at 1.7k out · GPU idle`, and Journal writes a
+  STALL row with the next step, then `RESUMED` with the stall's length.
+- **No more false slowdowns from speculative decoding.** A request is
+  compared with its own earlier speed, smoothed over three polls, and a drop
+  must clear twice its own jitter. Request boundaries are no longer judged
+  against other requests' speeds.
+- **The reason is never a busy GPU.** A saturated GPU or a full Metal heap
+  stays in the details; when no change explains a drop, Journal says so.
+- **Journal rows say what, why and what next**, as `STALL`, `SLOWDOWN` and
+  `RESUMED` instead of `throughput diagnosis`.
+
+### Dashboards
+
+- **Prefill progress counts new tokens.** oMLX starts a prefill with the
+  cached prefix already counted, so a 72k cached prompt read 96% before any
+  work. Progress and time left now cover the uncached tokens, and the
+  cached prefix shows as the request's `CACHED` share.
+- **Each fact once.** The status badge drops the prefill percent, the queue
+  lists requests only when there are two or more, prefill prints the server
+  average once, and Journal folds GPU saturation into the GPU BUSY row and
+  request starts into the PROMPT row that carries their size.
+
 ## 3.3.0-rc.1 — 2026-11-09
 
 ### Diagnosis

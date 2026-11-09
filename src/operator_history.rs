@@ -26,6 +26,8 @@ pub(crate) enum Phase {
 pub(crate) struct Running {
     pub(crate) id: String,
     pub(crate) prompt: u64,
+    /// Prompt tokens the prefix cache held, which a prefill does not read.
+    pub(crate) cached: u64,
     pub(crate) phase: Phase,
     pub(crate) output: Option<u64>,
     pub(crate) tps: Option<f64>,
@@ -69,6 +71,7 @@ impl History {
             .map(|request| Running {
                 id: request.id.clone(),
                 prompt: request.prompt,
+                cached: request.cached.unwrap_or(0),
                 // Runtimes report prefill progress only while the prompt is read.
                 phase: match request.prefilled {
                     _ if request.queued => Phase::Queued,

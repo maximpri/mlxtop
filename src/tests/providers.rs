@@ -649,6 +649,7 @@ fn request_summaries_label_sampled_and_final_output_speeds() {
         completed: false,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         observed_at: None,
     };

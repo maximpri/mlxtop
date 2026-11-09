@@ -5,8 +5,8 @@ use crate::analysis::{classify, signal_summary, CorrelationEngine};
 use crate::completion_log::read_llm_stats;
 use crate::config::{Config, JournalConfig, OmxConfig, Thresholds};
 use crate::domain::{
-    ChartMetric, ChartPoint, EventKind, LlmLogStats, LlmTelemetry, MetalTelemetry, MlxTelemetry,
-    Sample, SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
+    ChartMetric, ChartPoint, CorrelationCause, EventKind, LlmLogStats, LlmTelemetry,
+    MetalTelemetry, MlxTelemetry, Sample, SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
 };
 use crate::formatting::{
     bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
@@ -783,17 +783,61 @@ impl Collector {
                 );
             }
 
+            // One row when a slowdown or stall begins, saying what changed
+            // and what to check; one when a stall ends, with how long it was.
             if sample.correlation.is_material_drop()
                 && previous.correlation.event_key != sample.correlation.event_key
             {
+                let insight = &sample.correlation;
+                let (state, what) = if insight.cause == CorrelationCause::Stall {
+                    ("STALL", insight.lead.clone())
+                } else if insight.lead.is_empty() {
+                    (
+                        "SLOWDOWN",
+                        format!(
+                            "{} · no change on the host explains it",
+                            insight.rate_label()
+                        ),
+                    )
+                } else {
+                    (
+                        "SLOWDOWN",
+                        format!(
+                            "{} · {} · {} confidence",
+                            insight.rate_label(),
+                            insight.lead,
+                            insight.confidence_label()
+                        ),
+                    )
+                };
+                let next = crate::diagnosis::slowdown_next_step(sample);
                 add(
-                    "LLM",
-                    format!(
-                        "throughput diagnosis · {} · {} confidence",
-                        sample.correlation.summary,
-                        sample.correlation.confidence_label()
-                    ),
-                    sample.correlation.tone(),
+                    state,
+                    if next.is_empty() {
+                        what
+                    } else {
+                        format!("{what} → {next}")
+                    },
+                    insight.tone(),
+                );
+            }
+            if let Some(stalled) = previous
+                .correlation
+                .stall_seconds
+                .filter(|_| sample.correlation.stall_seconds.is_none())
+            {
+                add(
+                    "RESUMED",
+                    match sample
+                        .llm_generation_tps
+                        .filter(|_| sample.llm_generation_tps_live)
+                    {
+                        Some(rate) => {
+                            format!("generation resumed at {rate:.1} tok/s after {stalled:.0}s")
+                        }
+                        None => format!("stall ended after {stalled:.0}s"),
+                    },
+                    Tone::Green,
                 );
             }
 

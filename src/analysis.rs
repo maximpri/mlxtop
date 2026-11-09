@@ -16,6 +16,12 @@ pub(crate) const THROUGHPUT_CHANGE_MIN_TPS: f64 = 2.0;
 pub(crate) const THROUGHPUT_CHANGE_RATIO: f64 = 0.10;
 pub(crate) const CONTEXT_GROWTH_TOKENS: u64 = 1024;
 pub(crate) const MODEL_MEMORY_GROWTH: u64 = 256 * MIB;
+/// A generating request that goes this long without a token has stalled:
+/// at 20–90 tok/s a healthy decode produces one every 50 ms or so.
+pub(crate) const STALL_SECONDS: f64 = 1.5;
+/// Speculative decoding makes one-second speeds jump by a third between
+/// polls; slowdowns are judged on the mean of this many samples.
+const SMOOTHING_SAMPLES: usize = 3;
 
 #[derive(Clone, Default)]
 pub(crate) struct CorrelationObservation {
@@ -43,6 +49,12 @@ pub(crate) struct CorrelationObservation {
     pub(crate) largest_prompt: Option<u64>,
     pub(crate) prefill_prompt: Option<u64>,
     pub(crate) at: Option<SystemTime>,
+    /// The longest a generating request has gone without a token, in seconds.
+    pub(crate) stalled_for: Option<f64>,
+    /// The one request generating, when only one is: a request is compared
+    /// with its own earlier speed before any other.
+    pub(crate) request: Option<String>,
+    pub(crate) output_tokens: Option<u64>,
 }
 
 /// Lookback before a drop's first slow sample in which a change is a candidate
@@ -565,6 +577,7 @@ pub(crate) fn correlation_evidence_label(sample: &Sample) -> String {
                 .unwrap_or_else(|| "model memory".into())
         }
         CorrelationCause::Runtime => "workload/runtime".into(),
+        CorrelationCause::Stall => sample.correlation.lead.clone(),
         CorrelationCause::None => String::new(),
         CorrelationCause::Paging | CorrelationCause::Compression => String::new(),
     }
@@ -592,8 +605,66 @@ impl CorrelationEngine {
             .into_iter()
             .rev()
             .collect();
-        let baseline = self.baseline(&current.provider, &current.model);
-        let insight = correlate_history(&current, &comparable, baseline, thresholds);
+        // One request is measured against its own earlier speed: requests
+        // differ by a third with content alone. Its first poll carries the
+        // runtime's average, not a measured speed, so it is left out.
+        let own: Vec<f64> = current
+            .request
+            .as_ref()
+            .map(|id| {
+                comparable
+                    .iter()
+                    .filter(|o| o.request.as_ref() == Some(id))
+                    .skip(1)
+                    .filter(|o| o.stalled_for.is_none_or(|idle| idle < STALL_SECONDS))
+                    .filter_map(|o| o.generation_tps)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Until a lone request has three measured speeds there is nothing
+        // like-for-like to compare with: other requests' speeds differ by
+        // content, and a request boundary is not a slowdown.
+        let noise = (own.len() >= 3).then(|| spread(&own));
+        let baseline = match (&current.request, own.len()) {
+            (Some(_), 3..) => Some(median(own)),
+            (Some(_), _) => None,
+            (None, _) => self.baseline(&current.provider, &current.model),
+        };
+        // Judge the recent mean, not one jumpy poll.
+        let mut judged = current.clone();
+        if current.request.is_some() {
+            let recent: Vec<f64> = comparable
+                .iter()
+                .rev()
+                .take_while(|o| o.request == current.request)
+                // A stall was reported as one; its zeros are not the speed
+                // the request returns to.
+                .filter(|o| o.stalled_for.is_none_or(|idle| idle < 0.5))
+                .take(SMOOTHING_SAMPLES - 1)
+                .filter_map(|o| o.generation_tps)
+                .chain(current.generation_tps)
+                .collect();
+            if !recent.is_empty() {
+                let mean = recent.iter().sum::<f64>() / recent.len() as f64;
+                // A dip inside the request's own jitter is not a slowdown:
+                // its mean of n polls varies by spread / √n, and a drop must
+                // clear twice that.
+                let jitter = noise.unwrap_or(0.0) * 2.0 / (recent.len() as f64).sqrt();
+                judged.generation_tps = match baseline {
+                    Some(baseline) if baseline - mean < jitter => Some(baseline),
+                    _ => Some(mean),
+                };
+            }
+        }
+        // A request that has just gone quiet may be about to stall; wait for
+        // the stall verdict rather than journaling a slowdown first.
+        if current
+            .stalled_for
+            .is_some_and(|idle| (0.5..STALL_SECONDS).contains(&idle))
+        {
+            judged.generation_tps = baseline;
+        }
+        let insight = correlate_history(&judged, &comparable, baseline, thresholds);
 
         self.observations.push_back(current);
         while self.observations.len() > CORRELATION_HISTORY_LIMIT {
@@ -636,6 +707,7 @@ impl CorrelationObservation {
             .filter(|r| !r.completed && !r.queued)
             .collect();
         let prefilling: Vec<_> = running.iter().filter(|r| r.prefilled.is_some()).collect();
+        let generating: Vec<_> = running.iter().filter(|r| r.prefilled.is_none()).collect();
         Self {
             provider: sample.llm_provider.clone(),
             model: sample.llm_model.clone(),
@@ -674,6 +746,20 @@ impl CorrelationObservation {
                 .or(sample.llm_prompt_tokens),
             prefill_prompt: prefilling.iter().map(|r| r.prompt).max(),
             at: sample.llm_observed_at.or_else(|| Some(SystemTime::now())),
+            stalled_for: running
+                .iter()
+                .filter(|r| r.prefilled.is_none())
+                .filter_map(|r| r.idle_for)
+                .map(|idle| idle.as_secs_f64())
+                .reduce(f64::max),
+            request: match generating.as_slice() {
+                [only] => Some(only.id.clone()),
+                _ => None,
+            },
+            output_tokens: match generating.as_slice() {
+                [only] => only.output,
+                _ => None,
+            },
         }
     }
 }
@@ -682,17 +768,6 @@ pub(crate) struct CorrelationFactor {
     pub(crate) cause: CorrelationCause,
     pub(crate) score: u8,
     pub(crate) evidence: String,
-}
-
-#[cfg(test)]
-pub(crate) fn correlate_observations(
-    current: &CorrelationObservation,
-    previous: Option<&CorrelationObservation>,
-    baseline: Option<f64>,
-    thresholds: Thresholds,
-) -> CorrelationInsight {
-    let history: Vec<&CorrelationObservation> = previous.into_iter().collect();
-    correlate_history(current, &history, baseline, thresholds)
 }
 
 /// Attribute a throughput change to what the host and the workload are doing
@@ -732,6 +807,47 @@ pub(crate) fn correlate_history(
     };
 
     let mut factors = Vec::new();
+
+    // A request that stops producing tokens is observed, not inferred: it
+    // leads, with whatever else the host was doing while it waited.
+    let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
+    let direction = if stalled.is_some() {
+        ThroughputDirection::Down
+    } else {
+        direction
+    };
+    if let Some(idle) = stalled {
+        let mut evidence = match current.output_tokens {
+            Some(out) => format!("no new token for {idle:.0}s at {} out", compact_tokens(out)),
+            None => format!("no new token for {idle:.0}s"),
+        };
+        let gpu = [current.gpu_util, current.renderer_util, current.tiler_util]
+            .into_iter()
+            .flatten()
+            .max();
+        let mut with = Vec::new();
+        match gpu {
+            Some(gpu) if gpu < 10 => with.push("GPU idle".to_owned()),
+            Some(gpu) => with.push(format!("GPU {gpu}%")),
+            None => {}
+        }
+        if current.paging_rate >= PAGING_ACTIVE_ENTER_RATE {
+            with.push(format!("paging {}", rate(current.paging_rate)));
+        }
+        if current.compression_rate >= thresholds.compression_warn_rate {
+            with.push(format!("compression {}", rate(current.compression_rate)));
+        }
+        if current.pressure >= 2 {
+            with.push("memory pressure".into());
+        }
+        if running(current) > 1 {
+            with.push(format!("{} requests running", running(current)));
+        }
+        if !with.is_empty() {
+            evidence = format!("{evidence} · {}", with.join(" · "));
+        }
+        push_correlation_factor(&mut factors, CorrelationCause::Stall, 99, evidence);
+    }
 
     // Requests sharing the engine. A prefill beside generation stalls decode
     // while the prompt is read; concurrent answers split the GPU.
@@ -908,8 +1024,9 @@ pub(crate) fn correlate_history(
             push_correlation_factor(
                 &mut factors,
                 CorrelationCause::GpuSaturation,
-                // Decode keeps a GPU saturated; only the crossing is news.
-                if crossed { 95 } else { 50 },
+                // Decode keeps a GPU saturated, and returns it there after
+                // any pause: a crossing is supporting evidence at most.
+                if crossed { 62 } else { 50 },
                 format!("GPU {gpu}% busy"),
             );
         } else if u64::from(gpu) >= thresholds.gpu_warn_load {
@@ -1030,6 +1147,7 @@ pub(crate) fn correlate_history(
         .unwrap_or_default();
     let confidence = factors.first().map(|factor| factor.score).unwrap_or(0);
     let rate_label = match (current_tps, baseline, direction, delta_percent) {
+        _ if stalled.is_some() => "GEN stalled".to_owned(),
         (Some(current), Some(baseline), ThroughputDirection::Down, Some(percent)) => format!(
             "GEN ↓{:.1}% ({baseline:.1}→{current:.1} tok/s)",
             percent.abs()
@@ -1040,8 +1158,12 @@ pub(crate) fn correlate_history(
         (Some(current), _, _, _) => format!("GEN {current:.1} tok/s"),
         _ => String::new(),
     };
+    // A condition that holds through normal decoding (a busy GPU, a full
+    // Metal heap) scores below 60. It stays in the details but is never
+    // offered as the explanation.
     let evidence = factors
         .iter()
+        .filter(|factor| factor.score >= 60)
         .take(2)
         .map(|factor| factor.evidence.as_str())
         .collect::<Vec<_>>()
@@ -1078,8 +1200,10 @@ pub(crate) fn correlate_history(
         details,
         lead: factors
             .first()
+            .filter(|factor| factor.score >= 60)
             .map(|factor| factor.evidence.clone())
             .unwrap_or_default(),
+        stall_seconds: stalled,
         event_key,
         delta_percent,
     }
@@ -1096,6 +1220,23 @@ pub(crate) fn push_correlation_factor(
         score,
         evidence: evidence.into(),
     });
+}
+
+/// A robust standard deviation: the median absolute deviation, scaled to
+/// match a normal spread, so one burst or stall does not inflate it.
+fn spread(values: &[f64]) -> f64 {
+    let middle = median(values.to_vec());
+    median(values.iter().map(|value| (value - middle).abs()).collect()) * 1.4826
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2.0
+    } else {
+        values[middle]
+    }
 }
 
 pub(crate) fn pressure_rank(pressure: &str) -> u8 {

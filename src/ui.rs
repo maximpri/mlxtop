@@ -1043,14 +1043,40 @@ impl App {
             } else {
                 summary
             };
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {summary} "),
-                Style::default().fg(if metric == ChartMetric::Memory {
-                    MUTED
-                } else {
-                    chart_tone.color()
-                }),
-            )));
+            // While generation is slow, its chart says why under the bars
+            // that show it, in the drop's colour: ▼ and the change behind it.
+            let insight = &sample.correlation;
+            let room = usize::from(area.width.saturating_sub(4));
+            let reason = (metric == ChartMetric::Generation && insight.is_material_drop())
+                .then(|| {
+                    let lead = insight.lead.split(" → ").next().unwrap_or("");
+                    [
+                        format!("▼ {lead}"),
+                        format!("▼ {}", lead.split(" · ").next().unwrap_or("")),
+                        format!("▼ {}", insight.cause.label()),
+                        "▼".to_owned(),
+                    ]
+                    .into_iter()
+                    .filter(|text| text.trim() != "▼" || lead.is_empty())
+                    .find(|text| Line::from(text.as_str()).width() + 2 <= room)
+                })
+                .flatten();
+            block = block.title_bottom(match reason {
+                Some(reason) => Line::from(Span::styled(
+                    format!(" {reason} "),
+                    Style::default()
+                        .fg(insight.tone().color())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                None => Line::from(Span::styled(
+                    format!(" {summary} "),
+                    Style::default().fg(if metric == ChartMetric::Memory {
+                        MUTED
+                    } else {
+                        chart_tone.color()
+                    }),
+                )),
+            });
         }
         let mut inner = block.inner(area);
         frame.render_widget(block, area);

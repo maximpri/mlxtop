@@ -10,6 +10,7 @@ mod cli;
 mod collector;
 mod completion_log;
 mod config;
+mod decode_tracker;
 mod diagnosis;
 mod diagnostics_view;
 mod domain;

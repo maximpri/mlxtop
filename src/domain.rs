@@ -2,7 +2,7 @@
 //! Shared observation and event types. Values remain independent of terminal widgets.
 use crate::config::{load_tone, Thresholds, TIGHT_FREE_PERCENT};
 use crate::{gpu, process_memory};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 pub(crate) const MIB: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +49,7 @@ pub(crate) enum EventKind {
 impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
-            "LLM" | "PROMPT" => Self::Llm,
+            "LLM" | "PROMPT" | "SLOWDOWN" | "STALL" | "RESUMED" => Self::Llm,
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -223,6 +223,8 @@ pub(crate) enum ThroughputDirection {
 pub(crate) enum CorrelationCause {
     #[default]
     None,
+    /// A generating request stopped producing tokens.
+    Stall,
     Paging,
     Compression,
     MemoryPressure,
@@ -243,6 +245,7 @@ impl CorrelationCause {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::None => "no correlated cause",
+            Self::Stall => "generation stalled",
             Self::Paging => "paging",
             Self::Compression => "compression churn",
             Self::MemoryPressure => "memory pressure",
@@ -260,7 +263,7 @@ impl CorrelationCause {
 
     pub(crate) fn tone(self) -> Tone {
         match self {
-            Self::Paging | Self::MemoryPressure | Self::Thermal => Tone::Red,
+            Self::Stall | Self::Paging | Self::MemoryPressure | Self::Thermal => Tone::Red,
             Self::Compression
             | Self::MetalMemory
             | Self::GpuSaturation
@@ -290,6 +293,8 @@ pub(crate) struct CorrelationInsight {
     pub(crate) details: String,
     /// The strongest factor's evidence, such as the change that began the drop.
     pub(crate) lead: String,
+    /// How long a generating request has gone without a token, once stalled.
+    pub(crate) stall_seconds: Option<f64>,
     pub(crate) event_key: Option<CorrelationKey>,
     /// Change from the rolling throughput baseline, in percent.
     pub(crate) delta_percent: Option<f64>,
@@ -303,6 +308,11 @@ pub(crate) const CACHE_LOW_PERCENT: u64 = 20;
 pub(crate) const THROUGHPUT_CRITICAL_DROP_PERCENT: f64 = 30.0;
 
 impl CorrelationInsight {
+    /// The rate change alone, such as `GEN ↓43.9% (32.0→18.0 tok/s)`.
+    pub(crate) fn rate_label(&self) -> &str {
+        self.summary.split(" · ").next().unwrap_or("")
+    }
+
     pub(crate) fn is_material_drop(&self) -> bool {
         self.direction == ThroughputDirection::Down
     }
@@ -316,7 +326,8 @@ impl CorrelationInsight {
                 if severe
                     || matches!(
                         self.cause,
-                        CorrelationCause::Paging
+                        CorrelationCause::Stall
+                            | CorrelationCause::Paging
                             | CorrelationCause::MemoryPressure
                             | CorrelationCause::Thermal
                     )
@@ -644,5 +655,8 @@ pub(crate) struct RequestUsage {
     /// Prompt tokens prefilled so far while the prompt is being processed.
     pub prefilled: Option<u64>,
     pub ttft_ms: Option<u64>,
+    /// How long the request has gone without producing a token, when the
+    /// runtime reports it. A generating request that stops is stalled.
+    pub idle_for: Option<Duration>,
     pub observed_at: Option<SystemTime>,
 }

@@ -318,6 +318,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             completed: index < 5,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             output_tps: Some(35.5 + (5 - index) as f64),
             observed_at: Some(now - Duration::from_secs((5 - index) as u64 * 10)),
@@ -366,6 +367,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             completed: false,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
@@ -1918,6 +1920,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             observed_at: Some(SystemTime::now()),
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             output_tps: None,
         }];
@@ -2005,6 +2008,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
                 completed: true,
                 queued: false,
                 prefilled: None,
+                idle_for: None,
                 ttft_ms: None,
                 output_tps: None,
                 observed_at: Some(SystemTime::now()),
@@ -3859,6 +3863,17 @@ fn configured_compression_rate_changes_the_classified_impact() {
     assert_eq!(sample.impact, "LLM READY");
 }
 
+/// Correlate one observation against the one before it.
+fn correlate_observations(
+    current: &CorrelationObservation,
+    previous: Option<&CorrelationObservation>,
+    baseline: Option<f64>,
+    thresholds: Thresholds,
+) -> CorrelationInsight {
+    let history: Vec<&CorrelationObservation> = previous.into_iter().collect();
+    correlate_history(current, &history, baseline, thresholds)
+}
+
 #[test]
 fn configured_gpu_threshold_changes_correlation_attribution() {
     let current = CorrelationObservation {
@@ -5207,6 +5222,7 @@ fn rate_headlines_match_their_charts_and_name_a_summed_rate() {
         completed: false,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         observed_at: Some(SystemTime::now()),
     };
@@ -5249,4 +5265,216 @@ fn rate_headlines_match_their_charts_and_name_a_summed_rate() {
     assert!(text.contains("LAST 71.7 tok/s · 1s old"), "{text}");
     assert!(text.contains("tok/s · server avg 209.0"), "{text}");
     assert!(!text.contains("AVG PREFILL"), "{text}");
+}
+
+/// One poll of a lone oMLX request, as the decode tracker leaves it: its
+/// speed since the last poll and how long since it produced a token.
+fn decoding(second: u64, tps: f64, out: u64, idle: f64, gpu: u8) -> Sample {
+    Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "Qwen3.8-27B-oQ4e-mtp".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_generation_tps: Some(tps),
+        llm_generation_tps_live: true,
+        llm_active_requests: Some(1),
+        llm_observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(second)),
+        gpu_util: Some(gpu),
+        gpu_in_use: Some(97),
+        gpu_alloc: Some(100),
+        llm_requests: vec![domain::RequestUsage {
+            provider: "oMLX".into(),
+            model: "Qwen3.8-27B-oQ4e-mtp".into(),
+            id: "e28cde".into(),
+            prompt: 67_793,
+            cached: Some(67_776),
+            output: Some(out),
+            output_tps: Some(tps),
+            completed: false,
+            queued: false,
+            prefilled: None,
+            idle_for: Some(Duration::from_secs_f64(idle)),
+            ttft_ms: None,
+            observed_at: None,
+        }],
+        ..Sample::default()
+    }
+}
+
+/// Per-second speeds of one captured oMLX request (speculative decoding):
+/// normal for this model, and never a slowdown on their own.
+const CAPTURED_SPEEDS: [f64; 17] = [
+    65.1, 37.5, 38.4, 46.3, 52.2, 40.7, 49.5, 49.3, 37.5, 40.8, 32.5, 44.6, 58.4, 29.6, 42.4, 44.4,
+    27.6,
+];
+
+#[test]
+fn speculative_decoding_jitter_within_a_request_is_not_a_slowdown() {
+    let mut engine = CorrelationEngine::default();
+    for (second, tps) in CAPTURED_SPEEDS.iter().enumerate() {
+        let insight = engine.observe(
+            &decoding(second as u64, *tps, 1_000 + second as u64 * 45, 0.05, 99),
+            defaults(),
+        );
+        assert!(
+            !insight.is_material_drop(),
+            "second {second} at {tps} tok/s: {}",
+            insight.summary
+        );
+    }
+}
+
+#[test]
+fn a_stall_is_named_with_what_the_host_was_doing_and_journaled_with_its_end() {
+    // The captured stall: 1,693 tokens out, then none for four polls while
+    // the GPU sat idle and Metal memory stayed at 97%, then 31 tok/s again.
+    let mut engine = CorrelationEngine::default();
+    let mut samples = Vec::new();
+    for (second, tps) in CAPTURED_SPEEDS.iter().enumerate() {
+        samples.push(decoding(
+            second as u64,
+            *tps,
+            1_000 + second as u64 * 40,
+            0.05,
+            99,
+        ));
+    }
+    for (offset, idle) in [1.38, 2.39, 3.41, 4.41].iter().enumerate() {
+        samples.push(decoding(17 + offset as u64, 0.0, 1_693, *idle, 0));
+    }
+    samples.push(decoding(21, 31.0, 1_724, 0.01, 99));
+    for sample in &mut samples {
+        sample.correlation = engine.observe(sample, defaults());
+    }
+    // Before 1.5 s without a token there is no verdict.
+    assert!(!samples[17].correlation.is_material_drop());
+    let stall = &samples[18].correlation;
+    assert_eq!(stall.cause, CorrelationCause::Stall);
+    assert_eq!(stall.lead, "no new token for 2s at 1.7k out · GPU idle");
+    // A busy GPU and a full Metal heap hold all along; neither is the reason.
+    assert!(!stall.summary.contains("Metal"), "{}", stall.summary);
+    assert_eq!(stall.tone(), Tone::Red);
+    assert!(samples[21].correlation.stall_seconds.is_none());
+
+    // The Journal: one STALL row with the next step, one RESUMED row.
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let rows: Vec<(String, String)> = collector
+        .signals
+        .iter()
+        .map(|event| (event.state.clone(), event.summary.clone()))
+        .filter(|(state, _)| matches!(state.as_str(), "STALL" | "RESUMED" | "SLOWDOWN"))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "STALL".to_owned(),
+                "no new token for 2s at 1.7k out · GPU idle → Runtime idle mid-answer; check its log at this time.".to_owned()
+            ),
+            (
+                "RESUMED".to_owned(),
+                "generation resumed at 31.0 tok/s after 4s".to_owned()
+            ),
+        ]
+    );
+
+    // The chart says why under the bars that show it, in red.
+    let mut app = test_app(0);
+    app.collector.current = samples[20].clone();
+    let history = VecDeque::from([
+        ChartPoint::new(Some(420), Tone::Green),
+        ChartPoint::new(Some(0), Tone::Red),
+    ]);
+    let buffer = {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.render_indicator_chart(
+                    frame,
+                    frame.area(),
+                    "generation",
+                    &history,
+                    ChartMetric::Generation,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let bottom: String = (0..60).map(|x| buffer[(x, 7)].symbol()).collect();
+    assert!(
+        bottom.contains("▼ no new token for 4s at 1.7k out · GPU idle"),
+        "{bottom}"
+    );
+    let x = bottom
+        .find('▼')
+        .map(|byte| bottom[..byte].chars().count())
+        .unwrap() as u16;
+    assert_eq!(buffer[(x, 7)].fg, RED);
+}
+
+#[test]
+fn parses_captured_live_omlx_generating_and_cached_prefill_rows() {
+    // Captured from a live oMLX server on 2026-11-09, one request generating
+    // and the next one prefilling. These pin the fields the decode tracker
+    // and the stall verdict rely on.
+    let health = json!({"status": "healthy", "default_model": "Qwen3.8-27B-oQ4e-mtp"});
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_generating_live.json")).unwrap();
+    let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+    assert_eq!(telemetry.status.as_deref(), Some("generating"));
+    let [request] = telemetry.requests.as_slice() else {
+        panic!("one generating request: {:?}", telemetry.requests);
+    };
+    assert_eq!(request.id, "e28cdebf-4a73-4147-9528-f18806e700f9");
+    assert_eq!(request.prompt, 72_031);
+    assert_eq!(request.output, Some(947));
+    assert!(request.prefilled.is_none());
+    // `last_activity_age_seconds` is how a stall is seen at all.
+    let idle = request.idle_for.expect("idle age parsed").as_secs_f64();
+    assert!((idle - 0.047).abs() < 0.001, "{idle}");
+    assert!(stats.get("api_key").and_then(Value::as_str) == Some("REDACTED"));
+
+    // The prefill's first poll reports the cached prefix as processed: 72,000
+    // of 74,666, so 96% before any new token is read. The tracker turns it
+    // into the request's cache reuse, and progress counts only new tokens.
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_prefilling_live.json")).unwrap();
+    let mut telemetry = parse_omlx_telemetry(&health, Some(&stats));
+    assert_eq!(telemetry.status.as_deref(), Some("prefilling"));
+    let mut tracker = crate::decode_tracker::DecodeTracker::default();
+    tracker.apply(&mut telemetry.requests, Instant::now());
+    let [request] = telemetry.requests.as_slice() else {
+        panic!("one prefilling request: {:?}", telemetry.requests);
+    };
+    assert_eq!((request.prompt, request.prefilled), (74_666, Some(72_000)));
+    assert_eq!(request.cached, Some(72_000));
+    assert!(
+        request.idle_for.is_none(),
+        "a prefill is not a stalled decode"
+    );
+    let mut history = request_history::History::default();
+    history.observe(&telemetry.requests);
+    let sample = Sample {
+        llm_source: TelemetrySource::Live,
+        llm_status: "prefilling".into(),
+        llm_observed_at: Some(SystemTime::now()),
+        llm_requests: telemetry.requests.clone(),
+        ..Sample::default()
+    };
+    let screen = render_view(100, 10, |frame| {
+        crate::request_dashboard::draw(frame, frame.area(), &history, &sample, 0, 1)
+    });
+    // Reuse shows as reuse; progress is over the 2,666 new tokens.
+    assert!(screen.contains("CACHED 96%"), "{screen}");
+    assert!(screen.contains("PREFILL"), "{screen}");
+    assert!(screen.contains("0% · 0 / 2,666"), "{screen}");
 }

@@ -193,7 +193,16 @@ colors in time-series history instead of recoloring old samples on refresh.
   joining, a prompt jump, a pressure, paging, thermal or Metal-memory onset),
   saying how long before the drop it happened. Conditions that hold through
   normal work, such as a saturated GPU or a full Metal heap, rank below any
-  such change and stay in the details. Wrap advice instead of
+  such change and stay in the details; they are never offered as the reason.
+  Measure decode speed as tokens produced between polls, not a runtime's
+  average since the request began, which hides a stall. A generating request
+  with no token for 1.5 s has stalled: say so first, with what the host was
+  doing meanwhile, and journal its end with its length. Judge one request
+  against its own earlier speed, smoothed over three polls, and only beyond
+  twice its own jitter: speculative decoding swings a third poll to poll, and
+  a request boundary is not a slowdown. When generation slows, its chart's
+  bottom edge names the reason (`▼ …`) in the drop's colour, and Journal
+  writes one STALL or SLOWDOWN row with the reason and the next step. Wrap advice instead of
   truncating it. Avoid generic tuning advice when no problem is established.
 - Ring the terminal bell once when critical memory pressure or severe paging
   begins. Keep a visible, acknowledgeable banner. High GPU utilization alone

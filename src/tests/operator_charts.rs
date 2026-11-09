@@ -48,6 +48,7 @@ fn latency_requires_explicit_measurement_and_deduplicates_requests() {
         observed_at: Some(SystemTime::now()),
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         output_tps: None,
     });
@@ -254,6 +255,7 @@ fn running(provider: &str, waiting: u64, requests: &[(&str, u64, Option<f64>)]) 
             completed: false,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             observed_at: Some(SystemTime::now()),
         })
@@ -755,6 +757,7 @@ fn first_token_bars_are_solid_with_eighth_block_tops() {
             observed_at: Some(SystemTime::now()),
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: Some(ttft),
             output_tps: None,
         });

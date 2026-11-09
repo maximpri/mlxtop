@@ -80,6 +80,8 @@ pub(super) struct OmlxRequest {
     pub processed: Option<u64>,
     /// Age of rank zero's telemetry marker; scheduler rows are current.
     pub age: Option<Duration>,
+    /// Seconds since the request last produced a token.
+    pub idle: Option<f64>,
 }
 
 fn omlx_prefill_rate(progress: &Value) -> Option<f64> {
@@ -177,6 +179,10 @@ pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
                     .then(|| counter(request, &["processed"]))
                     .flatten(),
                 age,
+                idle: request
+                    .get("last_activity_age_seconds")
+                    .and_then(Value::as_f64)
+                    .filter(|age| age.is_finite() && *age >= 0.0),
             });
         }
     }
@@ -211,6 +217,7 @@ pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
                 .then(|| progress.and_then(|progress| counter(progress, &["processed"])))
                 .flatten(),
             age,
+            idle: None,
         });
     }
     result
@@ -248,6 +255,10 @@ pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
                 completed: false,
                 queued: request.phase == OmlxPhase::Waiting,
                 prefilled: request.processed.map(|done| done.min(prompt)),
+                idle_for: (request.phase == OmlxPhase::Generating)
+                    .then_some(request.idle)
+                    .flatten()
+                    .map(Duration::from_secs_f64),
                 ttft_ms: None,
                 observed_at: Some(
                     request
@@ -792,6 +803,7 @@ fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
             completed: true,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             observed_at: None,
         })
@@ -889,6 +901,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             completed: true,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: counter(record, &["timings", "time_to_first_token_ms"]).or_else(|| {
                 (provider == "LM Studio")
                     .then(|| {

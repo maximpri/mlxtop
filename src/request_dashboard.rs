@@ -190,7 +190,11 @@ fn progress_or_output(entry: &Entry, live: bool, sample: &Sample, width: u16) ->
     else {
         return output_summary(entry, live, sample, width);
     };
-    let prompt = usage.prompt.max(1);
+    // A prefill reads only what the prefix cache does not hold: progress and
+    // time left are over the new tokens, or a 67.8k cached prefix would read
+    // 98% before any work is done.
+    let cached = usage.cached.unwrap_or(0).min(done);
+    let (done, prompt) = (done - cached, (usage.prompt - cached).max(1));
     let percent = progress_percent(done, prompt);
     let left = sample
         .llm_prefill_tps_live
