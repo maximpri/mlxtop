@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.3.0-rc.1 — 2026-11-09
 
 ### Diagnosis
 
