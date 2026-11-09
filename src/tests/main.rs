@@ -787,7 +787,7 @@ fn the_prefill_chart_shows_how_far_the_prefill_has_got() {
             ChartMetric::Prefill,
         )
     });
-    assert!(screen.contains("41.0k / 61.5k · 67%"), "{screen}");
+    assert!(screen.contains("41.0k / 61.5k · 66%"), "{screen}");
     assert!(screen.contains("LIVE 4100.0 tok/s"), "{screen}");
 }
 

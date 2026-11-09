@@ -83,11 +83,30 @@ pub(crate) fn llm_prefill_progress_label(sample: &Sample) -> Option<String> {
     let expected = sample.llm_prefill_tokens_expected.filter(|n| *n > 0)?;
     let done = sample.llm_prefill_tokens_done.unwrap_or(0).min(expected);
     Some(format!(
-        "{} / {} · {:.0}%",
+        "{} / {} · {}%",
         compact_tokens(done),
         compact_tokens(expected),
-        done as f64 / expected as f64 * 100.0
+        progress_percent(done, expected)
     ))
+}
+
+/// Work done as a whole percentage, rounded down: unfinished work never
+/// reads 100%, so a prompt with tokens left is not shown as complete.
+pub(crate) fn progress_percent(done: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    (u128::from(done.min(total)) * 100 / u128::from(total)) as u64
+}
+
+/// Time left for work under way. Under a second reads `<1s`, never `0s`,
+/// which would say the work has finished.
+pub(crate) fn time_left_label(seconds: f64) -> String {
+    if seconds.is_finite() && seconds < 1.0 {
+        "<1s".into()
+    } else {
+        duration_label(seconds)
+    }
 }
 
 pub(crate) fn percent(value: Option<f64>) -> String {

@@ -397,7 +397,7 @@ fn the_static_report_carries_the_prefill_progress() {
     };
     let text = report(&sample, Platform::MacOs);
     assert!(
-        text.contains("PREFILL 4100.0 tok/s · 41.0k / 61.5k · 67%"),
+        text.contains("PREFILL 4100.0 tok/s · 41.0k / 61.5k · 66%"),
         "{text}"
     );
     // An idle prefill gauge is not progress.

@@ -78,6 +78,18 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   to ten rows on tall terminals; everything else goes to the host row.
   OS footprint remains in Processes and the static report, without a chart.
   Show measured latency beside Journal when space permits.
+- When the runtime reports each request, Queue lists them, one row each in
+  fixed columns: a state mark (`◐` prefill, `●` generating, `○` queued), the
+  uppercase state, the id's last six characters (Journal holds the full id),
+  then the phase's own indicator: a progress bar and percentage while
+  prefilling, tokens out and tok/s while generating (`—` without a rate), and
+  prompt size while queued. Readings share the right edge. Work under way
+  leads, so a short panel never hides the prefill holding the others up.
+  Runtime counts sit in the top border (`●2 ○0` when narrow); `+N more` in
+  the bottom border names rows that did not fit. Enlarged, the list sits
+  above the history. The id goes first when width is short.
+- Progress percentages round down: unfinished work never reads 100%, and
+  less than a second left reads `<1s`, never `0s`.
 - At very short chart heights, use percentage capacity bars and exact readings
   instead of one-row traces with misleading axes. Preserve units on standalone
   narrow rate charts. Keep an accessible help hint and separate chart/view keys.

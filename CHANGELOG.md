@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Dashboards
+
+- **Queue shows what each request is doing.** Each request gets a row with
+  its state: `◐ PREFILL` with a progress bar, `● GEN` with tokens out and
+  tok/s, `○ QUEUED` with its prompt size. Prefilling requests come first, so
+  a short panel no longer hides the prefill behind "+1 more". The counts
+  moved into the border, freeing every row for requests, and the enlarged
+  queue lists the requests above its history.
+- **Prefill progress never reads 100% before it finishes.** The status badge,
+  prompt load and prefill chart round down, so 35,616 of 35,628 tokens is
+  99%, and under a second left reads `<1s` instead of `0s left`.
+
 ## 3.2.1 — 2026-11-03
 
 ### Dashboards

@@ -706,6 +706,13 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
     assert_eq!(crate::formatting::duration_label(38.4), "38s");
     assert_eq!(crate::formatting::duration_label(252.0), "4m 12s");
     assert_eq!(crate::formatting::duration_label(3_900.0), "1h 5m");
+    // Work under way never reads finished: 12 tokens left is 99%, not 100%,
+    // and a fraction of a second left is <1s, not 0s.
+    assert_eq!(crate::formatting::progress_percent(35_616, 35_628), 99);
+    assert_eq!(crate::formatting::progress_percent(35_628, 35_628), 100);
+    assert_eq!(crate::formatting::progress_percent(5, 0), 0);
+    assert_eq!(crate::formatting::time_left_label(0.1), "<1s");
+    assert_eq!(crate::formatting::time_left_label(38.4), "38s");
     assert_eq!(crate::formatting::duration_label(f64::NAN), "0s");
 
     let now = SystemTime::now();
@@ -740,14 +747,14 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
     let wide = render(&sample, 100);
     assert!(wide.contains("PREFILL "), "{wide}");
     assert!(
-        wide.contains("52% · 34,078 / 65,536 · 4m 12s left"),
+        wide.contains("51% · 34,078 / 65,536 · 4m 12s left"),
         "{wide}"
     );
     assert!(wide.contains('█'), "a progress bar\n{wide}");
     assert!(!wide.contains("SPEED —"), "{wide}");
     // Narrow: counts drop before the percentage and time left.
     let narrow = render(&sample, 40);
-    assert!(narrow.contains("52% · 4m 12s left"), "{narrow}");
+    assert!(narrow.contains("51% · 4m 12s left"), "{narrow}");
     // Without a live rate there is no time left to promise.
     sample.llm_prefill_tps_live = false;
     assert!(!render(&sample, 100).contains("left"));
