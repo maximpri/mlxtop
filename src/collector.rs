@@ -671,6 +671,8 @@ impl Collector {
         }
 
         let previous_gpu_band = self.gpu_band;
+        // Saturation that begins with GPU BUSY goes on that row, not its own.
+        let mut saturated_with_busy = false;
         let gpu_transition =
             gpu_journal_transition(&mut self.gpu_band, sample.gpu_util, self.thresholds);
         // A server that went away and came back is online again.
@@ -728,7 +730,10 @@ impl Collector {
 
             let previous_active = previous.llm_active_requests.unwrap_or(0);
             let active = sample.llm_active_requests.unwrap_or(0);
-            if (previous_active == 0) != (active == 0) {
+            // A runtime that lists its requests gets a PROMPT row for each,
+            // with its size, so a bare "request started" would repeat it.
+            let lists_requests = !sample.llm_requests.is_empty();
+            if (previous_active == 0) != (active == 0) && (active == 0 || !lists_requests) {
                 add(
                     "LLM",
                     if active == 0 {
@@ -827,15 +832,15 @@ impl Collector {
                 );
             }
 
-            // GPU BUSY replaces the busy transition, but saturation is a separate change.
-            let saturation_changed = previous_gpu_band
-                .zip(self.gpu_band)
-                .is_some_and(|(previous, current)| previous.saturated != current.saturated);
+            // A GPU BUSY row in this sample already gives the load; a band
+            // change in a later sample, such as saturation, still gets a row.
             let gpu_busy_reported =
                 impact_changed && (previous.impact == "GPU BUSY" || sample.impact == "GPU BUSY");
-            if let Some((summary, tone)) =
-                gpu_transition.filter(|_| !gpu_busy_reported || saturation_changed)
-            {
+            saturated_with_busy = gpu_busy_reported
+                && previous_gpu_band
+                    .zip(self.gpu_band)
+                    .is_some_and(|(before, now)| now.saturated && !before.saturated);
+            if let Some((summary, tone)) = gpu_transition.filter(|_| !gpu_busy_reported) {
                 add("GPU", summary, tone);
             }
 
@@ -879,7 +884,10 @@ impl Collector {
             }
         }
 
-        for (state, summary, tone) in events {
+        for (state, mut summary, tone) in events {
+            if saturated_with_busy && state == "GPU BUSY" {
+                summary.push_str(" · saturated");
+            }
             if !journal_records(&self.journal, &state, sample.pressure == "RED") {
                 continue;
             }

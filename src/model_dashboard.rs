@@ -4,8 +4,8 @@ use crate::chart_render::meter_cells;
 use crate::domain::Sample;
 use crate::formatting::{
     activity_frame, bytes, compact_label, compact_tokens, compressed_memory_label,
-    llm_context_label, llm_is_working, llm_runtime_label, optional_tokens, prefill_progress,
-    process_count_label, progress_percent, signed_rate, telemetry_age, telemetry_source,
+    llm_context_label, llm_is_working, llm_runtime_label, optional_tokens, process_count_label,
+    signed_rate, telemetry_age, telemetry_source,
 };
 use crate::theme::{
     card_block, llm_status_tone, tone_badge, BLUE, CYAN, DIM, EDGE, MUTED, RED, YELLOW,
@@ -164,10 +164,9 @@ fn identity(sample: &Sample, width: usize) -> Line<'static> {
 }
 
 fn state(sample: &Sample) -> Line<'static> {
-    let mut status = sample.llm_status.to_ascii_uppercase();
-    if let Some((done, total)) = prefill_progress(sample) {
-        status.push_str(&format!(" {}%", progress_percent(done, total)));
-    }
+    // Prompt load shows prefill progress with its time left; the badge
+    // names the state only.
+    let status = sample.llm_status.to_ascii_uppercase();
     let badge = if llm_is_working(&sample.llm_status) {
         format!("{} {status}", activity_frame(sample))
     } else {

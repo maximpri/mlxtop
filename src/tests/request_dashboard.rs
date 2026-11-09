@@ -734,10 +734,6 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
         llm_prefill_tps_live: true,
         ..Sample::default()
     };
-    assert_eq!(
-        crate::formatting::prefill_progress(&sample),
-        Some((34_078, 65_536))
-    );
     let render = |sample: &Sample, width| {
         crate::tests::render_view(width, 10, |frame| {
             draw(frame, frame.area(), &history, sample, 0, 1)
@@ -763,5 +759,4 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
         id: "other".into(),
         ..prefilling
     });
-    assert_eq!(crate::formatting::prefill_progress(&sample), None);
 }

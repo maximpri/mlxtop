@@ -371,7 +371,8 @@ pub(super) fn queue(
 ) {
     // When the runtime reports each request, the panel lists them: on
     // Overview in place of the history, enlarged above it.
-    if !history.running.is_empty() && area.height >= 3 {
+    // One request is the one prompt load already shows in full.
+    if history.running.len() > 1 && area.height >= 3 {
         if window.is_some() {
             request_list(frame, area, history, true);
             return;

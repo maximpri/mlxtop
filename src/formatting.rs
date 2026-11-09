@@ -193,19 +193,6 @@ pub(crate) fn duration_label(seconds: f64) -> String {
     }
 }
 
-/// The one prompt being prefilled right now, as (done, total), when there is
-/// exactly one: concurrent prefills have no single progress.
-pub(crate) fn prefill_progress(sample: &Sample) -> Option<(u64, u64)> {
-    let mut prefilling = sample.llm_requests.iter().filter_map(|request| {
-        request
-            .prefilled
-            .filter(|done| !request.queued && !request.completed && *done < request.prompt)
-            .map(|done| (done, request.prompt))
-    });
-    let only = prefilling.next()?;
-    prefilling.next().is_none().then_some(only)
-}
-
 /// A spinner frame that advances with every sample, from the sample's clock.
 pub(crate) fn activity_frame(sample: &Sample) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

@@ -401,7 +401,8 @@ fn a_request_without_its_own_rate_keeps_its_row() {
     // Splash measures a request's speed only while it runs alone.
     let mut history = History::default();
     history.observe(&running("oMLX", 0, &[("a1", 300, Some(38.2))]), 10);
-    assert!(queue_text(&history, 8, Some(60)).contains("38.2 tok/s"));
+    // One request is listed in full by prompt load; the queue keeps counts.
+    assert!(!queue_text(&history, 8, Some(60)).contains("38.2 tok/s"));
     history.observe(
         &running("oMLX", 0, &[("a1", 340, None), ("b2", 4, None)]),
         10,

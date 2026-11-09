@@ -942,7 +942,11 @@ impl App {
                     .llm_prefill_tps
                     .filter(|_| !sample.llm_prefill_tps_live)
                 {
-                    Some(average) if current.is_none() && area.width >= 38 => {
+                    Some(average)
+                        if current.is_none()
+                            && area.width >= 38
+                            && !current_label.contains("AVG") =>
+                    {
                         format!("tok/s · server avg {average:.1}")
                     }
                     _ => "tok/s".into(),

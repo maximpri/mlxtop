@@ -1269,10 +1269,15 @@ fn saturation_survives_gpu_busy_impact_deduplication() {
     c.record_journal_events(None, &before);
     c.record_journal_events(Some(&before), &after);
     c.record_journal_events(Some(&after), &after);
+    // One row carries both: the busy state and that it began saturated.
+    let gpu_rows: Vec<_> = c
+        .signals
+        .iter()
+        .filter(|e| e.state.starts_with("GPU"))
+        .collect();
+    assert_eq!(gpu_rows.len(), 1, "{:?}", journal(&c));
     assert!(
-        c.signals
-            .iter()
-            .any(|e| e.summary.contains("GPU load saturated")),
+        gpu_rows[0].summary.ends_with(" · saturated"),
         "{:?}",
         journal(&c)
     );
