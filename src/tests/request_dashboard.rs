@@ -539,7 +539,6 @@ fn prompt_sizes_and_cache_render_without_growth_warnings() {
         "vs previous",
         "40,000 tokens",
         "CACHED 90%",
-        "4,000 uncached",
         "MEDIAN 20,000 tokens",
         "10.0k",
         "12.0k",
@@ -549,6 +548,8 @@ fn prompt_sizes_and_cache_render_without_growth_warnings() {
     ] {
         assert!(text.contains(label), "missing prompt measurement: {label}");
     }
+    // CACHED 90% already says it; the bar's green segment shows it.
+    assert!(!text.contains("uncached"), "{text}");
     assert!(!text.contains('!'));
     assert!(!text.contains("PROMPT JUMP"));
     assert!(!buffer.content.iter().any(|cell| cell.fg == YELLOW));

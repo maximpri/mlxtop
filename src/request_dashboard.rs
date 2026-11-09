@@ -533,14 +533,6 @@ pub(super) fn draw(
     if other_runtime {
         append_detail(&mut details, comparison, MUTED, inner.width);
     }
-    if let Some(cached) = cached {
-        append_detail(
-            &mut details,
-            format!("{} uncached", exact(entry.usage.prompt - cached)),
-            color,
-            inner.width,
-        );
-    }
     // Position in the history only matters while browsing older requests.
     if index + 1 < history.len() {
         append_detail(

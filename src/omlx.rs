@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! oMLX monitoring, login, endpoint discovery and telemetry normalization.
 use crate::config::{Config, DEFAULT_OMLX_HOST, DEFAULT_OMLX_PORT};
-use crate::domain::{LlmTelemetry, MlxTelemetry, TelemetrySource};
+use crate::domain::{LlmTelemetry, MlxTelemetry, SsdCache, TelemetrySource};
 use crate::json::{
     gib_to_bytes, json_f64, json_f64_key, json_string, json_string_paths_or_keys, json_u64,
     json_u64_paths_or_keys,
@@ -602,6 +602,7 @@ pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> Llm
                 _ => None,
             })
     });
+    telemetry.ssd_cache = parse_ssd_cache(stats);
     if let Some(model_cache) = model_cache {
         telemetry.prefix_hit_rate = json_f64(
             model_cache,
@@ -610,6 +611,38 @@ pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> Llm
         .map(|value| (value * 100.0).clamp(0.0, 100.0));
     }
     telemetry
+}
+
+/// oMLX's SSD prompt cache: its fill, and block loads, saves and evictions
+/// summed over the models that use it. Absent when the cache is off.
+pub(crate) fn parse_ssd_cache(stats: &Value) -> Option<SsdCache> {
+    let cache = stats.get("runtime_cache")?;
+    if cache
+        .get("ssd_cache_unavailable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || cache.get("ssd_cache_dir").is_none_or(Value::is_null)
+    {
+        return None;
+    }
+    let models = cache
+        .get("models")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let sum = |key: &str| -> u64 {
+        models
+            .iter()
+            .filter_map(|model| json_u64(model, &["cache_rates", "cumulative", key]))
+            .sum()
+    };
+    Some(SsdCache {
+        used: json_u64(cache, &["total_size_bytes"]).unwrap_or(0),
+        capacity: json_u64(cache, &["disk_max_bytes"]).unwrap_or(0),
+        loads: sum("ssd_disk_loads"),
+        saves: sum("ssd_saves"),
+        evictions: sum("evictions"),
+    })
 }
 
 pub(crate) fn parse_mlx_runtime_telemetry(health: &Value, stats: Option<&Value>) -> MlxTelemetry {

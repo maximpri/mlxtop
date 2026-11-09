@@ -389,7 +389,7 @@ impl App {
                         &self.collector.prefill_history,
                         ChartMetric::Prefill,
                     ),
-                    Chart::Cache => ("cache", &self.collector.cache_history, ChartMetric::Cache),
+                    Chart::Cache => self.cache_panel(),
                     Chart::Gpu => (
                         self.gpu_chart_title(),
                         &self.collector.gpu_history,
@@ -589,14 +589,21 @@ impl App {
         self.draw_request_chart(frame, first.union(second));
         let [cache, queue] =
             Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third);
-        self.render_indicator_chart(
-            frame,
-            cache,
-            "cache",
-            &self.collector.cache_history,
-            ChartMetric::Cache,
-        );
+        let (name, history, metric) = self.cache_panel();
+        self.render_indicator_chart(frame, cache, name, history, metric);
         self.draw_operator_chart(frame, queue, Chart::Queue);
+    }
+
+    /// The cache panel plots the runtime's own disk traffic where the OS
+    /// reports it: per-request reuse is in prompt load, and disk is where a
+    /// cache stalls an answer. Without it, the reuse of each interval.
+    pub(crate) fn cache_panel(&self) -> (&'static str, &VecDeque<ChartPoint>, ChartMetric) {
+        let disk = &self.collector.disk_history;
+        if disk.iter().any(|point| point.value.is_some()) {
+            ("cache I/O", disk, ChartMetric::Disk)
+        } else {
+            ("cache", &self.collector.cache_history, ChartMetric::Cache)
+        }
     }
 
     pub(crate) fn draw_workload_charts(&self, frame: &mut Frame, area: Rect) {
@@ -824,7 +831,7 @@ impl App {
                     state.into()
                 }
             }
-            ChartMetric::Swap | ChartMetric::Compression => {
+            ChartMetric::Swap | ChartMetric::Compression | ChartMetric::Disk => {
                 current.map(rate).unwrap_or_else(|| "—".into())
             }
         };
@@ -937,21 +944,9 @@ impl App {
             }
             // While a prefill runs, its position replaces the unit: the rate is already in the title,
             // and 40.9k / 61.5k tells you how long the wait is.
-            ChartMetric::Prefill => Some(llm_prefill_progress_label(sample).unwrap_or_else(|| {
-                match sample
-                    .llm_prefill_tps
-                    .filter(|_| !sample.llm_prefill_tps_live)
-                {
-                    Some(average)
-                        if current.is_none()
-                            && area.width >= 38
-                            && !current_label.contains("AVG") =>
-                    {
-                        format!("tok/s · server avg {average:.1}")
-                    }
-                    _ => "tok/s".into(),
-                }
-            })),
+            ChartMetric::Prefill => {
+                Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
+            }
             // oMLX and Splash report generation summed over running requests;
             // say so when there are several, since each gets only its share.
             ChartMetric::Generation => Some(match generating_requests(sample) {
@@ -1018,6 +1013,22 @@ impl App {
                         spaced
                     } else {
                         format!("in {swap_in} · out {swap_out}")
+                    },
+                )
+            }
+            ChartMetric::Disk => {
+                let (read, write) = match (sample.disk.read, sample.disk.write) {
+                    (Some(read), Some(write)) => (rate(read), rate(write)),
+                    _ => ("—".into(), "—".into()),
+                };
+                let spaced = format!("read {read} · write {write}");
+                Some(
+                    if Line::from(spaced.as_str()).width() + 2
+                        <= usize::from(area.width.saturating_sub(2))
+                    {
+                        spaced
+                    } else {
+                        format!("r {read} · w {write}")
                     },
                 )
             }
@@ -1173,12 +1184,6 @@ impl App {
                 inner.y += 1;
                 inner.height -= 1;
             }
-            swap_usage::draw_compressor(
-                frame,
-                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-                sample,
-            );
-            inner.height = inner.height.saturating_sub(1);
             if inner.is_empty() {
                 return;
             }
@@ -1191,6 +1196,44 @@ impl App {
                         }
                         Some(_) => "Light compression · below warning",
                         None => "Compression unavailable",
+                    })
+                    .style(Style::default().fg(current_tone.color())),
+                    inner,
+                );
+                return;
+            }
+        }
+        if metric == ChartMetric::Disk {
+            // Reuse over the session; each request's share is in prompt load.
+            if inner.height >= 5 {
+                if let Some(reuse) = sample.llm_cache_efficiency {
+                    frame.render_widget(
+                        Paragraph::new(format!("{reuse:.0}% of prompt tokens reused"))
+                            .style(Style::default().fg(MUTED)),
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                    );
+                    inner.y += 1;
+                    inner.height -= 1;
+                }
+            }
+            if sample.ssd_cache.is_some() {
+                swap_usage::draw_ssd_cache(
+                    frame,
+                    Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+                    sample,
+                );
+                inner.height = inner.height.saturating_sub(1);
+            }
+            if inner.is_empty() {
+                return;
+            }
+            if inner.height < 3 {
+                frame.render_widget(
+                    Paragraph::new(match current {
+                        Some(0) => "No disk traffic",
+                        Some(rate) if rate >= crate::analysis::DISK_ACTIVE_RATE => "Disk active",
+                        Some(_) => "Light disk traffic",
+                        None => "Disk reading unavailable",
                     })
                     .style(Style::default().fg(current_tone.color())),
                     inner,

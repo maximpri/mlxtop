@@ -27,7 +27,7 @@ impl From<ChartMetric> for Chart {
         match metric {
             ChartMetric::Generation => Self::Generation,
             ChartMetric::Prefill => Self::Prefill,
-            ChartMetric::Cache => Self::Cache,
+            ChartMetric::Cache | ChartMetric::Disk => Self::Cache,
             ChartMetric::Gpu => Self::Gpu,
             ChartMetric::Memory => Self::Memory,
             ChartMetric::Swap => Self::Paging,

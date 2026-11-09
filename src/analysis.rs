@@ -2,7 +2,7 @@
 //! Health classification and measured throughput correlation; no terminal rendering.
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
-    CorrelationCause, CorrelationInsight, CorrelationKey, Sample, TelemetrySource,
+    CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, Sample, TelemetrySource,
     ThroughputDirection, Tone, MIB,
 };
 use crate::formatting::{
@@ -22,6 +22,9 @@ pub(crate) const STALL_SECONDS: f64 = 1.5;
 /// Speculative decoding makes one-second speeds jump by a third between
 /// polls; slowdowns are judged on the mean of this many samples.
 const SMOOTHING_SAMPLES: usize = 3;
+/// Runtime storage traffic worth naming. A decoding runtime touches its disk
+/// only to load or save prompt cache; weights are already in memory.
+pub(crate) const DISK_ACTIVE_RATE: u64 = 16 * MIB;
 
 #[derive(Clone, Default)]
 pub(crate) struct CorrelationObservation {
@@ -55,6 +58,44 @@ pub(crate) struct CorrelationObservation {
     /// with its own earlier speed before any other.
     pub(crate) request: Option<String>,
     pub(crate) output_tokens: Option<u64>,
+    /// The runtime's storage reads and writes per second, and SSD-cache
+    /// blocks it loaded, saved and evicted since the previous sample.
+    pub(crate) disk: DiskActivity,
+    pub(crate) ssd_full: bool,
+}
+
+impl CorrelationObservation {
+    /// The runtime's disk work in this sample, in words, when it is enough to
+    /// matter: storage traffic above the active rate, or SSD-cache blocks moved.
+    pub(crate) fn disk_label(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        let disk = &self.disk;
+        if let Some(read) = disk.read.filter(|read| *read >= DISK_ACTIVE_RATE) {
+            parts.push(format!("disk read {}", rate(read)));
+        }
+        if let Some(write) = disk.write.filter(|write| *write >= DISK_ACTIVE_RATE) {
+            parts.push(format!("disk write {}", rate(write)));
+        }
+        let blocks = |count: u64, verb: &str| {
+            format!(
+                "{count} SSD cache block{} {verb}",
+                if count == 1 { "" } else { "s" }
+            )
+        };
+        if disk.loads > 0 {
+            parts.push(blocks(disk.loads, "loaded"));
+        }
+        if disk.saves > 0 {
+            parts.push(blocks(disk.saves, "saved"));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        if self.ssd_full && disk.evictions > 0 {
+            parts.push("SSD cache full".into());
+        }
+        Some(parts.join(" · "))
+    }
 }
 
 /// Lookback before a drop's first slow sample in which a change is a candidate
@@ -147,6 +188,11 @@ fn events_between(
             format!("paging began ({})", rate(current.paging_rate)),
         );
     }
+    if previous.disk_label().is_none() {
+        if let Some(disk) = current.disk_label() {
+            push(CorrelationCause::DiskIo, format!("{disk} began"));
+        }
+    }
     if current.thermal_limited && !previous.thermal_limited {
         push(CorrelationCause::Thermal, "thermal limiting began".into());
     }
@@ -178,6 +224,7 @@ fn still_holds(
         CorrelationCause::MemoryPressure => now.pressure >= 2,
         CorrelationCause::Paging => now.paging_rate >= thresholds.swap_warn_rate,
         CorrelationCause::Thermal => now.thermal_limited,
+        CorrelationCause::DiskIo => now.disk_label().is_some(),
         CorrelationCause::MetalMemory => {
             fraction(now.metal_in_use, now.metal_alloc).is_some_and(|r| r >= 0.90)
         }
@@ -577,7 +624,7 @@ pub(crate) fn correlation_evidence_label(sample: &Sample) -> String {
                 .unwrap_or_else(|| "model memory".into())
         }
         CorrelationCause::Runtime => "workload/runtime".into(),
-        CorrelationCause::Stall => sample.correlation.lead.clone(),
+        CorrelationCause::Stall | CorrelationCause::DiskIo => sample.correlation.lead.clone(),
         CorrelationCause::None => String::new(),
         CorrelationCause::Paging | CorrelationCause::Compression => String::new(),
     }
@@ -760,6 +807,8 @@ impl CorrelationObservation {
                 [only] => only.output,
                 _ => None,
             },
+            disk: sample.disk,
+            ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
         }
     }
 }
@@ -830,6 +879,9 @@ pub(crate) fn correlate_history(
             Some(gpu) if gpu < 10 => with.push("GPU idle".to_owned()),
             Some(gpu) => with.push(format!("GPU {gpu}%")),
             None => {}
+        }
+        if let Some(disk) = current.disk_label() {
+            with.push(disk);
         }
         if current.paging_rate >= PAGING_ACTIVE_ENTER_RATE {
             with.push(format!("paging {}", rate(current.paging_rate)));
@@ -949,6 +1001,14 @@ pub(crate) fn correlate_history(
 
     if current.thermal_limited {
         push_correlation_factor(&mut factors, CorrelationCause::Thermal, 95, "thermal limit");
+    }
+
+    // A decoding runtime has no reason to touch its disk; when it does during
+    // a drop, it is loading or saving prompt cache instead of producing tokens.
+    if direction == ThroughputDirection::Down {
+        if let Some(disk) = current.disk_label() {
+            push_correlation_factor(&mut factors, CorrelationCause::DiskIo, 76, disk);
+        }
     }
 
     match current.pressure {

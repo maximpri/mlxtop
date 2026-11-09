@@ -36,7 +36,7 @@ pub(super) fn new_request_summary(
     while seen.len() > 512 {
         seen.pop_front();
     }
-    Some(request.summary())
+    Some(request.journal_line())
 }
 
 fn counter(value: &Value, path: &[&str]) -> Option<u64> {

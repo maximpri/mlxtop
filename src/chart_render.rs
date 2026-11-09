@@ -33,6 +33,7 @@ pub(crate) fn chart_form(metric: ChartMetric) -> ChartForm {
         | ChartMetric::Swap
         | ChartMetric::Generation
         | ChartMetric::Prefill
+        | ChartMetric::Disk
         | ChartMetric::Cache => ChartForm::Bars,
     }
 }
@@ -49,6 +50,7 @@ pub(crate) fn normalize_chart_value(metric: ChartMetric, value: u64) -> u64 {
         ChartMetric::Generation
         | ChartMetric::Prefill
         | ChartMetric::Swap
+        | ChartMetric::Disk
         | ChartMetric::Compression => value,
         ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Gpu => value.min(100),
     }
@@ -99,7 +101,7 @@ pub(crate) fn chart_stat_label(metric: ChartMetric, value: Option<u64>) -> Strin
         ChartMetric::Generation | ChartMetric::Prefill => value
             .map(|value| format!("{:.1}", value as f64 / 10.0))
             .unwrap_or_else(|| "—".into()),
-        ChartMetric::Swap | ChartMetric::Compression => {
+        ChartMetric::Swap | ChartMetric::Compression | ChartMetric::Disk => {
             value.map(rate).unwrap_or_else(|| "—".into())
         }
         ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Gpu => value
@@ -418,7 +420,7 @@ pub(crate) fn chart_transition_tone(
         // Pressure has no numeric relationship to the connector's RAM height.
         // Use the newly captured state; never synthesize a warning while
         // crossing an occupancy percentage between two normal observations.
-        ChartMetric::Cache | ChartMetric::Memory => tone,
+        ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Disk => tone,
         ChartMetric::Gpu => metric.tone(display_value, thresholds),
         ChartMetric::Compression => metric.tone(display_value, thresholds),
         // The chart plots all disk paging but grades what counted against the

@@ -342,6 +342,8 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
             resident: 2 * 1024 * MIB,
             footprint: 3 * 1024 * MIB,
             peak: 4 * 1024 * MIB,
+            disk_read: 0,
+            disk_written: 0,
             at: Instant::now(),
         }),
         process_memory_growth: Some(1024),

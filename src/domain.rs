@@ -49,7 +49,7 @@ pub(crate) enum EventKind {
 impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
-            "LLM" | "PROMPT" | "SLOWDOWN" | "STALL" | "RESUMED" => Self::Llm,
+            "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" => Self::Llm,
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -70,18 +70,20 @@ pub(crate) enum ChartMetric {
     Swap,
     Compression,
     Gpu,
+    /// The runtime's own storage reads and writes: its prompt cache on disk.
+    Disk,
 }
 
 impl ChartMetric {
     /// Byte-rate series share automatic zero-based ceilings and rate labels.
     pub(crate) fn is_byte_rate(self) -> bool {
-        matches!(self, Self::Swap | Self::Compression)
+        matches!(self, Self::Swap | Self::Compression | Self::Disk)
     }
 
     pub(crate) fn chart_tone(self) -> Tone {
         match self {
             Self::Generation | Self::Prefill | Self::Cache => Tone::Cyan,
-            Self::Memory | Self::Swap | Self::Compression => Tone::Cyan,
+            Self::Memory | Self::Swap | Self::Compression | Self::Disk => Tone::Cyan,
             Self::Gpu => Tone::Blue,
         }
     }
@@ -116,6 +118,8 @@ impl ChartMetric {
             // Compression trades CPU for RAM; alone it is a warning, never critical.
             Self::Compression if value >= thresholds.compression_warn_rate => Tone::Yellow,
             Self::Compression => Tone::Green,
+            // Disk work is graded by what it coincides with, in the collector.
+            Self::Disk => Tone::Cyan,
         }
     }
 }
@@ -238,6 +242,8 @@ pub(crate) enum CorrelationCause {
     Concurrency,
     ContextGrowth,
     ModelMemory,
+    /// The runtime reading or writing its disk (prompt cache) mid-answer.
+    DiskIo,
     Runtime,
 }
 
@@ -257,6 +263,7 @@ impl CorrelationCause {
             Self::Concurrency => "concurrent requests",
             Self::ContextGrowth => "context/KV growth",
             Self::ModelMemory => "model memory growth",
+            Self::DiskIo => "runtime disk I/O",
             Self::Runtime => "workload/runtime change",
         }
     }
@@ -272,6 +279,7 @@ impl CorrelationCause {
             | Self::Concurrency
             | Self::ContextGrowth
             | Self::ModelMemory
+            | Self::DiskIo
             | Self::Runtime => Tone::Yellow,
             Self::None => Tone::Muted,
         }
@@ -352,8 +360,48 @@ impl CorrelationInsight {
     }
 }
 
+/// A runtime's on-disk prompt cache (oMLX keeps KV blocks on an SSD): its
+/// fill and its lifetime counters, which the collector turns into activity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SsdCache {
+    pub(crate) used: u64,
+    pub(crate) capacity: u64,
+    /// KV blocks read back from disk, written to it, and evicted from it.
+    pub(crate) loads: u64,
+    pub(crate) saves: u64,
+    pub(crate) evictions: u64,
+}
+
+impl SsdCache {
+    /// Within one block-file of capacity: new saves now evict old prefixes.
+    pub(crate) fn full(&self) -> bool {
+        self.capacity > 0 && self.used.saturating_mul(100) >= self.capacity.saturating_mul(99)
+    }
+}
+
+/// What the runtime did with its disk between two samples: storage bytes per
+/// second from the OS, and SSD-cache block counts from the runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiskActivity {
+    pub(crate) read: Option<u64>,
+    pub(crate) write: Option<u64>,
+    pub(crate) loads: u64,
+    pub(crate) saves: u64,
+    pub(crate) evictions: u64,
+}
+
+impl DiskActivity {
+    pub(crate) fn rate(&self) -> Option<u64> {
+        match (self.read, self.write) {
+            (None, None) => None,
+            (read, write) => Some(read.unwrap_or(0).saturating_add(write.unwrap_or(0))),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct LlmTelemetry {
+    pub(crate) ssd_cache: Option<SsdCache>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -436,6 +484,9 @@ pub(crate) struct Sample {
     pub(crate) llm_rss: u64,
     pub(crate) process_memory: Option<process_memory::Reading>,
     pub(crate) process_memory_growth: Option<i64>,
+    /// The runtime's storage traffic and SSD-cache use since the last sample.
+    pub(crate) disk: DiskActivity,
+    pub(crate) ssd_cache: Option<SsdCache>,
     pub(crate) llm_cpu: f64,
     pub(crate) llm_processes: Vec<LlmProcess>,
     pub(crate) largest_consumer: Option<String>,
@@ -573,6 +624,8 @@ impl Default for Sample {
             llm_rss: 0,
             process_memory: None,
             process_memory_growth: None,
+            disk: DiskActivity::default(),
+            ssd_cache: None,
             llm_cpu: 0.0,
             llm_processes: Vec::new(),
             largest_consumer: None,

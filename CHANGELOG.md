@@ -1,5 +1,36 @@
 # Changelog
 
+## 3.3.0-rc.3 — 2026-11-09
+
+### Diagnosis
+
+- **Disk-cache stalls are named.** mlxtop reads the runtime's own storage
+  traffic from the OS and oMLX's SSD-cache counters (blocks loaded, saved,
+  evicted, and how full the cache is). A stall or slowdown while the runtime
+  reads or writes its disk says so (`no new token for 2s · GPU idle · disk
+  read 850 MiB/s · 38 SSD cache blocks loaded · SSD cache full`), and the
+  next step points at the cache disk: its speed, or its size when it is full
+  and evicting. Disk work that began just before a drop is named as its onset.
+
+### Dashboards
+
+- **The cache panel shows the disk, not a binary line.** Reuse per request
+  already lives in prompt load (each bar's green segment and `CACHED`); the
+  interval-reuse chart only ever read near 0% or near 100%. The panel is now
+  `cache I/O`: the runtime's disk reads and writes over time, the session's
+  reuse, and the SSD cache's fill along the bottom, like swap.
+- **Less repeated text.** Prompt load drops `N uncached` (it restates
+  `CACHED`), compression drops its `% of RAM` bar (the memory legend has
+  the compressor's size), and prefill drops the server's lifetime average.
+
+### Journal
+
+- **One row as a request starts, one as it ends.** `PROMPT` carries the id,
+  prompt size and cached share without the runtime and model on every row;
+  a new `DONE` row gives the tokens produced. GPU busy and idle flips and
+  idle → generating status changes around listed requests are no longer
+  journaled.
+
 ## 3.3.0-rc.2 — 2026-11-09
 
 ### Diagnosis

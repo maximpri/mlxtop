@@ -39,30 +39,33 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, sample: &Sample) {
     );
 }
 
-/// Compressor occupancy as a share of physical RAM, in the same form as SWAP.
-pub(super) fn draw_compressor(frame: &mut Frame, area: Rect, sample: &Sample) {
+/// The runtime's SSD prompt cache: how full it is, in the same form as swap.
+/// A full cache evicts old prefixes to save new ones.
+pub(super) fn draw_ssd_cache(frame: &mut Frame, area: Rect, sample: &Sample) {
     if area.is_empty() {
         return;
     }
     let row = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(Paragraph::default().style(Style::default().bg(PANEL)), row);
-    if !sample.vm_available || sample.total_memory == 0 {
+    let Some(cache) = sample.ssd_cache.filter(|cache| cache.capacity > 0) else {
         frame.render_widget(
-            Paragraph::new("compressor —").style(Style::default().fg(MUTED)),
+            Paragraph::new("SSD cache off").style(Style::default().fg(MUTED)),
             row,
         );
         return;
-    }
-    // The panel's first line already gives the compressor's size; this row is
-    // how much of RAM it takes.
-    let percent = share(sample.compressor, sample.total_memory);
+    };
+    let fill = if cache.full() {
+        "full".to_owned()
+    } else {
+        format!("{}%", share(cache.used, cache.capacity))
+    };
     capacity_bar(
         frame,
         row,
-        "",
-        format!("{percent}% of RAM"),
-        sample.compressor,
-        sample.total_memory,
+        "SSD",
+        format!("{} {fill}", capacity(cache.used, cache.capacity)),
+        cache.used,
+        cache.capacity,
     );
 }
 

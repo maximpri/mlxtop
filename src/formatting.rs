@@ -298,6 +298,34 @@ pub(crate) fn signed_rate(value: i64) -> String {
 }
 
 impl RequestUsage {
+    /// One Journal row: the request and what it brings, without the runtime
+    /// and model the header already names or readings not yet measured.
+    pub fn journal_line(&self) -> String {
+        let mut parts = vec![
+            self.id.clone(),
+            format!("{} prompt", compact_tokens(self.prompt)),
+        ];
+        if let Some(cached) = self.cached.filter(|_| self.prompt > 0) {
+            parts.push(format!(
+                "{}% cached",
+                progress_percent(cached.min(self.prompt), self.prompt)
+            ));
+        }
+        if self.queued {
+            parts.push("queued".into());
+        }
+        if let Some(out) = self.output.filter(|out| *out > 0) {
+            parts.push(format!("{} out", compact_tokens(out)));
+        }
+        if let Some(speed) = self.output_tps.filter(|_| self.completed) {
+            parts.push(format!("{speed:.1} tok/s"));
+        }
+        if let Some(ttft) = self.ttft_ms {
+            parts.push(format!("first token {ttft} ms"));
+        }
+        parts.join(" · ")
+    }
+
     pub fn summary(&self) -> String {
         let mut text = format!(
             "{} prompt {} · out {} · {} · {} · {}",

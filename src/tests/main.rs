@@ -73,6 +73,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             generation_history: VecDeque::new(),
             prefill_history: VecDeque::new(),
             cache_history: VecDeque::new(),
+            disk_history: VecDeque::new(),
             load_history: VecDeque::new(),
             composition_history: VecDeque::new(),
             swap_history: VecDeque::new(),
@@ -131,6 +132,7 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         generation_history: VecDeque::new(),
         prefill_history: VecDeque::new(),
         cache_history: VecDeque::new(),
+        disk_history: VecDeque::new(),
         load_history: VecDeque::new(),
         composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),
@@ -234,6 +236,8 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             resident: 16 * 1024 * MIB,
             footprint: 19 * 1024 * MIB,
             peak: 30 * 1024 * MIB,
+            disk_read: 0,
+            disk_written: 0,
             at: Instant::now(),
         }),
         process_memory_growth: Some(0),
@@ -1881,6 +1885,8 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             resident: 16 * 1024 * 1024 * 1024,
             footprint: (12 + i / 10) * 1024 * 1024 * 1024,
             peak: 29 * 1024 * 1024 * 1024,
+            disk_read: 0,
+            disk_written: 0,
             at: Instant::now(),
         });
         app.collector
@@ -1968,6 +1974,8 @@ fn overview_omits_process_memory_chart_even_when_available() {
         resident: 16 * 1024 * MIB,
         footprint: 17 * 1024 * MIB,
         peak: 29 * 1024 * MIB,
+        disk_read: 0,
+        disk_written: 0,
         at: Instant::now(),
     });
     let screen = render_app(&app, 180, 50);
@@ -4638,10 +4646,12 @@ fn host_row_leads_with_memory_compression_and_paging_on_macos_only() {
         "wired 3.2 GiB",
         "4.6 GiB stored in 1.6 GiB · 2.9× ratio",
         "comp 3.0 · decomp 1.5 MiB/s",
-        "4% of RAM",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
+    // The compressor's size is in the memory legend and the line above; a
+    // third reading as a share of RAM says nothing new.
+    assert!(!screen.contains("of RAM"), "{screen}");
     let regions = app.charts.regions.borrow().clone();
     let region = |chart| regions.iter().find(|(id, _)| *id == chart).map(|r| r.1);
     let memory = region(Chart::Memory).unwrap();
@@ -5260,10 +5270,10 @@ fn rate_headlines_match_their_charts_and_name_a_summed_rate() {
             ChartMetric::Prefill,
         )
     });
-    // The headline is the plotted sample; the server's average is labelled
-    // as such underneath, never presented as the reading.
+    // The headline is the plotted sample. The server's lifetime average is
+    // a different figure; it lives in diagnostics, not beside the chart.
     assert!(text.contains("LAST 71.7 tok/s · 1s old"), "{text}");
-    assert!(text.contains("tok/s · server avg 209.0"), "{text}");
+    assert!(!text.contains("server avg"), "{text}");
     assert!(!text.contains("AVG PREFILL"), "{text}");
 }
 
@@ -5477,4 +5487,397 @@ fn parses_captured_live_omlx_generating_and_cached_prefill_rows() {
     assert!(screen.contains("CACHED 96%"), "{screen}");
     assert!(screen.contains("PREFILL"), "{screen}");
     assert!(screen.contains("0% · 0 / 2,666"), "{screen}");
+}
+
+// --- runtime disk and SSD cache ------------------------------------------------
+
+#[test]
+fn captured_omlx_stats_report_a_full_ssd_cache_and_its_block_counters() {
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_generating_live.json")).unwrap();
+    let cache = crate::omlx::parse_ssd_cache(&stats).expect("SSD cache reported");
+    assert_eq!(
+        cache,
+        domain::SsdCache {
+            used: 128_780_156_928,
+            capacity: 128_849_018_880,
+            loads: 1520,
+            saves: 1314,
+            evictions: 327,
+        }
+    );
+    // 99.95% of capacity: new saves evict old prefixes.
+    assert!(cache.full());
+    let telemetry = parse_omlx_telemetry(&json!({"status": "healthy"}), Some(&stats));
+    assert_eq!(telemetry.ssd_cache, Some(cache));
+
+    let mut off = stats.clone();
+    off["runtime_cache"]["ssd_cache_unavailable"] = json!(true);
+    assert_eq!(crate::omlx::parse_ssd_cache(&off), None);
+    let mut no_dir = stats.clone();
+    no_dir["runtime_cache"]["ssd_cache_dir"] = Value::Null;
+    assert_eq!(crate::omlx::parse_ssd_cache(&no_dir), None);
+    assert_eq!(crate::omlx::parse_ssd_cache(&json!({})), None);
+    assert!(!domain::SsdCache::default().full());
+}
+
+#[test]
+fn disk_activity_is_storage_rates_and_cache_blocks_since_the_last_sample() {
+    let at = Instant::now();
+    let reading = |read: u64, written: u64, seconds: u64, started: u64| process_memory::Reading {
+        pid: 7,
+        started,
+        resident: 1,
+        footprint: 1,
+        peak: 1,
+        disk_read: read,
+        disk_written: written,
+        at: at + Duration::from_secs(seconds),
+    };
+    let cache = |loads, saves, evictions| domain::SsdCache {
+        used: 1,
+        capacity: 2,
+        loads,
+        saves,
+        evictions,
+    };
+    let first = reading(0, 0, 0, 1);
+    let next = reading(800 * MIB, 4 * MIB, 2, 1);
+    let activity = crate::collector::disk_activity(
+        Some(&next),
+        Some(&first),
+        Some(cache(12, 3, 1)),
+        Some(cache(2, 3, 0)),
+    );
+    assert_eq!(
+        activity,
+        domain::DiskActivity {
+            read: Some(400 * MIB),
+            write: Some(2 * MIB),
+            loads: 10,
+            saves: 0,
+            evictions: 1,
+        }
+    );
+    assert_eq!(activity.rate(), Some(402 * MIB));
+    // A restarted runtime (new start time, counters reset) reads as nothing.
+    let restarted = crate::collector::disk_activity(
+        Some(&reading(0, 0, 3, 2)),
+        Some(&next),
+        Some(cache(0, 0, 0)),
+        Some(cache(12, 3, 1)),
+    );
+    assert_eq!(restarted, domain::DiskActivity::default());
+    assert_eq!(restarted.rate(), None);
+    assert_eq!(process_memory::disk_rates(&first, Some(&first)), None);
+    assert_eq!(process_memory::disk_rates(&first, None), None);
+}
+
+fn with_disk(mut sample: Sample, read: u64, loads: u64) -> Sample {
+    sample.disk = domain::DiskActivity {
+        read: Some(read),
+        write: Some(0),
+        loads,
+        ..Default::default()
+    };
+    sample
+}
+
+#[test]
+fn a_stall_beside_cache_reads_names_the_disk_and_points_at_it() {
+    let mut engine = CorrelationEngine::default();
+    let mut samples: Vec<Sample> = CAPTURED_SPEEDS
+        .iter()
+        .enumerate()
+        .map(|(second, tps)| decoding(second as u64, *tps, 1_000 + second as u64 * 40, 0.05, 99))
+        .collect();
+    samples.push(with_disk(decoding(17, 0.0, 1_693, 1.2, 0), 900 * MIB, 40));
+    samples.push(with_disk(decoding(18, 0.0, 1_693, 2.3, 0), 850 * MIB, 38));
+    samples.last_mut().unwrap().ssd_cache = Some(domain::SsdCache {
+        used: 100,
+        capacity: 100,
+        ..Default::default()
+    });
+    samples.last_mut().unwrap().disk.evictions = 5;
+    for sample in &mut samples {
+        sample.correlation = engine.observe(sample, defaults());
+    }
+    let stall = &samples[18].correlation;
+    assert_eq!(stall.cause, CorrelationCause::Stall);
+    assert_eq!(
+        stall.lead,
+        "no new token for 2s at 1.7k out · GPU idle · disk read 850.0 MiB/s · 38 SSD cache blocks loaded · SSD cache full"
+    );
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&samples[18]),
+        "SSD cache is full and evicting; enlarge it or free the disk."
+    );
+    let mut not_full = samples[18].clone();
+    not_full.correlation.lead = "no new token for 2s · disk read 850.0 MiB/s".into();
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&not_full),
+        "Runtime waited on its disk cache; check that disk's speed."
+    );
+    not_full.correlation.cause = CorrelationCause::DiskIo;
+    not_full.correlation.lead = "1 SSD cache block saved".into();
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&not_full),
+        "Runtime waited on its disk cache; check that disk's speed."
+    );
+    not_full.correlation.lead = "x".into();
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&not_full),
+        "Runtime used its disk mid-answer; check its cache disk."
+    );
+    assert_eq!(
+        crate::analysis::correlation_evidence_label(&not_full),
+        "x".to_owned()
+    );
+}
+
+#[test]
+fn disk_work_that_begins_before_a_drop_is_named_as_its_onset() {
+    let base = |second: u64, tps: f64| decoding(second, tps, 500 + second * 50, 0.05, 50);
+    let history: Vec<CorrelationObservation> = [
+        base(0, 50.0),
+        base(1, 50.0),
+        base(2, 50.0),
+        with_disk(base(3, 50.0), 600 * MIB, 0),
+    ]
+    .iter()
+    .map(CorrelationObservation::from_sample)
+    .collect();
+    let current = CorrelationObservation::from_sample(&with_disk(base(4, 30.0), 600 * MIB, 0));
+    let refs: Vec<&CorrelationObservation> = history.iter().collect();
+    let insight = crate::analysis::correlate_history(&current, &refs, Some(50.0), defaults());
+    assert_eq!(insight.cause, CorrelationCause::DiskIo);
+    assert_eq!(
+        insight.lead,
+        "disk read 600.0 MiB/s began 1s before the drop"
+    );
+    assert_eq!(CorrelationCause::DiskIo.label(), "runtime disk I/O");
+    assert_eq!(CorrelationCause::DiskIo.tone(), Tone::Yellow);
+
+    // Disk work that started earlier and still runs is named, scored lower.
+    let earlier: Vec<CorrelationObservation> = (0..4)
+        .map(|second| {
+            CorrelationObservation::from_sample(&with_disk(base(second, 50.0), 600 * MIB, 0))
+        })
+        .collect();
+    let refs: Vec<&CorrelationObservation> = earlier.iter().collect();
+    let insight = crate::analysis::correlate_history(&current, &refs, Some(50.0), defaults());
+    assert_eq!(insight.cause, CorrelationCause::DiskIo);
+    assert_eq!(insight.lead, "disk read 600.0 MiB/s");
+
+    // A trickle is not disk work; writes and saves are.
+    let mut observation = current.clone();
+    observation.disk = domain::DiskActivity {
+        read: Some(MIB),
+        write: Some(64 * MIB),
+        loads: 1,
+        saves: 2,
+        evictions: 3,
+    };
+    observation.ssd_full = true;
+    assert_eq!(
+        observation.disk_label().as_deref(),
+        Some("disk write 64.0 MiB/s · 1 SSD cache block loaded · 2 SSD cache blocks saved · SSD cache full")
+    );
+    observation.disk = domain::DiskActivity {
+        read: Some(MIB),
+        ..Default::default()
+    };
+    assert_eq!(observation.disk_label(), None);
+}
+
+#[test]
+fn the_cache_panel_plots_runtime_disk_traffic_over_the_ssd_cache_fill() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    // Without disk readings the panel keeps each interval's reuse.
+    assert_eq!(app.cache_panel().0, "cache");
+    app.collector.current.ssd_cache = Some(domain::SsdCache {
+        used: 120 * 1024 * MIB,
+        capacity: 120 * 1024 * MIB,
+        ..Default::default()
+    });
+    app.collector.current.disk = domain::DiskActivity {
+        read: Some(850 * MIB),
+        write: Some(2 * MIB),
+        ..Default::default()
+    };
+    for second in 0..30 {
+        push_history_with_tone(
+            &mut app.collector.disk_history,
+            Some(if second % 10 == 0 { 850 * MIB } else { 0 }),
+            Tone::Cyan,
+            60,
+        );
+    }
+    assert!(app.cache_panel().2 == ChartMetric::Disk);
+    let (name, history, metric) = app.cache_panel();
+    let disk_history = history.clone();
+    let history = &disk_history;
+    let tall = render_view(60, 10, |frame| {
+        app.render_indicator_chart(frame, frame.area(), name, history, metric)
+    });
+    for label in [
+        "cache I/O",
+        "read 850.0 MiB/s · write 2.0 MiB/s",
+        "62% of prompt tokens reused",
+        "SSD",
+        "120.0/120.0 GiB full",
+    ] {
+        assert!(tall.contains(label), "missing {label}\n{tall}");
+    }
+    let narrow = render_view(30, 5, |frame| {
+        app.render_indicator_chart(frame, frame.area(), name, history, metric)
+    });
+    assert!(narrow.contains("r 850.0 MiB/s · w 2.0 MiB/s"), "{narrow}");
+    assert!(narrow.contains("No disk traffic"), "{narrow}");
+    // The Overview and the enlarged view both use it.
+    let screen = render_app(&app, 180, 50);
+    assert!(screen.contains("cache I/O"), "{screen}");
+    app.charts.focused = Chart::Cache;
+    app.charts.expanded = true;
+    assert!(render_app(&app, 120, 40).contains("cache I/O"));
+
+    // Short panels say what the disk is doing in words.
+    for (rate, text) in [
+        (Some(0), "No disk traffic"),
+        (Some(400 * MIB), "Disk active"),
+        (Some(MIB), "Light disk traffic"),
+        (None, "Disk reading unavailable"),
+    ] {
+        let mut history = VecDeque::new();
+        push_history_with_tone(&mut history, rate, Tone::Cyan, 10);
+        push_history_with_tone(&mut history, Some(1), Tone::Cyan, 10);
+        history.pop_back();
+        app.collector.current.ssd_cache = None;
+        let screen = render_view(40, 4, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "cache I/O",
+                &history,
+                ChartMetric::Disk,
+            )
+        });
+        assert!(screen.contains(text), "missing {text}\n{screen}");
+    }
+    app.collector.current.disk = domain::DiskActivity::default();
+    let unknown = render_view(60, 6, |frame| {
+        app.render_indicator_chart(frame, frame.area(), "cache I/O", history, metric)
+    });
+    assert!(unknown.contains("read — · write —"), "{unknown}");
+}
+
+#[test]
+fn the_ssd_row_shows_fill_or_says_the_cache_is_off() {
+    let mut sample = Sample::default();
+    let row = |sample: &Sample| {
+        render_view(40, 1, |frame| {
+            crate::swap_usage::draw_ssd_cache(frame, frame.area(), sample)
+        })
+    };
+    assert!(row(&sample).contains("SSD cache off"));
+    sample.ssd_cache = Some(domain::SsdCache {
+        used: 30 * 1024 * MIB,
+        capacity: 120 * 1024 * MIB,
+        ..Default::default()
+    });
+    assert!(
+        row(&sample).contains("30.0/120.0 GiB 25%"),
+        "{}",
+        row(&sample)
+    );
+    render_view(0, 0, |frame| {
+        crate::swap_usage::draw_ssd_cache(frame, Rect::new(0, 0, 0, 0), &sample)
+    });
+}
+
+#[test]
+fn the_journal_has_one_row_as_a_request_starts_and_one_as_it_ends() {
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    let idle = Sample {
+        impact: "LLM READY".into(),
+        llm_status: "idle".into(),
+        llm_generation_tps: Some(55.1),
+        llm_provider: "oMLX".into(),
+        llm_model: "Qwen3.8-27B-oQ4e-mtp".into(),
+        llm_source: TelemetrySource::Live,
+        gpu_util: Some(2),
+        llm_active_requests: Some(0),
+        ..Sample::default()
+    };
+    let mut prefill = decoding(1, 0.0, 0, 0.0, 99);
+    prefill.impact = "GPU BUSY".into();
+    prefill.llm_requests[0].output = None;
+    prefill.llm_requests[0].prefilled = Some(67_776);
+    let mut generating = decoding(2, 45.0, 1_200, 0.05, 99);
+    generating.impact = "GPU BUSY".into();
+    let mut second = generating.clone();
+    second.llm_requests[0].id = "f00baa".into();
+    second.llm_requests[0].output = None;
+    second.llm_requests[0].prefilled = Some(0);
+    let mut queued = second.clone();
+    queued.llm_requests[0].id = "c0ffee".into();
+    queued.llm_requests[0].queued = true;
+    let samples = [
+        idle.clone(),
+        prefill,
+        generating,
+        second,
+        idle.clone(),
+        queued,
+        idle,
+    ];
+    collector.gpu_band = None;
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let rows: Vec<String> = collector
+        .signals
+        .iter()
+        .map(|event| format!("{} {}", event.state, event.summary))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "PROMPT e28cde · 67.8k prompt · 99% cached",
+            "PROMPT f00baa · 67.8k prompt · 99% cached",
+            "DONE e28cde · 1.2k out",
+            "DONE f00baa · ended while prefilling",
+            "PROMPT c0ffee · 67.8k prompt · 99% cached · queued",
+        ],
+        "{rows:#?}"
+    );
+    assert_eq!(EventKind::from_state("DONE"), EventKind::Llm);
+
+    // Output already reported, a rate and a first-token time end the row.
+    let finished = domain::RequestUsage {
+        provider: "llama.cpp".into(),
+        model: "m".into(),
+        id: "r1".into(),
+        prompt: 800,
+        cached: Some(200),
+        output: Some(64),
+        completed: true,
+        queued: false,
+        prefilled: None,
+        idle_for: None,
+        ttft_ms: Some(310),
+        output_tps: Some(41.2),
+        observed_at: None,
+    };
+    assert_eq!(
+        finished.journal_line(),
+        "r1 · 800 prompt · 25% cached · 64 out · 41.2 tok/s · first token 310 ms"
+    );
 }

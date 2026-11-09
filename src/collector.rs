@@ -5,11 +5,12 @@ use crate::analysis::{classify, signal_summary, CorrelationEngine};
 use crate::completion_log::read_llm_stats;
 use crate::config::{Config, JournalConfig, OmxConfig, Thresholds};
 use crate::domain::{
-    ChartMetric, ChartPoint, CorrelationCause, EventKind, LlmLogStats, LlmTelemetry,
-    MetalTelemetry, MlxTelemetry, Sample, SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
+    ChartMetric, ChartPoint, CorrelationCause, DiskActivity, EventKind, LlmLogStats, LlmTelemetry,
+    MetalTelemetry, MlxTelemetry, Sample, SignalEvent, SsdCache, TelemetrySource, Tone, VmCounters,
+    MIB,
 };
 use crate::formatting::{
-    bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
+    bytes, compact_tokens, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
     pressure_state_label, rate,
 };
 use crate::history::{
@@ -51,6 +52,7 @@ pub(crate) struct CollectorView {
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
+    pub(crate) disk_history: VecDeque<ChartPoint>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
@@ -88,6 +90,7 @@ pub(crate) struct Collector {
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
+    pub(crate) disk_history: VecDeque<ChartPoint>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
@@ -194,6 +197,7 @@ impl Collector {
             generation_history: VecDeque::with_capacity(history_limit),
             prefill_history: VecDeque::with_capacity(history_limit),
             cache_history: VecDeque::with_capacity(history_limit),
+            disk_history: VecDeque::with_capacity(history_limit),
             load_history: VecDeque::with_capacity(history_limit),
             composition_history: VecDeque::with_capacity(history_limit),
             swap_history: VecDeque::with_capacity(history_limit),
@@ -494,6 +498,13 @@ impl Collector {
                         .flatten()
                 });
         sample.llm_prefix_hit_rate = llm_stats.and_then(|stats| stats.prefix_hit_rate);
+        sample.ssd_cache = llm_stats.and_then(|stats| stats.ssd_cache);
+        sample.disk = disk_activity(
+            sample.process_memory.as_ref(),
+            self.current.process_memory.as_ref(),
+            sample.ssd_cache,
+            self.current.ssd_cache,
+        );
         sample.llm_active_requests = llm_stats.and_then(|stats| stats.active_requests);
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
         sample.llm_model_memory = llm_stats.and_then(|stats| stats.model_memory);
@@ -546,6 +557,24 @@ impl Collector {
             ChartMetric::Cache,
             self.history_limit,
             self.thresholds,
+        );
+        // Disk work is graded by what it coincides with: named as the reason
+        // generation slowed or stalled, it takes that finding's colour.
+        let disk_named = matches!(
+            sample.correlation.cause,
+            CorrelationCause::DiskIo | CorrelationCause::Stall
+        ) && sample.correlation.is_material_drop()
+            && (sample.correlation.lead.contains("disk ")
+                || sample.correlation.lead.contains("SSD cache"));
+        push_history_with_tone(
+            &mut self.disk_history,
+            sample.disk.rate(),
+            if disk_named {
+                sample.correlation.tone()
+            } else {
+                Tone::Cyan
+            },
+            self.history_limit,
         );
         if let Some(point) = self.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
@@ -643,6 +672,7 @@ impl Collector {
             generation_history: self.generation_history.clone(),
             prefill_history: self.prefill_history.clone(),
             cache_history: self.cache_history.clone(),
+            disk_history: self.disk_history.clone(),
             load_history: self.load_history.clone(),
             composition_history: self.composition_history.clone(),
             swap_history: self.swap_history.clone(),
@@ -680,7 +710,14 @@ impl Collector {
             self.telemetry_online = None;
         }
         if let Some(previous) = previous {
-            let impact_changed = previous.impact != sample.impact && sample.impact != "SAMPLING";
+            // A runtime that lists its requests journals each one (PROMPT,
+            // DONE); the GPU going busy and idle around them is their own
+            // load, not news. Conditions worth inspecting still get a row.
+            let serving = !sample.llm_requests.is_empty() || !previous.llm_requests.is_empty();
+            let routine = |impact: &str| matches!(impact, "GPU BUSY" | "LLM READY" | "IDLE");
+            let impact_changed = previous.impact != sample.impact
+                && sample.impact != "SAMPLING"
+                && !(serving && routine(&previous.impact) && routine(&sample.impact));
             if impact_changed {
                 add(&sample.impact, signal_summary(sample), sample.impact_tone);
             }
@@ -701,7 +738,16 @@ impl Collector {
                 );
             }
 
-            if previous.llm_status != sample.llm_status {
+            // Idle, prefilling, generating: a listed request's own rows say it.
+            let working = |status: &str| {
+                matches!(
+                    status,
+                    "idle" | "active" | "generating" | "prefilling" | "processing" | "waiting"
+                )
+            };
+            if previous.llm_status != sample.llm_status
+                && !(serving && working(&previous.llm_status) && working(&sample.llm_status))
+            {
                 add(
                     "LLM",
                     format!(
@@ -733,7 +779,29 @@ impl Collector {
             // A runtime that lists its requests gets a PROMPT row for each,
             // with its size, so a bare "request started" would repeat it.
             let lists_requests = !sample.llm_requests.is_empty();
-            if (previous_active == 0) != (active == 0) && (active == 0 || !lists_requests) {
+            // Requests the runtime listed last time and no longer does have
+            // finished: one row each, with what they produced.
+            for done in previous.llm_requests.iter().filter(|request| {
+                !request.queued
+                    && !sample
+                        .llm_requests
+                        .iter()
+                        .any(|now| now.id == request.id && now.provider == request.provider)
+            }) {
+                add(
+                    "DONE",
+                    match done.output.filter(|out| *out > 0) {
+                        Some(out) => format!("{} · {} out", done.id, compact_tokens(out)),
+                        None if done.prefilled.is_some() => {
+                            format!("{} · ended while prefilling", done.id)
+                        }
+                        None => format!("{} · no output", done.id),
+                    },
+                    Tone::Cyan,
+                );
+            }
+            let lists_requests = lists_requests || !previous.llm_requests.is_empty();
+            if (previous_active == 0) != (active == 0) && !lists_requests {
                 add(
                     "LLM",
                     if active == 0 {
@@ -884,7 +952,8 @@ impl Collector {
                 && previous_gpu_band
                     .zip(self.gpu_band)
                     .is_some_and(|(before, now)| now.saturated && !before.saturated);
-            if let Some((summary, tone)) = gpu_transition.filter(|_| !gpu_busy_reported) {
+            if let Some((summary, tone)) = gpu_transition.filter(|_| !gpu_busy_reported && !serving)
+            {
                 add("GPU", summary, tone);
             }
 
@@ -963,6 +1032,7 @@ impl Collector {
         self.generation_history.clear();
         self.prefill_history.clear();
         self.cache_history.clear();
+        self.disk_history.clear();
         self.load_history.clear();
         self.composition_history.clear();
         self.swap_history.clear();
@@ -1019,6 +1089,33 @@ pub(crate) fn chart_rate_value(sample: &Sample, metric: ChartMetric) -> Option<u
         .map(|value| (value * 10.0).round() as u64)
 }
 
+/// The runtime's storage traffic since the previous sample, from the OS, and
+/// its SSD-cache block counts, from the runtime. Counters that went backwards
+/// (a restart) read as no activity.
+pub(crate) fn disk_activity(
+    reading: Option<&process_memory::Reading>,
+    previous_reading: Option<&process_memory::Reading>,
+    ssd: Option<SsdCache>,
+    previous_ssd: Option<SsdCache>,
+) -> DiskActivity {
+    let rates = reading.and_then(|reading| process_memory::disk_rates(reading, previous_reading));
+    let (loads, saves, evictions) = match ssd.zip(previous_ssd) {
+        Some((now, then)) => (
+            now.loads.saturating_sub(then.loads),
+            now.saves.saturating_sub(then.saves),
+            now.evictions.saturating_sub(then.evictions),
+        ),
+        None => (0, 0, 0),
+    };
+    DiskActivity {
+        read: rates.map(|(read, _)| read),
+        write: rates.map(|(_, write)| write),
+        loads,
+        saves,
+        evictions,
+    }
+}
+
 pub(crate) fn cache_interval_efficiency(
     previous: &mut Option<CacheCounters>,
     telemetry: Option<&LlmTelemetry>,
@@ -1068,7 +1165,7 @@ pub(crate) fn journal_records(
     critical_pressure: bool,
 ) -> bool {
     let toggle = match state {
-        "PROMPT" => journal.prompts,
+        "PROMPT" | "DONE" => journal.prompts,
         "LLM" => journal.llm,
         "QUEUE" => journal.queue,
         "PRESSURE" if !critical_pressure => journal.memory,

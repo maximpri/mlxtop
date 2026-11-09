@@ -69,10 +69,16 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   PRESSURE; bytes and resident percentage follow, then a composition bar
   (wired, app, compressed, cache, free) with the GPU wired limit marked when
   known, and a history of that composition over a pressure ribbon.
-  Compression charts compress + decompress traffic with the compressor's share
-  of RAM; paging includes the swap capacity bar. Prompt history spans two
+  Compression charts compress + decompress traffic (the compressor's size is
+  in the memory legend, not repeated as a share of RAM); paging includes the
+  swap capacity bar. Prompt history spans two
   columns of the next row (about 28% of the height, nine to fourteen rows; one
-  line until the first request); Cache and Queue stack in the third. Generation,
+  line until the first request); Cache and Queue stack in the third. Each
+  prompt bar carries its cached share as a green segment, so reuse per request
+  is read there; the cache panel (`cache I/O`) plots the runtime's own disk
+  reads and writes, with the session's reuse above and the SSD cache's fill
+  as a capacity bar along the bottom, like swap. Without OS disk readings
+  (remote or non-macOS runtimes) it plots each interval's reuse. Generation,
   prefill and GPU take one column each in a seven- to ten-row row (four on
   short terminals, where readings stay in the titles). Journal grows from five
   to ten rows on tall terminals; everything else goes to the host row.
@@ -202,7 +208,17 @@ colors in time-series history instead of recoloring old samples on refresh.
   twice its own jitter: speculative decoding swings a third poll to poll, and
   a request boundary is not a slowdown. When generation slows, its chart's
   bottom edge names the reason (`▼ …`) in the drop's colour, and Journal
-  writes one STALL or SLOWDOWN row with the reason and the next step. Wrap advice instead of
+  writes one STALL or SLOWDOWN row with the reason and the next step. A
+  decoding runtime has no reason to touch its disk: storage traffic from 16
+  MiB/s or SSD-cache blocks moved during a drop are named (`disk read 850
+  MiB/s · 38 SSD cache blocks loaded · SSD cache full`), as an onset when
+  they began before it, and the next step points at the cache disk.
+- Journal gives a request one row as it starts (`PROMPT id · 67.8k prompt ·
+  99% cached`) and one as it ends (`DONE id · 1.2k out`). The runtime and
+  model are in the header, not on every row. While the runtime lists its
+  requests, the GPU going busy and idle and the status moving between idle,
+  prefilling and generating are those requests' own work and get no rows;
+  conditions worth inspecting still do. Wrap advice instead of
   truncating it. Avoid generic tuning advice when no problem is established.
 - Ring the terminal bell once when critical memory pressure or severe paging
   begins. Keep a visible, acknowledgeable banner. High GPU utilization alone

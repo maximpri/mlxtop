@@ -25,6 +25,19 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
         CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
         // The engine stopped with nothing on the host to show for it:
         // the reason is inside the runtime, in its log at this time.
+        // Any disk work beside a stall is the runtime's own prompt cache.
+        CorrelationCause::Stall | CorrelationCause::DiskIo
+            if sample.correlation.lead.contains("SSD cache full") =>
+        {
+            "SSD cache is full and evicting; enlarge it or free the disk."
+        }
+        CorrelationCause::Stall | CorrelationCause::DiskIo
+            if sample.correlation.lead.contains("disk ")
+                || sample.correlation.lead.contains("SSD cache") =>
+        {
+            "Runtime waited on its disk cache; check that disk's speed."
+        }
+        CorrelationCause::DiskIo => "Runtime used its disk mid-answer; check its cache disk.",
         CorrelationCause::Stall
             if sample.correlation.lead.contains("GPU idle")
                 && !sample.correlation.lead.contains("paging") =>
