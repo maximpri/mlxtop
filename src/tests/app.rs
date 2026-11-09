@@ -1437,7 +1437,8 @@ fn correlation_engine_explains_throughput_changes_against_a_median_baseline() {
     gpu.gpu_util = Some(85);
     let insight = engine.observe(&gpu, thresholds);
     assert_eq!(insight.cause, CorrelationCause::GpuSaturation);
-    assert_eq!(insight.confidence, 58);
+    // A busy GPU with nothing else to show is weak evidence on its own.
+    assert_eq!(insight.confidence, 40);
 
     let mut model = live(30.0);
     model.llm_model_memory = Some(95);

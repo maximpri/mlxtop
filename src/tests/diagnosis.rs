@@ -82,6 +82,29 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
 }
 
 #[test]
+fn a_slowdown_names_the_change_that_began_it_and_when() {
+    let mut sample = busy_sample();
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::ConcurrentPrefill,
+        confidence: 89,
+        summary: "GEN ↓34.3% (39.3→25.8 tok/s) · correlated: 35.6k prefill began beside generation 2s before the drop".into(),
+        lead: "35.6k prefill began beside generation 2s before the drop".into(),
+        ..CorrelationInsight::default()
+    };
+    let finding = assess(&sample);
+    assert_eq!(finding.title, "Generation slowed");
+    assert_eq!(
+        finding.context,
+        "WITH 35.6k prefill began beside generation 2s before the drop · high confidence"
+    );
+    assert_eq!(
+        finding.next,
+        "Expected while the prompt prefills; recheck after it finishes."
+    );
+}
+
+#[test]
 fn missing_live_rates_do_not_hide_critical_memory_pressure() {
     let mut sample = Sample {
         pressure: "RED".into(),

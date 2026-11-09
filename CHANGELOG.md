@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Diagnosis
+
+- **A slowdown names the change that started it.** The throughput engine now
+  correlates events: it finds when generation began to slow and leads with
+  what changed just before that, provided it still holds. That can be a
+  prompt starting to prefill beside a running answer, another request
+  joining, a prompt several times longer than recent ones, or the onset of
+  pressure, paging, thermal limiting or Metal memory crossing 90%. For
+  example: `GEN ↓34.3% (39.3→25.8 tok/s) · correlated: 35.6k prefill began
+  beside generation 2s before the drop`.
+  A GPU at 99% or a full Metal heap, which hold through any decode, no
+  longer headline the diagnosis; they stay in the details. With several
+  requests running, the longest running context now counts even though the
+  runtime reports no single prompt size.
+
 ### Dashboards
 
 - **Queue shows what each request is doing.** Each request gets a row with

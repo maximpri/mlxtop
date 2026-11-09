@@ -378,6 +378,7 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
             confidence: 85,
             summary: "throughput fell".into(),
             details: "thermal".into(),
+            lead: String::new(),
             event_key: Some(CorrelationKey {
                 direction: ThroughputDirection::Down,
                 cause: CorrelationCause::Thermal,

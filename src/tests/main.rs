@@ -3347,8 +3347,17 @@ fn correlation_explains_a_generation_drop_with_contemporaneous_signals() {
     assert_eq!(insight.direction, ThroughputDirection::Down);
     assert_eq!(insight.cause, CorrelationCause::ContextGrowth);
     assert!(insight.summary.contains("GEN ↓16.7%"));
-    assert!(insight.summary.contains("GPU 99% busy"));
-    assert!(insight.summary.contains("context"));
+    // The prompt grew as the drop began; a GPU that was already saturated is
+    // supporting detail, not the headline evidence.
+    assert!(
+        insight
+            .summary
+            .contains("prompt 20.0k → 30.0k as the drop began"),
+        "{}",
+        insight.summary
+    );
+    assert!(!insight.summary.contains("GPU 99%"), "{}", insight.summary);
+    assert!(insight.details.contains("GPU 99% busy"));
     assert!(insight.details.contains("Metal MEM 96%"));
     assert_eq!(
         insight.event_key,
@@ -5071,4 +5080,111 @@ fn reported_prefill_keeps_its_last_result_label() {
         ..Sample::default()
     };
     assert_eq!(llm_prefill_rate_label(&sample), "LAST PREFILL 133.2 tok/s");
+}
+
+/// One second of an oMLX run on a busy, nearly full GPU: `gen` tok/s summed
+/// over generating requests, plus each running request's prompt and whether
+/// it is still prefilling.
+fn busy_run(second: u64, gen: f64, requests: &[(u64, bool)]) -> CorrelationObservation {
+    CorrelationObservation {
+        provider: "oMLX".into(),
+        model: "Qwen".into(),
+        generation_tps: Some(gen),
+        gpu_util: Some(99),
+        metal_in_use: Some(24_576 * crate::domain::MIB),
+        metal_alloc: Some(24_960 * crate::domain::MIB),
+        pressure: 1,
+        active_requests: Some(requests.len() as u64),
+        prefilling: requests.iter().filter(|(_, prefill)| *prefill).count() as u64,
+        generating: requests.iter().filter(|(_, prefill)| !*prefill).count() as u64,
+        largest_prompt: requests.iter().map(|(prompt, _)| *prompt).max(),
+        prefill_prompt: requests
+            .iter()
+            .filter(|(_, prefill)| *prefill)
+            .map(|(prompt, _)| *prompt)
+            .max(),
+        at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(second)),
+        ..CorrelationObservation::default()
+    }
+}
+
+#[test]
+fn a_slowdown_is_attributed_to_the_prefill_that_began_just_before_it() {
+    // One request generates at ~39 tok/s; then a 35.6k prompt starts to
+    // prefill beside it and generation falls to 25.8 tok/s two seconds later.
+    // GPU 99% and Metal 97% hold throughout, so they are not the news.
+    let mut history: Vec<CorrelationObservation> = (0..6)
+        .map(|second| busy_run(second, 39.3, &[(11_400, false)]))
+        .collect();
+    history.push(busy_run(6, 38.9, &[(11_400, false), (35_628, true)]));
+    history.push(busy_run(7, 37.5, &[(11_400, false), (35_628, true)]));
+    let current = busy_run(8, 25.8, &[(11_400, false), (35_628, true)]);
+    let refs: Vec<&CorrelationObservation> = history.iter().collect();
+    let insight = correlate_history(&current, &refs, Some(39.3), defaults());
+    assert_eq!(insight.direction, ThroughputDirection::Down);
+    assert_eq!(insight.cause, CorrelationCause::ConcurrentPrefill);
+    assert!(
+        insight
+            .summary
+            .contains("35.6k prefill began beside generation 2s before the drop"),
+        "{}",
+        insight.summary
+    );
+    assert!(!insight.summary.contains("GPU 99%"), "{}", insight.summary);
+    assert_eq!(insight.confidence_label(), "high");
+}
+
+#[test]
+fn a_slowdown_after_a_much_longer_prompt_names_the_prompt() {
+    // Short prompts decoded at ~35 tok/s; a 50.7k prompt decodes at 22.
+    let mut history: Vec<CorrelationObservation> = Vec::new();
+    for (second, prompt) in [(0, 2_200), (1, 3_300), (2, 4_000), (3, 11_400)] {
+        history.push(busy_run(second, 35.0, &[(prompt, false)]));
+    }
+    // Long after the prompt arrived, the drop still names it.
+    for second in 4..10 {
+        history.push(busy_run(second, 22.0, &[(50_705, false)]));
+    }
+    let current = busy_run(10, 22.2, &[(50_705, false)]);
+    let refs: Vec<&CorrelationObservation> = history.iter().collect();
+    let insight = correlate_history(&current, &refs, Some(35.0), defaults());
+    assert_eq!(
+        insight.cause,
+        CorrelationCause::ContextGrowth,
+        "{}",
+        insight.summary
+    );
+    // The drop began with the prompt change, eight samples back; the lookback
+    // follows the slow run to its start rather than the last few samples.
+    assert!(
+        insight
+            .summary
+            .contains("prompt 11.4k → 50.7k as the drop began"),
+        "{}",
+        insight.summary
+    );
+}
+
+#[test]
+fn a_request_joining_explains_a_per_request_slowdown() {
+    let mut history: Vec<CorrelationObservation> = (0..5)
+        .map(|second| busy_run(second, 40.0, &[(9_000, false)]))
+        .collect();
+    history.push(busy_run(5, 40.0, &[(9_000, false), (9_200, false)]));
+    let current = busy_run(6, 30.0, &[(9_000, false), (9_200, false)]);
+    let refs: Vec<&CorrelationObservation> = history.iter().collect();
+    let insight = correlate_history(&current, &refs, Some(40.0), defaults());
+    assert_eq!(
+        insight.cause,
+        CorrelationCause::Concurrency,
+        "{}",
+        insight.summary
+    );
+    assert!(
+        insight
+            .summary
+            .contains("request joined (1 → 2 running) 1s before the drop"),
+        "{}",
+        insight.summary
+    );
 }

@@ -10,6 +10,7 @@ use crate::formatting::{
     pressure_state_label, rate, signed_rate,
 };
 use std::collections::VecDeque;
+use std::time::SystemTime;
 pub(crate) const CORRELATION_HISTORY_LIMIT: usize = 16;
 pub(crate) const THROUGHPUT_CHANGE_MIN_TPS: f64 = 2.0;
 pub(crate) const THROUGHPUT_CHANGE_RATIO: f64 = 0.10;
@@ -35,6 +36,153 @@ pub(crate) struct CorrelationObservation {
     pub(crate) context_tokens: Option<u64>,
     pub(crate) active_requests: Option<u64>,
     pub(crate) waiting_requests: Option<u64>,
+    /// Running requests reading their prompt, and writing their answer.
+    pub(crate) prefilling: u64,
+    pub(crate) generating: u64,
+    /// The largest prompt among running requests, and among those prefilling.
+    pub(crate) largest_prompt: Option<u64>,
+    pub(crate) prefill_prompt: Option<u64>,
+    pub(crate) at: Option<SystemTime>,
+}
+
+/// Lookback before a drop's first slow sample in which a change is a candidate
+/// cause: samples are taken every second or two, and a runtime's rate lags.
+const EVENT_LOOKBACK: usize = 3;
+
+/// Something that changed between two samples, which a slowdown that starts
+/// soon after can be attributed to.
+struct Event {
+    cause: CorrelationCause,
+    text: String,
+    /// Position in the history, oldest first; the current sample is last.
+    index: usize,
+    at: Option<SystemTime>,
+}
+
+fn running(observation: &CorrelationObservation) -> u64 {
+    observation.prefilling + observation.generating
+}
+
+/// The changes from one sample to the next that can slow generation, most
+/// specific first: a prompt starting to prefill beside a running answer
+/// explains a request joining, so it is reported instead.
+fn events_between(
+    previous: &CorrelationObservation,
+    current: &CorrelationObservation,
+    index: usize,
+    thresholds: Thresholds,
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut push = |cause, text: String| {
+        events.push(Event {
+            cause,
+            text,
+            index,
+            at: current.at,
+        })
+    };
+    let beside_generation = current.generating > 0 || previous.generating > 0;
+    if current.prefilling > previous.prefilling && beside_generation {
+        push(
+            CorrelationCause::ConcurrentPrefill,
+            match current.prefill_prompt {
+                Some(prompt) => {
+                    format!("{} prefill began beside generation", compact_tokens(prompt))
+                }
+                None => "a prefill began beside generation".into(),
+            },
+        );
+    } else if running(current) > running(previous) && running(current) > 1 {
+        push(
+            CorrelationCause::Concurrency,
+            format!(
+                "request joined ({} → {} running)",
+                running(previous),
+                running(current)
+            ),
+        );
+    }
+    if let (Some(before), Some(after)) = (previous.largest_prompt, current.largest_prompt) {
+        if after >= before.saturating_add(CONTEXT_GROWTH_TOKENS) && after >= before * 3 / 2 {
+            push(
+                CorrelationCause::ContextGrowth,
+                format!(
+                    "prompt {} → {}",
+                    compact_tokens(before),
+                    compact_tokens(after)
+                ),
+            );
+        }
+    }
+    if current.pressure > previous.pressure && current.pressure >= 2 {
+        push(
+            CorrelationCause::MemoryPressure,
+            format!(
+                "memory pressure rose to {}",
+                if current.pressure >= 4 {
+                    "critical"
+                } else {
+                    "watch"
+                }
+            ),
+        );
+    }
+    if current.paging_rate >= thresholds.swap_warn_rate
+        && previous.paging_rate < thresholds.swap_warn_rate
+    {
+        push(
+            CorrelationCause::Paging,
+            format!("paging began ({})", rate(current.paging_rate)),
+        );
+    }
+    if current.thermal_limited && !previous.thermal_limited {
+        push(CorrelationCause::Thermal, "thermal limiting began".into());
+    }
+    let metal = |o: &CorrelationObservation| fraction(o.metal_in_use, o.metal_alloc);
+    if metal(current).is_some_and(|r| r >= 0.90) && metal(previous).is_none_or(|r| r < 0.90) {
+        push(
+            CorrelationCause::MetalMemory,
+            format!(
+                "Metal memory crossed {:.0}%",
+                metal(current).unwrap_or(0.0) * 100.0
+            ),
+        );
+    }
+    events
+}
+
+/// Whether the change an event marks is still in effect: a prefill that has
+/// finished or pressure that has eased no longer explains a slow sample.
+fn still_holds(
+    cause: CorrelationCause,
+    then: &CorrelationObservation,
+    now: &CorrelationObservation,
+    thresholds: Thresholds,
+) -> bool {
+    match cause {
+        CorrelationCause::ConcurrentPrefill => now.prefilling > 0 && now.generating > 0,
+        CorrelationCause::Concurrency => running(now) > 1,
+        CorrelationCause::ContextGrowth => now.largest_prompt >= then.largest_prompt,
+        CorrelationCause::MemoryPressure => now.pressure >= 2,
+        CorrelationCause::Paging => now.paging_rate >= thresholds.swap_warn_rate,
+        CorrelationCause::Thermal => now.thermal_limited,
+        CorrelationCause::MetalMemory => {
+            fraction(now.metal_in_use, now.metal_alloc).is_some_and(|r| r >= 0.90)
+        }
+        _ => true,
+    }
+}
+
+/// Seconds between two sample times, in words, when both are known.
+fn gap_label(event: Option<SystemTime>, onset: Option<SystemTime>) -> String {
+    match event
+        .zip(onset)
+        .and_then(|(event, onset)| onset.duration_since(event).ok())
+    {
+        Some(gap) if gap.as_secs() == 0 => " as the drop began".into(),
+        Some(gap) => format!(" {}s before the drop", gap.as_secs()),
+        None => String::new(),
+    }
 }
 
 #[derive(Default)]
@@ -396,6 +544,18 @@ pub(crate) fn correlation_evidence_label(sample: &Sample) -> String {
             .llm_waiting_requests
             .map(|waiting| format!("queue {waiting} waiting"))
             .unwrap_or_else(|| "queueing".into()),
+        CorrelationCause::ConcurrentPrefill => sample
+            .llm_requests
+            .iter()
+            .filter(|r| !r.completed && !r.queued && r.prefilled.is_some())
+            .map(|r| r.prompt)
+            .max()
+            .map(|prompt| format!("{} prefill beside generation", compact_tokens(prompt)))
+            .unwrap_or_else(|| "prefill beside generation".into()),
+        CorrelationCause::Concurrency => sample
+            .llm_active_requests
+            .map(|active| format!("{active} requests running"))
+            .unwrap_or_else(|| "concurrent requests".into()),
         CorrelationCause::ContextGrowth => llm_context_tokens(sample)
             .map(|tokens| format!("context {}", compact_tokens(tokens)))
             .unwrap_or_else(|| "context/KV".into()),
@@ -421,16 +581,19 @@ impl CorrelationEngine {
             return CorrelationInsight::default();
         }
         let current = CorrelationObservation::from_sample(sample);
-        let previous = self.observations.back().cloned();
-        let comparable_previous = previous
-            .as_ref()
-            .filter(|previous| {
-                previous.provider == current.provider && previous.model == current.model
-            })
-            .cloned();
+        // The run of samples from this provider and model up to now: a
+        // change of either starts a new history.
+        let comparable: Vec<&CorrelationObservation> = self
+            .observations
+            .iter()
+            .rev()
+            .take_while(|o| o.provider == current.provider && o.model == current.model)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         let baseline = self.baseline(&current.provider, &current.model);
-        let insight =
-            correlate_observations(&current, comparable_previous.as_ref(), baseline, thresholds);
+        let insight = correlate_history(&current, &comparable, baseline, thresholds);
 
         self.observations.push_back(current);
         while self.observations.len() > CORRELATION_HISTORY_LIMIT {
@@ -466,6 +629,13 @@ impl CorrelationEngine {
 
 impl CorrelationObservation {
     pub(crate) fn from_sample(sample: &Sample) -> Self {
+        // Runtimes report prefill progress only while a prompt is being read.
+        let running: Vec<_> = sample
+            .llm_requests
+            .iter()
+            .filter(|r| !r.completed && !r.queued)
+            .collect();
+        let prefilling: Vec<_> = running.iter().filter(|r| r.prefilled.is_some()).collect();
         Self {
             provider: sample.llm_provider.clone(),
             model: sample.llm_model.clone(),
@@ -485,9 +655,25 @@ impl CorrelationObservation {
             model_memory_max: sample.llm_model_memory_max,
             metal_in_use: sample.gpu_in_use,
             metal_alloc: sample.gpu_alloc,
-            context_tokens: llm_context_tokens(sample),
+            // With several requests the runtime reports no one prompt size;
+            // the longest running context still slows its own decode.
+            context_tokens: llm_context_tokens(sample).or_else(|| {
+                running
+                    .iter()
+                    .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
+                    .max()
+            }),
             active_requests: sample.llm_active_requests,
             waiting_requests: sample.llm_waiting_requests,
+            prefilling: prefilling.len() as u64,
+            generating: (running.len() - prefilling.len()) as u64,
+            largest_prompt: running
+                .iter()
+                .map(|r| r.prompt)
+                .max()
+                .or(sample.llm_prompt_tokens),
+            prefill_prompt: prefilling.iter().map(|r| r.prompt).max(),
+            at: sample.llm_observed_at.or_else(|| Some(SystemTime::now())),
         }
     }
 }
@@ -498,12 +684,29 @@ pub(crate) struct CorrelationFactor {
     pub(crate) evidence: String,
 }
 
+#[cfg(test)]
 pub(crate) fn correlate_observations(
     current: &CorrelationObservation,
     previous: Option<&CorrelationObservation>,
     baseline: Option<f64>,
     thresholds: Thresholds,
 ) -> CorrelationInsight {
+    let history: Vec<&CorrelationObservation> = previous.into_iter().collect();
+    correlate_history(current, &history, baseline, thresholds)
+}
+
+/// Attribute a throughput change to what the host and the workload are doing
+/// now, and above all to what changed just before the slowdown began: a
+/// request joining, a prefill starting beside generation, a longer prompt, a
+/// pressure or paging onset. Conditions that hold through normal work, such
+/// as a busy GPU, rank below a change that lines up with the drop.
+pub(crate) fn correlate_history(
+    current: &CorrelationObservation,
+    history: &[&CorrelationObservation],
+    baseline: Option<f64>,
+    thresholds: Thresholds,
+) -> CorrelationInsight {
+    let previous = history.last().copied();
     let current_tps = current.generation_tps.filter(|value| {
         value.is_finite() && (*value > 0.0 || current.active_requests.unwrap_or_default() > 0)
     });
@@ -529,6 +732,105 @@ pub(crate) fn correlate_observations(
     };
 
     let mut factors = Vec::new();
+
+    // Requests sharing the engine. A prefill beside generation stalls decode
+    // while the prompt is read; concurrent answers split the GPU.
+    if current.prefilling > 0 && current.generating > 0 {
+        push_correlation_factor(
+            &mut factors,
+            CorrelationCause::ConcurrentPrefill,
+            85,
+            match current.prefill_prompt {
+                Some(prompt) => format!("{} prefill beside generation", compact_tokens(prompt)),
+                None => "prefill beside generation".into(),
+            },
+        );
+    } else if running(current) > 1 {
+        push_correlation_factor(
+            &mut factors,
+            CorrelationCause::Concurrency,
+            70,
+            format!("{} requests running", running(current)),
+        );
+    }
+    // A prompt much longer than the recent ones decodes more slowly.
+    let mut recent_prompts: Vec<u64> = history
+        .iter()
+        .filter_map(|o| o.largest_prompt)
+        .filter(|prompt| Some(*prompt) != current.largest_prompt)
+        .collect();
+    recent_prompts.sort_unstable();
+    recent_prompts.dedup();
+    if let (Some(prompt), Some(&reference)) = (
+        current.largest_prompt,
+        recent_prompts.get(recent_prompts.len().saturating_sub(1) / 2),
+    ) {
+        if direction == ThroughputDirection::Down
+            && reference > 0
+            && prompt >= reference.saturating_add(CONTEXT_GROWTH_TOKENS)
+            && prompt >= reference * 3 / 2
+        {
+            push_correlation_factor(
+                &mut factors,
+                CorrelationCause::ContextGrowth,
+                80,
+                format!(
+                    "prompt {} ({:.1}× recent {})",
+                    compact_tokens(prompt),
+                    prompt as f64 / reference as f64,
+                    compact_tokens(reference)
+                ),
+            );
+        }
+    }
+
+    // What changed just before the drop began leads the explanation.
+    if direction == ThroughputDirection::Down {
+        let baseline = baseline.unwrap_or_default();
+        let slow = |o: &CorrelationObservation| {
+            o.generation_tps.is_some_and(|tps| {
+                tps <= baseline - THROUGHPUT_CHANGE_MIN_TPS
+                    && tps <= baseline * (1.0 - THROUGHPUT_CHANGE_RATIO)
+            })
+        };
+        let all: Vec<&CorrelationObservation> = history
+            .iter()
+            .copied()
+            .chain(std::iter::once(current))
+            .collect();
+        let mut onset = all.len() - 1;
+        while onset > 0 && slow(all[onset - 1]) {
+            onset -= 1;
+        }
+        let from = onset.saturating_sub(EVENT_LOOKBACK).max(1);
+        let events: Vec<Event> = (from..all.len())
+            .flat_map(|index| events_between(all[index - 1], all[index], index, thresholds))
+            .collect();
+        for event in events
+            .into_iter()
+            .filter(|event| still_holds(event.cause, all[event.index], current, thresholds))
+        {
+            // Nearest before the onset scores highest; changes during the
+            // drop may deepen it but did not start it.
+            let score = if event.index <= onset {
+                97 - (onset - event.index) as u8 * 4
+            } else {
+                78
+            };
+            let when = if event.index <= onset {
+                gap_label(event.at, all[onset].at)
+            } else {
+                " during the drop".into()
+            };
+            push_correlation_factor(
+                &mut factors,
+                event.cause,
+                score,
+                format!("{}{when}", event.text),
+            );
+        }
+    }
+
     if current.thermal_limited {
         push_correlation_factor(&mut factors, CorrelationCause::Thermal, 95, "thermal limit");
     }
@@ -606,14 +908,15 @@ pub(crate) fn correlate_observations(
             push_correlation_factor(
                 &mut factors,
                 CorrelationCause::GpuSaturation,
-                if crossed { 95 } else { 72 },
+                // Decode keeps a GPU saturated; only the crossing is news.
+                if crossed { 95 } else { 50 },
                 format!("GPU {gpu}% busy"),
             );
         } else if u64::from(gpu) >= thresholds.gpu_warn_load {
             push_correlation_factor(
                 &mut factors,
                 CorrelationCause::GpuSaturation,
-                58,
+                40,
                 format!("GPU {gpu}% busy"),
             );
         }
@@ -636,7 +939,7 @@ pub(crate) fn correlate_observations(
         push_correlation_factor(
             &mut factors,
             CorrelationCause::MetalMemory,
-            if crossed { 90 } else { 68 },
+            if crossed { 90 } else { 55 },
             evidence,
         );
     }
@@ -713,6 +1016,13 @@ pub(crate) fn correlate_observations(
         );
     }
     factors.sort_by_key(|factor| std::cmp::Reverse(factor.score));
+    // One line per cause: the strongest evidence for it, usually its onset.
+    let mut seen = Vec::new();
+    factors.retain(|factor| {
+        let first = !seen.contains(&factor.cause);
+        seen.push(factor.cause);
+        first
+    });
 
     let cause = factors
         .first()
@@ -766,6 +1076,10 @@ pub(crate) fn correlate_observations(
         confidence,
         summary,
         details,
+        lead: factors
+            .first()
+            .map(|factor| factor.evidence.clone())
+            .unwrap_or_default(),
         event_key,
         delta_percent,
     }

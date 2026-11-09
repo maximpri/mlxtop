@@ -187,7 +187,13 @@ colors in time-series history instead of recoloring old samples on refresh.
   token counts and the recent median. GPU utilization alone establishes
   neither a slowdown nor a compute bottleneck. Diagnostics should pair a
   measured throughput drop with a supporting signal, label correlation and
-  confidence, and give a short testable next step. Wrap advice instead of
+  confidence, and give a short testable next step. Correlate events, not
+  just states: find where the drop began and lead with the change just
+  before it that still holds (a prefill starting beside generation, a request
+  joining, a prompt jump, a pressure, paging, thermal or Metal-memory onset),
+  saying how long before the drop it happened. Conditions that hold through
+  normal work, such as a saturated GPU or a full Metal heap, rank below any
+  such change and stay in the details. Wrap advice instead of
   truncating it. Avoid generic tuning advice when no problem is established.
 - Ring the terminal bell once when critical memory pressure or severe paging
   begins. Keep a visible, acknowledgeable banner. High GPU utilization alone

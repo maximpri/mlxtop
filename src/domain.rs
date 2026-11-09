@@ -230,6 +230,10 @@ pub(crate) enum CorrelationCause {
     MetalMemory,
     GpuSaturation,
     Queueing,
+    /// A prompt prefilling beside a request that is generating.
+    ConcurrentPrefill,
+    /// Several requests generating at once share the GPU.
+    Concurrency,
     ContextGrowth,
     ModelMemory,
     Runtime,
@@ -246,6 +250,8 @@ impl CorrelationCause {
             Self::MetalMemory => "Metal memory pressure",
             Self::GpuSaturation => "GPU saturation",
             Self::Queueing => "queueing",
+            Self::ConcurrentPrefill => "prefill beside generation",
+            Self::Concurrency => "concurrent requests",
             Self::ContextGrowth => "context/KV growth",
             Self::ModelMemory => "model memory growth",
             Self::Runtime => "workload/runtime change",
@@ -259,6 +265,8 @@ impl CorrelationCause {
             | Self::MetalMemory
             | Self::GpuSaturation
             | Self::Queueing
+            | Self::ConcurrentPrefill
+            | Self::Concurrency
             | Self::ContextGrowth
             | Self::ModelMemory
             | Self::Runtime => Tone::Yellow,
@@ -280,6 +288,8 @@ pub(crate) struct CorrelationInsight {
     pub(crate) confidence: u8,
     pub(crate) summary: String,
     pub(crate) details: String,
+    /// The strongest factor's evidence, such as the change that began the drop.
+    pub(crate) lead: String,
     pub(crate) event_key: Option<CorrelationKey>,
     /// Change from the rolling throughput baseline, in percent.
     pub(crate) delta_percent: Option<f64>,

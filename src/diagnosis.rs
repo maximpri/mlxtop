@@ -124,7 +124,12 @@ fn assess_observation(sample: &Sample) -> Finding {
             .next()
             .unwrap_or("")
             .to_owned();
-        let evidence = correlation_evidence_label(sample);
+        // The engine's lead names the change that began the drop and when.
+        let evidence = if sample.correlation.lead.is_empty() {
+            correlation_evidence_label(sample)
+        } else {
+            sample.correlation.lead.clone()
+        };
         finding.context =
             if sample.correlation.cause == CorrelationCause::Runtime || evidence.is_empty() {
                 "No matching system signal".into()
@@ -141,9 +146,12 @@ fn assess_observation(sample: &Sample) -> Finding {
             | CorrelationCause::ModelMemory
             | CorrelationCause::MetalMemory => "Free memory; recheck generation speed.",
             CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
-            CorrelationCause::Queueing | CorrelationCause::GpuSaturation => {
-                "Compare speed with one active request."
+            CorrelationCause::ConcurrentPrefill => {
+                "Expected while the prompt prefills; recheck after it finishes."
             }
+            CorrelationCause::Queueing
+            | CorrelationCause::Concurrency
+            | CorrelationCause::GpuSaturation => "Compare speed with one active request.",
             CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
             CorrelationCause::Runtime | CorrelationCause::None => {
                 "Compare prompt size and runtime settings."
