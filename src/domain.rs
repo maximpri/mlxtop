@@ -49,7 +49,8 @@ pub(crate) enum EventKind {
 impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
-            "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" => Self::Llm,
+            "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED"
+            | "SETTLED" => Self::Llm,
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -129,6 +130,9 @@ pub(crate) struct ChartPoint {
     pub(crate) value: Option<u64>,
     pub(crate) tone: Tone,
     pub(crate) observed_at: SystemTime,
+    /// Set while generation was slow or stalled, in that finding's colour:
+    /// every chart shades the same samples, so signals line up by eye.
+    pub(crate) drop: Option<Tone>,
 }
 
 #[derive(Default)]
@@ -306,6 +310,36 @@ pub(crate) struct CorrelationInsight {
     pub(crate) event_key: Option<CorrelationKey>,
     /// Change from the rolling throughput baseline, in percent.
     pub(crate) delta_percent: Option<f64>,
+    /// The slowdown this sample belongs to, from its first slow sample.
+    pub(crate) episode: Option<DropEpisode>,
+    /// Set on the sample where a slowdown ended.
+    pub(crate) ended: Option<DropEnd>,
+    /// This cause was already journaled for this slowdown.
+    pub(crate) repeat: bool,
+}
+
+/// One slowdown, from the sample where speed first fell to now. The speed
+/// it fell from stays fixed, so a long slowdown is not mistaken for normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DropEpisode {
+    /// Normal speed before the drop, in tok/s.
+    pub(crate) reference: f64,
+    /// The slowest speed seen so far.
+    pub(crate) low: f64,
+    pub(crate) seconds: f64,
+    /// Samples in the slowdown, this one included.
+    pub(crate) samples: u32,
+}
+
+/// How a slowdown ended: speed came back, or it held with nothing on the
+/// host to explain it and became the request's normal speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DropEnd {
+    pub(crate) settled: bool,
+    pub(crate) seconds: f64,
+    pub(crate) low: f64,
+    pub(crate) rate: f64,
+    pub(crate) reference: f64,
 }
 
 /// Cache reuse bands, shared by the cache chart and the prompt's CACHED share.

@@ -633,6 +633,8 @@ impl Collector {
             self.thresholds,
         );
 
+        self.shade_drop(previous.as_ref(), &sample);
+
         self.record_journal_events(previous.as_ref(), &sample);
         diagnostics_log(
             "INFO",
@@ -664,6 +666,34 @@ impl Collector {
         );
         self.current = sample.clone();
         sample
+    }
+
+    /// Every chart shades the samples of a slowdown or stall, back to the
+    /// first slow one, so what each signal did then lines up by eye.
+    pub(crate) fn shade_drop(&mut self, previous: Option<&Sample>, sample: &Sample) {
+        if !sample.correlation.is_material_drop() {
+            return;
+        }
+        let tone = sample.correlation.tone();
+        let began = previous.is_none_or(|previous| !previous.correlation.is_material_drop());
+        let samples = match sample.correlation.episode {
+            Some(episode) if began => episode.samples as usize,
+            _ => 1,
+        };
+        for history in [
+            &mut self.generation_history,
+            &mut self.prefill_history,
+            &mut self.cache_history,
+            &mut self.disk_history,
+            &mut self.load_history,
+            &mut self.swap_history,
+            &mut self.compression_history,
+            &mut self.gpu_history,
+        ] {
+            for point in history.iter_mut().rev().take(samples) {
+                point.drop = Some(tone);
+            }
+        }
     }
 
     pub(crate) fn view(&self) -> CollectorView {
@@ -855,6 +885,7 @@ impl Collector {
             // and what to check; one when a stall ends, with how long it was.
             if sample.correlation.is_material_drop()
                 && previous.correlation.event_key != sample.correlation.event_key
+                && !sample.correlation.repeat
             {
                 let insight = &sample.correlation;
                 let (state, what) = if insight.cause == CorrelationCause::Stall {
@@ -907,6 +938,30 @@ impl Collector {
                     },
                     Tone::Green,
                 );
+            }
+
+            // One row when a slowdown ends: how long it lasted and how deep
+            // it went, or that the slower speed is now the request's own.
+            if let Some(end) = sample.correlation.ended {
+                if end.settled {
+                    add(
+                        "SETTLED",
+                        format!(
+                            "holding {:.1} tok/s for {:.0}s, down from {:.1} · no host cause; now its normal speed",
+                            end.rate, end.seconds, end.reference
+                        ),
+                        Tone::Muted,
+                    );
+                } else {
+                    add(
+                        "RECOVERED",
+                        format!(
+                            "generation back to {:.1} tok/s after {:.0}s · low {:.1} tok/s",
+                            end.rate, end.seconds, end.low
+                        ),
+                        Tone::Green,
+                    );
+                }
             }
 
             if previous.pressure != sample.pressure && !sample.pressure.is_empty() {

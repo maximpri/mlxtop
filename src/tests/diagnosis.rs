@@ -74,6 +74,26 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
     let finding = assess(&sample);
     assert_eq!(finding.title, "Generation slowed");
     assert!(finding.evidence.contains("30.0→24.0 tok/s"));
+    // A slowdown that has lasted says for how long; a condition too weak to
+    // be its reason is not what the next step acts on.
+    let mut lasting = sample.clone();
+    lasting.correlation.episode = Some(crate::domain::DropEpisode {
+        reference: 30.0,
+        low: 22.0,
+        seconds: 34.4,
+        samples: 30,
+    });
+    assert_eq!(
+        assess(&lasting).evidence,
+        "GEN ↓20.0% (30.0→24.0 tok/s) for 34s"
+    );
+    lasting.correlation.episode.as_mut().unwrap().seconds = 3.0;
+    assert_eq!(assess(&lasting).evidence, "GEN ↓20.0% (30.0→24.0 tok/s)");
+    lasting.correlation.confidence = 50;
+    assert_eq!(
+        slowdown_next_step(&lasting),
+        "Compare prompt size and runtime settings."
+    );
     assert!(finding.context.contains("medium confidence"));
     assert_eq!(finding.next, "Compare speed with one active request.");
     sample.llm_status = "stale".into();

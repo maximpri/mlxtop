@@ -16,6 +16,10 @@ pub(super) struct Finding {
 
 /// What to check for a measured slowdown, by its cause.
 pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
+    // A condition scored too low to be offered as the reason is not acted on.
+    if (1..60).contains(&sample.correlation.confidence) {
+        return "Compare prompt size and runtime settings.";
+    }
     match sample.correlation.cause {
         CorrelationCause::Paging => "Reduce active models; recheck paging.",
         CorrelationCause::Compression => "Check whether paging also rises.",
@@ -172,6 +176,14 @@ fn assess_observation(sample: &Sample) -> Finding {
             .next()
             .unwrap_or("")
             .to_owned();
+        // A slowdown that has lasted says for how long.
+        if let Some(episode) = sample
+            .correlation
+            .episode
+            .filter(|episode| episode.seconds >= 5.0)
+        {
+            finding.evidence = format!("{} for {:.0}s", finding.evidence, episode.seconds);
+        }
         // The engine's lead names the change that began the drop and when.
         let evidence = if sample.correlation.lead.is_empty() {
             correlation_evidence_label(sample)

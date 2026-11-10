@@ -9,6 +9,7 @@ impl ChartPoint {
             value,
             tone,
             observed_at: SystemTime::now(),
+            drop: None,
         }
     }
 }
@@ -5649,7 +5650,7 @@ fn disk_work_that_begins_before_a_drop_is_named_as_its_onset() {
     .collect();
     let current = CorrelationObservation::from_sample(&with_disk(base(4, 30.0), 600 * MIB, 0));
     let refs: Vec<&CorrelationObservation> = history.iter().collect();
-    let insight = crate::analysis::correlate_history(&current, &refs, Some(50.0), defaults());
+    let insight = correlate_history(&current, &refs, Some(50.0), defaults());
     assert_eq!(insight.cause, CorrelationCause::DiskIo);
     assert_eq!(
         insight.lead,
@@ -5658,16 +5659,28 @@ fn disk_work_that_begins_before_a_drop_is_named_as_its_onset() {
     assert_eq!(CorrelationCause::DiskIo.label(), "runtime disk I/O");
     assert_eq!(CorrelationCause::DiskIo.tone(), Tone::Yellow);
 
-    // Disk work that started earlier and still runs is named, scored lower.
+    // Disk work that ran just the same while speed was normal is not what
+    // changed: it stays in the details and is not offered as the reason.
     let earlier: Vec<CorrelationObservation> = (0..4)
         .map(|second| {
             CorrelationObservation::from_sample(&with_disk(base(second, 50.0), 600 * MIB, 0))
         })
         .collect();
     let refs: Vec<&CorrelationObservation> = earlier.iter().collect();
-    let insight = crate::analysis::correlate_history(&current, &refs, Some(50.0), defaults());
-    assert_eq!(insight.cause, CorrelationCause::DiskIo);
-    assert_eq!(insight.lead, "disk read 600.0 MiB/s");
+    let insight = correlate_history(&current, &refs, Some(50.0), defaults());
+    assert_eq!(insight.lead, "");
+    assert!(
+        insight
+            .details
+            .contains("disk read 600.0 MiB/s · same before the drop"),
+        "{}",
+        insight.details
+    );
+    assert!(
+        insight.summary.ends_with("no matching system signal"),
+        "{}",
+        insight.summary
+    );
 
     // A trickle is not disk work; writes and saves are.
     let mut observation = current.clone();
@@ -5880,4 +5893,727 @@ fn the_journal_has_one_row_as_a_request_starts_and_one_as_it_ends() {
         finished.journal_line(),
         "r1 · 800 prompt · 25% cached · 64 out · 41.2 tok/s · first token 310 ms"
     );
+}
+
+/// A lone request decoding steadily, with swap traffic at `swap` bytes/s.
+fn paging(second: u64, tps: f64, swap: u64) -> Sample {
+    let mut sample = decoding(second, tps, 500 + second * 40, 0.05, 99);
+    sample.swap_in = swap;
+    sample.rate_ready = true;
+    sample
+}
+
+fn observe_all(engine: &mut CorrelationEngine, samples: &mut [Sample]) {
+    for sample in samples.iter_mut() {
+        sample.correlation = engine.observe(sample, defaults());
+    }
+}
+
+fn journal_rows(samples: &[Sample], states: &[&str]) -> Vec<(String, String)> {
+    let mut collector = Collector::with_host(
+        200,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    collector
+        .signals
+        .iter()
+        .map(|event| (event.state.clone(), event.summary.clone()))
+        .filter(|(state, _)| states.contains(&state.as_str()))
+        .collect()
+}
+
+#[test]
+fn a_slowdown_is_one_episode_from_its_first_slow_sample_until_speed_returns() {
+    // Ten seconds at 50 tok/s, then swap begins and speed halves for forty
+    // seconds: longer than the engine's history. Then both recover.
+    let swap = defaults().swap_warn_rate * 2;
+    let mut samples: Vec<Sample> = (0..10).map(|second| paging(second, 50.0, 0)).collect();
+    samples.extend((10..50).map(|second| paging(second, 25.0, swap)));
+    samples.extend((50..56).map(|second| paging(second, 50.0, 0)));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut samples);
+
+    // The smoothed speed clears the threshold on the first slow sample.
+    assert!(!samples[9].correlation.is_material_drop());
+    let first = &samples[10].correlation;
+    assert!(first.is_material_drop(), "{}", first.summary);
+    assert_eq!(first.cause, CorrelationCause::Paging);
+    assert_eq!(
+        first.lead,
+        format!("paging began ({}) as the drop began", rate(swap))
+    );
+    // Every later slow sample is the same slowdown, measured against the
+    // speed it fell from, not against its own slow samples.
+    for (second, sample) in samples.iter().enumerate().take(50).skip(10) {
+        let insight = &sample.correlation;
+        let episode = insight.episode.expect("in a slowdown");
+        assert!(insight.is_material_drop(), "second {second}");
+        assert_eq!(episode.reference, 50.0, "second {second}");
+        assert_eq!(episode.samples as usize, second - 9, "second {second}");
+        assert_eq!(episode.seconds, (second - 10) as f64, "second {second}");
+        // The change that began it is still named after it left the history.
+        assert_eq!(insight.cause, CorrelationCause::Paging, "second {second}");
+        assert_eq!(insight.lead, first.lead, "second {second}");
+    }
+    let last = &samples[49].correlation;
+    assert_eq!(last.episode.unwrap().low, 25.0);
+    assert_eq!(last.rate_label(), "GEN ↓50.0% (50.0→25.0 tok/s)");
+
+    // It ends when the mean of three samples is back in the normal range.
+    assert!(samples[51].correlation.is_material_drop());
+    let end = samples[52].correlation.ended.expect("recovered");
+    assert!(!samples[52].correlation.is_material_drop());
+    assert_eq!(
+        end,
+        DropEnd {
+            settled: false,
+            seconds: 42.0,
+            low: 25.0,
+            rate: 50.0,
+            reference: 50.0
+        }
+    );
+    // Afterwards the request is compared with its normal speed again.
+    assert!(samples[53..].iter().all(|sample| {
+        !sample.correlation.is_material_drop() && sample.correlation.ended.is_none()
+    }));
+
+    // The Journal has the slowdown once and its end once.
+    assert_eq!(
+        journal_rows(&samples, &["SLOWDOWN", "RECOVERED", "SETTLED"]),
+        vec![
+            (
+                "SLOWDOWN".to_owned(),
+                format!(
+                    "GEN ↓16.7% (50.0→41.7 tok/s) · paging began ({}) as the drop began · high confidence → Reduce active models; recheck paging.",
+                    rate(swap)
+                )
+            ),
+            (
+                "RECOVERED".to_owned(),
+                "generation back to 50.0 tok/s after 42s · low 25.0 tok/s".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_slowdown_nothing_explains_becomes_the_normal_speed_after_thirty_seconds() {
+    let mut samples: Vec<Sample> = (0..10).map(|second| paging(second, 50.0, 0)).collect();
+    samples.extend((10..50).map(|second| paging(second, 35.0, 0)));
+    // Later it drops again, from the speed it settled at.
+    samples.extend((50..56).map(|second| paging(second, 20.0, 0)));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut samples);
+
+    let slow: Vec<usize> = (0..50)
+        .filter(|second| samples[*second].correlation.is_material_drop())
+        .collect();
+    // Unexplained from its first slow sample; thirty seconds later this is
+    // the request's own speed.
+    assert_eq!(slow, (10..40).collect::<Vec<_>>());
+    let end = samples[40].correlation.ended.expect("settled");
+    assert!(end.settled);
+    assert_eq!((end.rate, end.reference, end.seconds), (35.0, 50.0, 30.0));
+    assert!(samples[41..50]
+        .iter()
+        .all(|sample| sample.correlation.direction == ThroughputDirection::Flat));
+    let again = &samples[51].correlation;
+    assert_eq!(again.episode.unwrap().reference, 35.0);
+    assert_eq!(again.rate_label(), "GEN ↓28.6% (35.0→25.0 tok/s)");
+
+    assert_eq!(
+        journal_rows(&samples, &["SLOWDOWN", "RECOVERED", "SETTLED"])
+            .into_iter()
+            .map(|(state, summary)| format!("{state} {summary}"))
+            .collect::<Vec<_>>(),
+        vec![
+            "SLOWDOWN GEN ↓10.0% (50.0→45.0 tok/s) · no change on the host explains it → Compare prompt size and runtime settings.",
+            "SETTLED holding 35.0 tok/s for 30s, down from 50.0 · no host cause; now its normal speed",
+            "SLOWDOWN GEN ↓14.3% (35.0→30.0 tok/s) · no change on the host explains it → Compare prompt size and runtime settings.",
+        ]
+    );
+}
+
+#[test]
+fn a_condition_is_weighed_against_what_it_was_while_speed_was_normal() {
+    let warn = defaults().swap_warn_rate;
+    let history = |swap: u64, pressure: &str| -> Vec<CorrelationObservation> {
+        (0..5)
+            .map(|second| {
+                let mut sample = paging(second, 50.0, swap);
+                sample.pressure = pressure.into();
+                CorrelationObservation::from_sample(&sample)
+            })
+            .collect()
+    };
+    let slow = |swap: u64, pressure: &str| {
+        let mut sample = paging(5, 30.0, swap);
+        sample.pressure = pressure.into();
+        CorrelationObservation::from_sample(&sample)
+    };
+    let analyse = |before: Vec<CorrelationObservation>, now: CorrelationObservation| {
+        let refs: Vec<&CorrelationObservation> = before.iter().collect();
+        correlate_history(&now, &refs, Some(50.0), defaults())
+    };
+
+    // Swap traffic that was just as heavy at full speed is not the reason.
+    let steady = analyse(history(warn * 2, "GREEN"), slow(warn * 2, "GREEN"));
+    assert_eq!(steady.lead, "");
+    assert!(
+        steady
+            .details
+            .contains(&format!("paging {} · same before the drop", rate(warn * 2))),
+        "{}",
+        steady.details
+    );
+    // Swap traffic that grew by half or more is, and says what it was.
+    let grown = analyse(history(warn * 2, "GREEN"), slow(warn * 4, "GREEN"));
+    assert_eq!(grown.cause, CorrelationCause::Paging);
+    assert_eq!(
+        grown.lead,
+        format!("paging {} (was {})", rate(warn * 4), rate(warn * 2))
+    );
+    // A serious condition that held all along stays a possible reason,
+    // at lower confidence, and says it did not change.
+    let critical = analyse(history(0, "RED"), slow(0, "RED"));
+    assert_eq!(critical.cause, CorrelationCause::MemoryPressure);
+    assert_eq!(
+        critical.lead,
+        "memory pressure critical · same before the drop"
+    );
+    assert_eq!(critical.confidence_label(), "medium");
+    // The same condition arriving with the drop is its onset.
+    let arrived = analyse(history(0, "GREEN"), slow(0, "RED"));
+    assert_eq!(
+        arrived.lead,
+        "memory pressure rose to critical as the drop began"
+    );
+    assert_eq!(arrived.confidence_label(), "high");
+}
+
+/// A request of `count` samples from `second`, with its own id and prompt.
+fn request(id: &str, prompt: u64, second: u64, count: u64, tps: f64, swap: u64) -> Vec<Sample> {
+    (second..second + count)
+        .map(|second| {
+            let mut sample = paging(second, tps, swap);
+            sample.llm_requests[0].id = id.into();
+            sample.llm_requests[0].prompt = prompt;
+            sample
+        })
+        .collect()
+}
+
+#[test]
+fn a_request_slow_from_its_start_is_held_to_earlier_requests_of_its_size() {
+    let swap = defaults().swap_warn_rate * 3;
+    let earlier = || {
+        let mut samples = request("a", 60_000, 0, 6, 45.0, 0);
+        samples.extend(request("b", 64_000, 6, 6, 47.0, 0));
+        samples
+    };
+    let run = |last: Vec<Sample>| {
+        let mut samples = earlier();
+        samples.extend(last);
+        let mut engine = CorrelationEngine::default();
+        observe_all(&mut engine, &mut samples);
+        samples
+    };
+
+    // Swapping from its first sample, at well under their speed.
+    let samples = run(request("c", 62_000, 12, 8, 20.0, swap));
+    // Three measured speeds of its own, after the first poll, come first.
+    assert!(samples[12..16]
+        .iter()
+        .all(|sample| !sample.correlation.is_material_drop()));
+    let insight = &samples[16].correlation;
+    assert_eq!(insight.cause, CorrelationCause::Paging);
+    assert_eq!(
+        insight.rate_label(),
+        "GEN ↓56.5% vs earlier requests (46.0→20.0 tok/s)"
+    );
+    assert_eq!(
+        insight.lead,
+        format!("paging began ({}) as the drop began", rate(swap))
+    );
+    // The slowdown is the whole request so far.
+    assert_eq!(insight.episode.unwrap().samples, 5);
+
+    // As slow with nothing on the host to show for it: content, not a fault.
+    let quiet = run(request("c", 62_000, 12, 8, 20.0, 0));
+    assert!(quiet
+        .iter()
+        .all(|sample| !sample.correlation.is_material_drop()));
+    // Only the latest requests are kept as the measure.
+    let mut many: Vec<Sample> = (0..20)
+        .flat_map(|index| request(&format!("r{index}"), 60_000, index * 4, 4, 46.0, 0))
+        .collect();
+    many.extend(request("c", 62_000, 80, 8, 20.0, swap));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut many);
+    assert_eq!(
+        many[84].correlation.rate_label(),
+        "GEN ↓56.5% vs earlier requests (46.0→20.0 tok/s)"
+    );
+    // A much larger prompt has no earlier request to be compared with.
+    let larger = run(request("c", 200_000, 12, 8, 20.0, swap));
+    assert!(larger
+        .iter()
+        .all(|sample| !sample.correlation.is_material_drop()));
+}
+
+/// A sample halfway through a slowdown attributed to swap traffic.
+fn slowed_by_paging() -> Sample {
+    let mut sample = paging(30, 25.0, defaults().swap_warn_rate * 2);
+    sample.vm_available = true;
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Paging,
+        confidence: 97,
+        summary: "GEN ↓50.0% (50.0→25.0 tok/s) · correlated: paging began 1s before the drop"
+            .into(),
+        lead: "paging began 1s before the drop".into(),
+        delta_percent: Some(-50.0),
+        episode: Some(DropEpisode {
+            reference: 50.0,
+            low: 25.0,
+            seconds: 12.0,
+            samples: 6,
+        }),
+        ..CorrelationInsight::default()
+    };
+    sample
+}
+
+/// Ten samples at `normal`, then six at `slow` taken during a slowdown.
+fn history_with_drop(normal: u64, slow: u64, tone: Tone) -> VecDeque<ChartPoint> {
+    let mut history: VecDeque<ChartPoint> = (0..10)
+        .map(|_| ChartPoint::new(Some(normal), Tone::Green))
+        .collect();
+    history.extend((0..6).map(|_| ChartPoint {
+        drop: Some(Tone::Red),
+        ..ChartPoint::new(Some(slow), tone)
+    }));
+    history
+}
+
+fn chart_buffer(
+    app: &App,
+    width: u16,
+    height: u16,
+    name: &'static str,
+    history: &VecDeque<ChartPoint>,
+    metric: ChartMetric,
+) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| app.render_indicator_chart(frame, frame.area(), name, history, metric))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn charts_shade_a_slowdown_and_draw_the_speed_it_fell_from() {
+    let mut app = test_app(0);
+    app.collector.current = slowed_by_paging();
+    let generation = history_with_drop(500, 250, Tone::Red);
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let rows = buffer_rows(&buffer);
+    let text = rows.join("\n");
+    // The reason sits under the bars, as before.
+    assert!(text.contains("▼ paging began 1s before the drop"), "{text}");
+    // The speed it fell from is a dashed line with its value on the axis,
+    // visible exactly where the bars fall short of it.
+    let normal = rows
+        .iter()
+        .position(|row| row.contains('┄'))
+        .expect("a reference line");
+    assert!(
+        rows[normal]
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with("50 "),
+        "{text}"
+    );
+    let dashes: Vec<u16> = (0..60)
+        .filter(|x| buffer[(*x, normal as u16)].symbol() == "┄")
+        .collect();
+    assert!(dashes.iter().all(|x| buffer[(*x, normal as u16)].fg == RED));
+    // The six slow samples are the six columns at the right edge, shaded
+    // from the top of the plot down.
+    let band = drop_band(Tone::Red);
+    let shaded = |buffer: &ratatui::buffer::Buffer| -> Vec<u16> {
+        (1..59).filter(|x| buffer[(*x, 1)].bg == band).collect()
+    };
+    assert_eq!(shaded(&buffer), (53..59).collect::<Vec<_>>());
+    // Bars at the normal speed reach the line and cover it; the slow ones
+    // leave it showing above them.
+    assert!((53..59).all(|x| dashes.contains(&x)), "{dashes:?}");
+    assert!((43..53).all(|x| !dashes.contains(&x)), "{dashes:?}");
+
+    // Every other chart shades the same samples, so they line up.
+    let gpu = history_with_drop(99, 40, Tone::Green);
+    let buffer = chart_buffer(&app, 60, 10, "GPU", &gpu, ChartMetric::Gpu);
+    assert_eq!(shaded(&buffer), (53..59).collect::<Vec<_>>());
+    assert!(!buffer_rows(&buffer).join("\n").contains('▼'));
+    // A warning span is amber; short panels shade their bars' columns too.
+    assert_eq!(drop_band(Tone::Yellow), Color::Rgb(58, 46, 22));
+    let buffer = chart_buffer(
+        &app,
+        30,
+        4,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    assert_eq!(buffer[(28, 1)].bg, band);
+    assert_ne!(buffer[(1, 1)].bg, band);
+
+    // Once the slowdown is over the line goes; the shaded span stays.
+    app.collector.current.correlation = CorrelationInsight::default();
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    assert_eq!(buffer[(58, 1)].bg, band);
+    let text = buffer_rows(&buffer).join("\n");
+    assert!(!text.contains('▼'), "{text}");
+}
+
+#[test]
+fn the_panel_behind_a_slowdown_is_tagged_in_its_colour() {
+    let mut app = test_app(0);
+    app.collector.current = slowed_by_paging();
+    let swap = defaults().swap_warn_rate;
+    let paging_history = history_with_drop(0, swap * 2, Tone::Yellow);
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "paging / I/O",
+        &paging_history,
+        ChartMetric::Swap,
+    );
+    let rows = buffer_rows(&buffer);
+    assert!(rows[9].ends_with(" ▼ GEN ─┘"), "{}", rows[9]);
+    // The border takes the slowdown's colour; the summary keeps its own.
+    assert_eq!(buffer[(0, 0)].fg, RED);
+    assert_eq!(buffer[(59, 5)].fg, RED);
+    assert!(rows[9].contains("page-in"), "{}", rows[9]);
+    // A summary that would run into the tag gives way to it.
+    let narrow = chart_buffer(
+        &app,
+        30,
+        10,
+        "paging / I/O",
+        &paging_history,
+        ChartMetric::Swap,
+    );
+    let bottom = buffer_rows(&narrow).pop().unwrap();
+    assert!(
+        bottom.ends_with(" ▼ GEN ─┘") && !bottom.contains("in "),
+        "{bottom}"
+    );
+    // Other panels are left alone.
+    let gpu = history_with_drop(99, 40, Tone::Green);
+    let buffer = chart_buffer(&app, 60, 10, "GPU", &gpu, ChartMetric::Gpu);
+    assert_ne!(buffer[(0, 0)].fg, RED);
+
+    // Each cause points at the panel that shows its signal.
+    let panel = |cause: CorrelationCause, lead: &str| {
+        let mut insight = app.collector.current.correlation.clone();
+        insight.cause = cause;
+        insight.lead = lead.into();
+        crate::drop_marks::linked(&insight)
+    };
+    for (cause, lead, chart) in [
+        (CorrelationCause::Paging, "paging", Some(Chart::Paging)),
+        (CorrelationCause::Compression, "x", Some(Chart::Compression)),
+        (CorrelationCause::MemoryPressure, "x", Some(Chart::Memory)),
+        (CorrelationCause::ModelMemory, "x", Some(Chart::Memory)),
+        (CorrelationCause::MetalMemory, "x", Some(Chart::Memory)),
+        (CorrelationCause::Thermal, "x", Some(Chart::Gpu)),
+        (CorrelationCause::GpuSaturation, "x", Some(Chart::Gpu)),
+        (CorrelationCause::DiskIo, "x", Some(Chart::Cache)),
+        (
+            CorrelationCause::ConcurrentPrefill,
+            "x",
+            Some(Chart::Prefill),
+        ),
+        (CorrelationCause::Concurrency, "x", Some(Chart::Queue)),
+        (CorrelationCause::Queueing, "x", Some(Chart::Queue)),
+        (CorrelationCause::ContextGrowth, "x", Some(Chart::Prompt)),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · disk read 1 GiB/s",
+            Some(Chart::Cache),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · 3 SSD cache blocks loaded",
+            Some(Chart::Cache),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · paging 80 MiB/s",
+            Some(Chart::Paging),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · memory pressure",
+            Some(Chart::Memory),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · GPU idle",
+            None,
+        ),
+        (CorrelationCause::Runtime, "x", None),
+        // Too weak to be offered as the reason: nothing is tagged.
+        (CorrelationCause::Paging, "", None),
+    ] {
+        assert!(panel(cause, lead) == chart, "{cause:?} {lead}");
+    }
+    let mut healthy = app.collector.current.correlation.clone();
+    healthy.direction = ThroughputDirection::Flat;
+    assert!(crate::drop_marks::linked(&healthy).is_none());
+
+    // A stall is tagged as one; the queue and prompt panels carry tags too.
+    app.collector.current.correlation.cause = CorrelationCause::Stall;
+    app.collector.current.correlation.lead = "no new token for 2s · paging 80 MiB/s".into();
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "paging / I/O",
+        &paging_history,
+        ChartMetric::Swap,
+    );
+    assert!(buffer_rows(&buffer)[9].ends_with(" ▼ STALL ─┘"));
+    app.collector.current.correlation.cause = CorrelationCause::Concurrency;
+    let queue = render_view(60, 8, |frame| {
+        app.draw_operator_chart(frame, frame.area(), Chart::Queue)
+    });
+    assert!(queue.contains("▼ GEN"), "{queue}");
+    app.collector.current.correlation.cause = CorrelationCause::ContextGrowth;
+    let prompt = render_view(80, 8, |frame| app.draw_request_chart(frame, frame.area()));
+    assert!(prompt.contains("▼ GEN"), "{prompt}");
+    // Too small to hold the tag: the panel is left as drawn.
+    let tiny = render_view(8, 3, |frame| app.draw_request_chart(frame, frame.area()));
+    assert!(!tiny.contains('▼'), "{tiny}");
+}
+
+#[test]
+fn a_slowdown_marks_its_samples_on_every_history_back_to_its_first() {
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for _ in 0..8 {
+        for history in [
+            &mut collector.generation_history,
+            &mut collector.swap_history,
+            &mut collector.gpu_history,
+            &mut collector.load_history,
+        ] {
+            history.push_back(ChartPoint::new(Some(1), Tone::Green));
+        }
+    }
+    let marked = |collector: &Collector| -> Vec<usize> {
+        [
+            &collector.generation_history,
+            &collector.swap_history,
+            &collector.gpu_history,
+            &collector.load_history,
+        ]
+        .iter()
+        .map(|history| history.iter().filter(|point| point.drop.is_some()).count())
+        .collect()
+    };
+    let healthy = Sample::default();
+    collector.shade_drop(None, &healthy);
+    assert_eq!(marked(&collector), vec![0; 4]);
+    // Found on its third slow sample: the two before it are marked too.
+    let mut slow = slowed_by_paging();
+    slow.correlation.episode.as_mut().unwrap().samples = 3;
+    collector.shade_drop(Some(&healthy), &slow);
+    assert_eq!(marked(&collector), vec![3; 4]);
+    assert_eq!(collector.gpu_history[5].drop, Some(Tone::Red));
+    assert_eq!(collector.gpu_history[4].drop, None);
+    // While it lasts each new sample is marked as it arrives.
+    for history in [
+        &mut collector.generation_history,
+        &mut collector.gpu_history,
+    ] {
+        history.push_back(ChartPoint::new(Some(1), Tone::Green));
+    }
+    collector.shade_drop(Some(&slow), &slow);
+    assert_eq!(marked(&collector), vec![4, 3, 4, 3]);
+    // A stall has no earlier slow samples to mark.
+    let mut stall = slow.clone();
+    stall.correlation.episode = None;
+    let mut fresh = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for _ in 0..4 {
+        fresh
+            .disk_history
+            .push_back(ChartPoint::new(Some(1), Tone::Cyan));
+    }
+    fresh.shade_drop(None, &stall);
+    assert_eq!(
+        fresh
+            .disk_history
+            .iter()
+            .filter(|p| p.drop.is_some())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_stall_inside_a_slowdown_is_journaled_once_and_the_slowdown_is_not_repeated() {
+    let swap = defaults().swap_warn_rate * 2;
+    let mut samples: Vec<Sample> = (0..10).map(|second| paging(second, 50.0, 0)).collect();
+    samples.extend((10..16).map(|second| paging(second, 25.0, swap)));
+    // No token for three polls, then the same slow speed again.
+    for (second, idle) in [(16, 1.6), (17, 2.6), (18, 3.6)] {
+        let mut stalled = decoding(second, 0.0, 1_140, idle, 0);
+        stalled.swap_in = swap;
+        stalled.rate_ready = true;
+        samples.push(stalled);
+    }
+    samples.extend((19..24).map(|second| paging(second, 25.0, swap)));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut samples);
+
+    let stall = &samples[17].correlation;
+    assert_eq!(stall.cause, CorrelationCause::Stall);
+    // The stall is part of the slowdown it happened in; it does not make
+    // the slowdown look deeper than its slowest decoding.
+    assert_eq!(stall.episode.unwrap().samples, 8);
+    assert_eq!(samples[23].correlation.episode.unwrap().low, 25.0);
+    assert_eq!(samples[23].correlation.cause, CorrelationCause::Paging);
+    assert!(samples[19].correlation.repeat);
+    let states: Vec<String> =
+        journal_rows(&samples, &["SLOWDOWN", "STALL", "RESUMED", "RECOVERED"])
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect();
+    assert_eq!(states, ["SLOWDOWN", "STALL", "RESUMED"]);
+}
+
+/// `count` requests generating at once, `tps` between them.
+fn several(second: u64, tps: f64, count: usize) -> Sample {
+    let mut sample = decoding(second, tps, 500 + second * 40, 0.05, 99);
+    let one = sample.llm_requests[0].clone();
+    sample.llm_requests = (0..count)
+        .map(|index| domain::RequestUsage {
+            id: format!("r{index}"),
+            ..one.clone()
+        })
+        .collect();
+    sample.llm_active_requests = Some(count as u64);
+    sample
+}
+
+#[test]
+fn requests_that_ran_together_at_full_speed_do_not_explain_a_later_drop() {
+    let mut samples: Vec<Sample> = (0..8).map(|second| several(second, 60.0, 2)).collect();
+    samples.extend((8..14).map(|second| several(second, 40.0, 2)));
+    // One finishes: what is left is a different measurement.
+    samples.extend((14..18).map(|second| several(second, 45.0, 1)));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut samples);
+
+    let slow = &samples[10].correlation;
+    assert!(slow.is_material_drop());
+    assert_eq!(slow.episode.unwrap().reference, 60.0);
+    assert_eq!(slow.lead, "", "{}", slow.summary);
+    assert!(
+        slow.details.contains("2 requests running"),
+        "{}",
+        slow.details
+    );
+    assert!(samples[14..].iter().all(|sample| {
+        !sample.correlation.is_material_drop() && sample.correlation.ended.is_none()
+    }));
+
+    // A second request joining as the drop begins is its onset.
+    let mut joined: Vec<Sample> = (0..8).map(|second| several(second, 60.0, 1)).collect();
+    joined.extend((8..12).map(|second| several(second, 40.0, 2)));
+    let history: Vec<CorrelationObservation> = joined[..9]
+        .iter()
+        .map(CorrelationObservation::from_sample)
+        .collect();
+    let refs: Vec<&CorrelationObservation> = history.iter().collect();
+    let insight = correlate_history(
+        &CorrelationObservation::from_sample(&joined[9]),
+        &refs,
+        Some(60.0),
+        defaults(),
+    );
+    assert_eq!(insight.cause, CorrelationCause::Concurrency);
+    assert_eq!(
+        insight.lead,
+        "request joined (1 → 2 running) as the drop began"
+    );
+}
+
+#[test]
+fn a_longer_prompt_slows_generation_and_that_becomes_its_normal_speed() {
+    // A runtime that reports no request list: one prompt size at a time.
+    let reported = |second: u64, tps: f64, prompt: u64| {
+        let mut sample = decoding(second, tps, 0, 0.05, 99);
+        sample.llm_requests.clear();
+        sample.llm_prompt_tokens = Some(prompt);
+        sample
+    };
+    let mut samples: Vec<Sample> = (0..8).map(|second| reported(second, 50.0, 4_000)).collect();
+    samples.extend((8..45).map(|second| reported(second, 30.0, 50_000)));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut samples);
+
+    let slow = &samples[9].correlation;
+    assert_eq!(slow.cause, CorrelationCause::ContextGrowth);
+    assert_eq!(slow.lead, "prompt 4.0k → 50.0k as the drop began");
+    let end = samples[38].correlation.ended.expect("settled");
+    assert!(end.settled);
+    assert!(samples[39..]
+        .iter()
+        .all(|sample| !sample.correlation.is_material_drop()));
 }

@@ -515,3 +515,20 @@ pub(crate) fn empty_view() -> CollectorView {
         operator_history: operator_history::History::default(),
     }
 }
+
+// The engine's analysis without a slowdown in progress, and the rolling
+// baseline it compares several requests with.
+impl CorrelationEngine {
+    pub(crate) fn baseline(&self, provider: &str, model: &str) -> Option<f64> {
+        rolling_baseline(self.observations.iter(), provider, model)
+    }
+}
+
+pub(crate) fn correlate_history(
+    current: &CorrelationObservation,
+    history: &[&CorrelationObservation],
+    baseline: Option<f64>,
+    thresholds: Thresholds,
+) -> CorrelationInsight {
+    correlate(current, history, baseline, thresholds, None, false).0
+}

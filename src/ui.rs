@@ -19,11 +19,12 @@ use crate::formatting::{
 use crate::host::Platform;
 use crate::processes::process_provider;
 use crate::theme::{
-    centered_rect, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
+    centered_rect, drop_band, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED,
+    YELLOW,
 };
 use crate::{
-    gpu_dashboard, memory_composition, model_dashboard, operator_charts, process_memory,
-    request_dashboard, swap_usage,
+    drop_marks, gpu_dashboard, memory_composition, model_dashboard, operator_charts,
+    process_memory, request_dashboard, swap_usage,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -352,6 +353,15 @@ impl App {
             self.request_scroll,
             self.charts.zoom(Chart::Prompt),
         );
+        self.mark_if_linked(frame, area, Chart::Prompt);
+    }
+
+    /// Tags the panel a slowdown is attributed to, in the slowdown's colour.
+    pub(crate) fn mark_if_linked(&self, frame: &mut Frame, area: Rect, chart: Chart) {
+        let insight = &self.collector.current.correlation;
+        if drop_marks::linked(insight) == Some(chart) {
+            drop_marks::mark(frame, area, insight);
+        }
     }
 
     pub(crate) fn draw_operator_chart(&self, frame: &mut Frame, area: Rect, chart: Chart) {
@@ -371,6 +381,7 @@ impl App {
             }
             _ => unreachable!("operator chart expected"),
         }
+        self.mark_if_linked(frame, area, chart);
     }
 
     pub(crate) fn draw_selected_chart(&self, frame: &mut Frame, area: Rect) {
@@ -660,6 +671,11 @@ impl App {
                 .max(1)
         };
         for (column, point) in points.iter().enumerate() {
+            if let Some(band) = point.drop {
+                for row in area.top()..area.bottom() {
+                    frame.buffer_mut()[(area.x + column as u16, row)].set_bg(drop_band(band));
+                }
+            }
             let Some(value) = point.value else {
                 continue;
             };
@@ -869,9 +885,26 @@ impl App {
             ChartMetric::Compression => Some(self.thresholds.compression_warn_rate),
             _ => None,
         };
+        // While generation is slow its chart draws the speed it fell from,
+        // in the slowdown's colour: the gap under that line is the drop.
+        let insight = &sample.correlation;
+        let normal = insight
+            .episode
+            .filter(|_| metric == ChartMetric::Generation && insight.is_material_drop())
+            .map(|episode| (episode.reference * 10.0).round() as u64);
+        let (warning, guide_tone) = match normal {
+            Some(normal) => (Some(normal), insight.tone()),
+            None => (warning, Tone::Yellow),
+        };
         let scale = chart_scale(history, metric, visible_count);
         let scale = match warning {
-            Some(rate) => (0, scale.1.max(crate::chart_scale::ceiling(rate, 1))),
+            Some(rate) => (
+                0,
+                scale.1.max(crate::chart_scale::ceiling(
+                    rate,
+                    if normal.is_some() { 10 } else { 1 },
+                )),
+            ),
             None => scale,
         };
         let top_axis = chart_axis_label(metric, scale.1);
@@ -908,6 +941,12 @@ impl App {
                 format!("avg {}", chart_stat_label(metric, average)),
                 format!("peak {}", chart_stat_label(metric, peak)),
             ]);
+        }
+        if let Some(episode) = insight.episode.filter(|_| normal.is_some()) {
+            details.push(format!(
+                "slow {:.0}s · low {:.1}",
+                episode.seconds, episode.low
+            ));
         }
         // The Overview shares one window, shown once in the top bar; only an
         // expanded chart, which zooms on its own, names its window here.
@@ -1054,9 +1093,22 @@ impl App {
             } else {
                 summary
             };
+            // The panel behind a slowdown carries its tag at the right of
+            // this border; a summary that would run into it gives way.
+            let tag = if drop_marks::linked(insight) == Some(Chart::from(metric)) {
+                Line::from(drop_marks::tag(insight)).width()
+            } else {
+                0
+            };
+            let summary = if tag > 0
+                && Line::from(summary.as_str()).width() + tag + 6 > usize::from(area.width)
+            {
+                String::new()
+            } else {
+                summary
+            };
             // While generation is slow, its chart says why under the bars
             // that show it, in the drop's colour: ▼ and the change behind it.
-            let insight = &sample.correlation;
             let room = usize::from(area.width.saturating_sub(4));
             let reason = (metric == ChartMetric::Generation && insight.is_material_drop())
                 .then(|| {
@@ -1079,6 +1131,7 @@ impl App {
                         .fg(insight.tone().color())
                         .add_modifier(Modifier::BOLD),
                 )),
+                None if summary.is_empty() => Line::default(),
                 None => Line::from(Span::styled(
                     format!(" {summary} "),
                     Style::default().fg(if metric == ChartMetric::Memory {
@@ -1091,6 +1144,7 @@ impl App {
         }
         let mut inner = block.inner(area);
         frame.render_widget(block, area);
+        self.mark_if_linked(frame, area, Chart::from(metric));
         if inner.is_empty() {
             return;
         }
@@ -1467,7 +1521,7 @@ impl App {
                 Some((
                     '┄',
                     if warning.is_some() {
-                        Tone::Yellow
+                        guide_tone
                     } else {
                         Tone::Muted
                     },
@@ -1625,17 +1679,21 @@ impl App {
             let mut run_tone = None;
             // A full block is drawn as a filled cell: terminals leave a gap
             // between rows of glyphs, but not of backgrounds.
-            let style = |(tone, filled, fill): (Tone, bool, bool)| {
+            // Columns sampled during a slowdown are shaded in its colour, on
+            // every chart alike, behind whatever the chart draws there.
+            let style = |(tone, filled, fill, band): (Tone, bool, bool, Option<Tone>)| {
                 let style = Style::default().fg(tone.color());
-                match (filled, fill) {
-                    (true, _) => style.bg(tone.color()),
-                    (false, true) => style.bg(AREA_FILL),
-                    (false, false) => style,
+                match (filled, band, fill) {
+                    (true, _, _) => style.bg(tone.color()),
+                    (false, Some(band), _) => style.bg(drop_band(band)),
+                    (false, None, true) => style.bg(AREA_FILL),
+                    (false, None, false) => style,
                 }
             };
-            for cell in row_cells.iter().take(plot_width).copied() {
+            for (column, cell) in row_cells.iter().take(plot_width).copied().enumerate() {
                 let filled = cell.glyph == '█';
-                let key = (cell.tone, filled, cell.fill);
+                let band = visible_points.get(column).and_then(|point| point.drop);
+                let key = (cell.tone, filled, cell.fill, band);
                 if run_tone != Some(key) {
                     if let Some(key) = run_tone {
                         spans.push(Span::styled(std::mem::take(&mut run), style(key)));

@@ -128,6 +128,7 @@ pub(crate) fn push_history_with_tone(
         tone: if value.is_some() { tone } else { Tone::Muted },
         value,
         observed_at: SystemTime::now(),
+        drop: None,
     });
     while history.len() > limit {
         history.pop_front();

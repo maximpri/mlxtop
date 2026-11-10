@@ -52,6 +52,16 @@ pub(crate) fn card_block<'a>(title: Line<'a>, tone: Tone) -> Block<'a> {
 /// it, and stripe wherever the grade changes from one sample to the next.
 pub(crate) const AREA_FILL: Color = Color::Rgb(33, 42, 56);
 
+/// The background of chart columns sampled while generation was slow or
+/// stalled: a dark tint of that finding's colour, quiet enough to read
+/// bars and lines through.
+pub(crate) fn drop_band(tone: Tone) -> Color {
+    match tone {
+        Tone::Red => Color::Rgb(64, 28, 36),
+        _ => Color::Rgb(58, 46, 22),
+    }
+}
+
 pub(crate) fn llm_status_tone(status: &str) -> Tone {
     match status.to_ascii_lowercase().as_str() {
         "ready" | "idle" => Tone::Green,

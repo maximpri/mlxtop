@@ -1,5 +1,48 @@
 # Changelog
 
+## 3.3.0-rc.4 — 2026-11-09
+
+### Diagnosis
+
+- **A slowdown is remembered until it ends.** The speed generation fell from
+  is fixed when a slowdown begins. Before, the baseline was the middle of the
+  last 16 samples, so a slowdown that lasted longer than about eight of them
+  became the baseline and was reported as normal while still going on. Its
+  first cause now stays its reason for as long as that cause holds.
+- **Conditions are compared with before the drop.** Paging, compression,
+  memory pressure, thermal limiting, a queue, disk work or concurrent
+  requests that were at the same level while speed was normal are no longer
+  offered as the reason. A serious one stays a possible reason at medium
+  confidence and says `same before the drop`; a rate that grew says what it
+  was (`paging 96.0 MiB/s (was 48.0 MiB/s)`).
+- **Requests slow from their start are found.** A request 40% slower than
+  earlier requests of a similar prompt size is reported when the host also
+  shows a reason (paging, pressure, thermal limiting, compression, disk),
+  as `GEN ↓56.5% vs earlier requests (46.0→20.0 tok/s)`.
+- **An unexplained slowdown no longer suggests freeing memory.** The next
+  step followed the strongest condition even when it was too weak to be
+  named as the reason.
+
+### Dashboards
+
+- **Slowdowns are drawn on the charts.** Every time chart shades the samples
+  taken during a slowdown or stall, back to its first slow sample, so the
+  signals line up by eye; the shading stays in the history afterwards.
+- **The generation chart draws the speed it fell from** as a dashed line
+  with its value on the axis, for as long as the slowdown lasts.
+- **The panel behind a slowdown is tagged.** The chart of the signal named
+  as the reason (paging, compression, memory, GPU, cache I/O, prefill, queue
+  or prompt load) takes the slowdown's colour on its border and `▼ GEN` or
+  `▼ STALL` on its bottom edge.
+- The assessment says how long a slowdown has lasted.
+
+### Journal
+
+- **A slowdown has an end.** `RECOVERED generation back to 50.0 tok/s after
+  42s · low 25.0 tok/s`, or `SETTLED` when the lower speed held for 30 s with
+  nothing on the host to explain it and is from then on the normal speed.
+  Each cause is written once per slowdown, however often it changes back.
+
 ## 3.3.0-rc.3 — 2026-11-09
 
 ### Diagnosis

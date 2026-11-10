@@ -385,6 +385,7 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
                 cause: CorrelationCause::Thermal,
             }),
             delta_percent: Some(-20.0),
+            ..CorrelationInsight::default()
         },
         ..Sample::default()
     };

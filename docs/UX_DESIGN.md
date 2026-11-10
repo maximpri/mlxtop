@@ -213,6 +213,38 @@ colors in time-series history instead of recoloring old samples on refresh.
   MiB/s or SSD-cache blocks moved during a drop are named (`disk read 850
   MiB/s · 38 SSD cache blocks loaded · SSD cache full`), as an onset when
   they began before it, and the next step points at the cache disk.
+- A slowdown is one episode, from its first slow sample until speed returns.
+  The speed it fell from is fixed when it begins: a rolling baseline would
+  absorb the slow samples within seconds and call a slowdown that is still
+  going on normal. The change that began it stays its reason for as long as
+  that change holds, also after it has left the recent history. Journal
+  writes its start once, each further cause once, and its end: `RECOVERED`
+  with how long it lasted and its lowest speed, or `SETTLED` when it held for
+  30 s with nothing on the host to explain it (or only a longer prompt) and
+  is from then on the request's normal speed.
+- Weigh a condition against what it was while speed was normal. Paging,
+  compression, pressure, thermal limiting, a queue, disk work or concurrent
+  requests that held at the same level just before the drop are not what
+  changed: mild ones drop out of the explanation, serious ones (critical
+  pressure or paging, thermal limiting) stay at medium confidence and say
+  `same before the drop`. A rate that grew by half or more says what it was
+  (`paging 96.0 MiB/s (was 48.0 MiB/s)`).
+- A request slow from its first samples has no drop of its own. Hold it to
+  earlier requests whose prompts were half to double its size, once there are
+  two: 40% slower than their middle speed is a slowdown only when the host
+  also shows a reason, and the rate says what it is compared with
+  (`GEN ↓56.5% vs earlier requests`). Content alone differs by a third.
+- Draw a slowdown where it happened. Every time chart shades the columns
+  sampled during a slowdown or stall (a dark tint of the finding's colour,
+  behind the chart's own marks), back to its first slow sample, so what each
+  signal did then lines up by eye; the shading stays in the history after it
+  ends. While it lasts, the generation chart draws the speed it fell from as
+  a dashed line in the slowdown's colour with its value on the axis: the gap
+  under it is the drop. The panel that shows the signal named as the reason
+  takes the slowdown's colour on its border and `▼ GEN` (`▼ STALL`) at the
+  right of its bottom edge, the same mark the generation chart puts before
+  the reason. A bottom summary that would run into the tag gives way to it.
+  The assessment says how long a slowdown has lasted from 5 s.
 - Journal gives a request one row as it starts (`PROMPT id · 67.8k prompt ·
   99% cached`) and one as it ends (`DONE id · 1.2k out`). The runtime and
   model are in the header, not on every row. While the runtime lists its
