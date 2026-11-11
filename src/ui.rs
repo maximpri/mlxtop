@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Rendering for Overview, Top, Journal and their overlays.
 use crate::app::App;
+use crate::cache_impact;
 use crate::chart_navigation::Chart;
 use crate::chart_render::{
     bar_cells, chart_axis_label, chart_columns, chart_columns_for_plot, chart_display_value,
@@ -446,8 +447,8 @@ impl App {
         } else {
             0
         };
-        // Host-critical resources come first and take the space: memory,
-        // compression and paging decide whether a model keeps its speed.
+        // Host-critical resources come first and take the space: memory, the
+        // runtime's cache and paging decide whether a model keeps its speed.
         // Prompt size drives KV-cache memory, so it follows. Throughput is the
         // outcome and stays a compact, fixed-height row. Geometry is stable
         // across idle and live states.
@@ -467,7 +468,7 @@ impl App {
             (available * 22 / 100).clamp(5, JOURNAL_MAX_HEIGHT)
         };
         // With no requests yet, prompt load is one line: the row hugs what
-        // cache and queue need but still scales with the terminal, like the
+        // compression and queue need but still scales with the terminal, like the
         // Journal, instead of pinning six rows on every screen size.
         let request_height = match (compact, devices) {
             (true, _) if self.collector.request_history.len() == 0 => 6,
@@ -552,23 +553,20 @@ impl App {
         }
     }
 
-    /// macOS has compressor counters; Linux has none to chart, so its host
-    /// row keeps memory and paging at half width each.
+    /// macOS has compressor counters; Linux has none to chart, so its queue
+    /// takes the whole third supporting column.
     pub(crate) fn shows_compression(&self) -> bool {
         self.collector.platform == Platform::MacOs
     }
 
     /// Every Overview row shares one three-column grid, so panel edges line
-    /// up vertically. Linux has no compression panel; memory spans two columns.
+    /// up vertically.
     pub(crate) fn host_columns(&self, area: Rect) -> Vec<Rect> {
-        let [first, second, third] = overview_grid(area);
-        if self.shows_compression() {
-            vec![first, second, third]
-        } else {
-            vec![first.union(second), third]
-        }
+        overview_grid(area).to_vec()
     }
 
+    /// Memory, the runtime's cache and paging: what the model's memory holds,
+    /// what the cache saves and costs on disk, and what the OS pages.
     pub(crate) fn draw_resource_charts(&self, frame: &mut Frame, area: Rect) {
         let columns = self.host_columns(area);
         self.render_indicator_chart(
@@ -578,33 +576,35 @@ impl App {
             &self.collector.load_history,
             ChartMetric::Memory,
         );
-        if self.shows_compression() {
-            self.render_indicator_chart(
-                frame,
-                columns[1],
-                "compression",
-                &self.collector.compression_history,
-                ChartMetric::Compression,
-            );
-        }
+        let (name, history, metric) = self.cache_panel();
+        self.render_indicator_chart(frame, columns[1], name, history, metric);
         self.render_indicator_chart(
             frame,
-            columns[columns.len() - 1],
+            columns[2],
             "paging / I/O",
             &self.collector.swap_history,
             ChartMetric::Swap,
         );
     }
 
-    /// Prompt load spans two grid columns for its bars; cache and queue stack
-    /// in the third, since each carries one or two readings.
+    /// Prompt load spans two grid columns for its bars; compression and queue
+    /// stack in the third, since each carries one or two readings.
     pub(crate) fn draw_supporting_charts(&self, frame: &mut Frame, area: Rect) {
         let [first, second, third] = overview_grid(area);
         self.draw_request_chart(frame, first.union(second));
-        let [cache, queue] =
+        if !self.shows_compression() {
+            self.draw_operator_chart(frame, third, Chart::Queue);
+            return;
+        }
+        let [compression, queue] =
             Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third);
-        let (name, history, metric) = self.cache_panel();
-        self.render_indicator_chart(frame, cache, name, history, metric);
+        self.render_indicator_chart(
+            frame,
+            compression,
+            "compression",
+            &self.collector.compression_history,
+            ChartMetric::Compression,
+        );
         self.draw_operator_chart(frame, queue, Chart::Queue);
     }
 
@@ -845,9 +845,15 @@ impl App {
                     state.into()
                 }
             }
-            ChartMetric::Swap | ChartMetric::Compression | ChartMetric::Disk => {
+            ChartMetric::Swap | ChartMetric::Compression => {
                 current.map(rate).unwrap_or_else(|| "—".into())
             }
+            // What the cache is worth, not how fast the disk moved.
+            ChartMetric::Disk => cache_impact::headline(
+                sample,
+                cache_impact::prefill_speed(&self.collector.prefill_history, sample),
+                area.width,
+            ),
         };
         let chart_tone = metric.chart_tone();
         let current_tone = history
@@ -1097,22 +1103,8 @@ impl App {
                     },
                 )
             }
-            ChartMetric::Disk => {
-                let (read, write) = match (sample.disk.read, sample.disk.write) {
-                    (Some(read), Some(write)) => (rate(read), rate(write)),
-                    _ => ("—".into(), "—".into()),
-                };
-                let spaced = format!("read {read} · write {write}");
-                Some(
-                    if Line::from(spaced.as_str()).width() + 2
-                        <= usize::from(area.width.saturating_sub(2))
-                    {
-                        spaced
-                    } else {
-                        format!("r {read} · w {write}")
-                    },
-                )
-            }
+            // What the SSD tier is doing, in words; the chart shows how much.
+            ChartMetric::Disk => cache_impact::activity(sample).map(|(state, _)| state.to_owned()),
             // The title has the latest interval's hit rate; these are the
             // session-wide figures it is measured against.
             ChartMetric::Cache => Some(if area.width < 38 {
@@ -1305,17 +1297,29 @@ impl App {
             }
         }
         if metric == ChartMetric::Disk {
-            // Reuse over the session; each request's share is in prompt load.
-            if inner.height >= 5 {
-                if let Some(reuse) = sample.llm_cache_efficiency {
-                    frame.render_widget(
-                        Paragraph::new(format!("{reuse:.0}% of prompt tokens reused"))
-                            .style(Style::default().fg(MUTED)),
-                        Rect::new(inner.x, inner.y, inner.width, 1),
-                    );
-                    inner.y += 1;
-                    inner.height -= 1;
+            // The share of prompt tokens the cache served, over the session and
+            // for the last prompt, each with the prefill time that saved. Each
+            // bar needs a row of chart and the SSD row left beneath it.
+            let speed = cache_impact::prefill_speed(&self.collector.prefill_history, sample);
+            let reserved = if sample.ssd_cache.is_some() { 2 } else { 1 };
+            let session = cache_impact::session(sample);
+            let bars = [
+                session.map(|reuse| ("session", reuse)),
+                cache_impact::last_prompt(sample).map(|reuse| ("last", reuse)),
+            ];
+            for (label, reuse) in bars.into_iter().flatten() {
+                if inner.height <= reserved {
+                    break;
                 }
+                cache_impact::draw_reuse(
+                    frame,
+                    Rect::new(inner.x, inner.y, inner.width, 1),
+                    label,
+                    reuse,
+                    speed,
+                );
+                inner.y += 1;
+                inner.height -= 1;
             }
             if sample.ssd_cache.is_some() {
                 swap_usage::draw_ssd_cache(
@@ -1329,16 +1333,8 @@ impl App {
                 return;
             }
             if inner.height < 3 {
-                frame.render_widget(
-                    Paragraph::new(match current {
-                        Some(0) => "No disk traffic",
-                        Some(rate) if rate >= crate::analysis::DISK_ACTIVE_RATE => "Disk active",
-                        Some(_) => "Light disk traffic",
-                        None => "Disk reading unavailable",
-                    })
-                    .style(Style::default().fg(current_tone.color())),
-                    inner,
-                );
+                // Too short for an axis: the traffic as a sparkline, never a sentence.
+                self.draw_sparkline(frame, inner, history, metric);
                 return;
             }
         }

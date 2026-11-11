@@ -853,9 +853,9 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
         assert_eq!(screen.matches("┌ generation").count(), 1);
         assert!(!screen.contains("cache / queue"));
         let regions = app.charts.regions.borrow();
-        let cache = regions
+        let compression = regions
             .iter()
-            .find(|(chart, _)| *chart == Chart::Cache)
+            .find(|(chart, _)| *chart == Chart::Compression)
             .unwrap()
             .1;
         let queue = regions
@@ -863,10 +863,10 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
             .find(|(chart, _)| *chart == Chart::Queue)
             .unwrap()
             .1;
-        // Cache and queue stack in the grid's third column.
-        assert_eq!(cache.x, queue.x);
-        assert_eq!(cache.width, queue.width);
-        assert!(cache.bottom() <= queue.y);
+        // Compression and queue stack in the grid's third column.
+        assert_eq!(compression.x, queue.x);
+        assert_eq!(compression.width, queue.width);
+        assert!(compression.bottom() <= queue.y);
         assert!(screen.contains("active 1"));
         assert!(screen.contains("waiting 0"));
         assert!(!screen.contains("DIAGNOSIS"));
@@ -1611,9 +1611,13 @@ fn tab_switches_views_and_arrows_stay_contextual() {
     render_app(&app, 180, 50);
     // Host resources sit above prompt load; throughput sits below it.
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.charts.focused, Chart::Cache);
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(app.charts.focused, Chart::Memory);
     app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    assert_eq!(app.charts.focused, Chart::Compression);
+    assert_eq!(app.charts.focused, Chart::Cache);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.charts.focused, Chart::Paging);
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.charts.focused, Chart::Prompt);
@@ -2093,7 +2097,8 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         );
         assert!(region(Chart::Generation).right() <= region(Chart::Prefill).x);
         assert!(region(Chart::Prompt).bottom() <= region(Chart::Generation).y);
-        assert_eq!(region(Chart::Prompt).y, region(Chart::Cache).y);
+        assert_eq!(region(Chart::Prompt).y, region(Chart::Compression).y);
+        assert_eq!(region(Chart::Memory).y, region(Chart::Cache).y);
         assert_eq!(
             region(Chart::Queue).bottom(),
             region(Chart::Prompt).bottom()
@@ -2103,13 +2108,10 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
             region(Chart::Memory).right(),
             region(Chart::Generation).right()
         );
-        assert_eq!(
-            region(Chart::Compression).right(),
-            region(Chart::Prompt).right()
-        );
-        assert_eq!(region(Chart::Paging).x, region(Chart::Cache).x);
+        assert_eq!(region(Chart::Cache).right(), region(Chart::Prompt).right());
+        assert_eq!(region(Chart::Paging).x, region(Chart::Compression).x);
         assert_eq!(region(Chart::Paging).x, region(Chart::Gpu).x);
-        for chart in [Chart::Memory, Chart::Compression, Chart::Paging] {
+        for chart in [Chart::Memory, Chart::Cache, Chart::Paging] {
             assert_eq!(region(chart).y, region(Chart::Memory).y);
             assert!(region(chart).bottom() <= region(Chart::Prompt).y);
             assert!(region(chart).height >= 6);
@@ -4520,45 +4522,46 @@ fn overview_review_fixes_keep_one_reading_per_fact_and_identity_during_alarms() 
 }
 
 #[test]
-fn host_row_leads_with_memory_compression_and_paging_on_macos_only() {
+fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     let screen = render_app(&app, 120, 40);
     for label in [
         "PRESSURE normal",
         "wired 3.2 GiB",
-        "4.6 GiB stored in 1.6 GiB · 2.9× ratio",
         "comp 3.0 · decomp 1.5 MiB/s",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
-    // The compressor's size is in the memory legend and the line above; a
-    // third reading as a share of RAM says nothing new.
+    // The compressor's size is in the memory legend; a share of RAM says nothing new.
     assert!(!screen.contains("of RAM"), "{screen}");
     let regions = app.charts.regions.borrow().clone();
     let region = |chart| regions.iter().find(|(id, _)| *id == chart).map(|r| r.1);
     let memory = region(Chart::Memory).unwrap();
+    let cache = region(Chart::Cache).unwrap();
+    let paging = region(Chart::Paging).unwrap();
+    assert_eq!((memory.y, cache.y), (paging.y, paging.y));
+    assert!(memory.right() <= cache.x && cache.right() <= paging.x);
     let compression = region(Chart::Compression).unwrap();
-    assert_eq!(memory.y, compression.y);
-    assert!(memory.bottom() <= region(Chart::Prompt).unwrap().y);
-    // Expanding compression keeps its own history and readings.
+    let queue = region(Chart::Queue).unwrap();
+    assert_eq!(compression.y, region(Chart::Prompt).unwrap().y);
+    assert_eq!(compression.x, queue.x);
+    // Expanding compression keeps its own history and readings, the ratio among them.
     app.charts.focused = Chart::Compression;
     app.charts.expanded = true;
-    assert!(render_app(&app, 120, 40).contains("compression"));
+    assert!(render_app(&app, 120, 40).contains("4.6 GiB stored in 1.6 GiB · 2.9× ratio"));
     app.charts.expanded = false;
 
-    // Linux exposes no compressor counters: no empty compression panel.
+    // Linux exposes no compressor counters: the queue takes the column.
     app.collector.platform = Platform::Linux;
     render_app(&app, 120, 40);
     let regions = app.charts.regions.borrow().clone();
     assert!(regions
         .iter()
         .all(|(chart, _)| *chart != Chart::Compression));
-    let memory = regions.iter().find(|(c, _)| *c == Chart::Memory).unwrap().1;
-    assert_eq!(
-        memory.width, 80,
-        "memory spans two grid columns beside paging"
-    );
+    let find = |chart| regions.iter().find(|(c, _)| *c == chart).unwrap().1;
+    assert_eq!(find(Chart::Memory).y, find(Chart::Cache).y);
+    assert_eq!(find(Chart::Queue).y, find(Chart::Prompt).y);
 }
 
 #[test]
@@ -5384,7 +5387,7 @@ fn a_stall_beside_cache_reads_names_the_disk_and_points_at_it() {
 }
 
 #[test]
-fn the_cache_panel_plots_runtime_disk_traffic_over_the_ssd_cache_fill() {
+fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     // Without disk readings the panel keeps each interval's reuse.
@@ -5397,8 +5400,27 @@ fn the_cache_panel_plots_runtime_disk_traffic_over_the_ssd_cache_fill() {
     app.collector.current.disk = domain::DiskActivity {
         read: Some(850 * MIB),
         write: Some(2 * MIB),
+        loads: 38,
         ..Default::default()
     };
+    // 1.2M prompt tokens this session, 1.08M served from the cache, measured
+    // prefill at 200 tok/s: the cache saved 1h 30m of prefill.
+    app.collector.current.llm_total_prompt_tokens = Some(1_200_000);
+    app.collector.current.llm_total_cached_tokens = Some(1_080_000);
+    app.collector.prefill_history.clear();
+    for _ in 0..5 {
+        push_history_with_tone(
+            &mut app.collector.prefill_history,
+            Some(2000),
+            Tone::Green,
+            60,
+        );
+    }
+    app.collector.current.llm_requests = vec![RequestUsage {
+        prompt: 29_000,
+        cached: Some(26_000),
+        ..RequestUsage::default()
+    }];
     for second in 0..30 {
         push_history_with_tone(
             &mut app.collector.disk_history,
@@ -5411,58 +5433,122 @@ fn the_cache_panel_plots_runtime_disk_traffic_over_the_ssd_cache_fill() {
     let (name, history, metric) = app.cache_panel();
     let disk_history = history.clone();
     let history = &disk_history;
-    let tall = render_view(60, 10, |frame| {
+    let tall = render_view(70, 10, |frame| {
         app.render_indicator_chart(frame, frame.area(), name, history, metric)
     });
     for label in [
         "cache I/O",
-        "read 850.0 MiB/s · write 2.0 MiB/s",
-        "62% of prompt tokens reused",
-        "SSD",
+        "saved ≈1h 30m of prefill",
+        "session",
+        "90% of 1.2M · ≈1h 30m saved",
+        "last",
+        "90% of 29.0k · ≈2m 10s saved",
+        "loading prefixes from SSD",
         "120.0/120.0 GiB full",
     ] {
         assert!(tall.contains(label), "missing {label}\n{tall}");
     }
-    let narrow = render_view(30, 5, |frame| {
+    // A short panel keeps the SSD row and draws the traffic, never a sentence.
+    let short = render_view(40, 5, |frame| {
         app.render_indicator_chart(frame, frame.area(), name, history, metric)
     });
-    assert!(narrow.contains("r 850.0 MiB/s · w 2.0 MiB/s"), "{narrow}");
-    assert!(narrow.contains("No disk traffic"), "{narrow}");
+    assert!(short.contains("saved ≈1h 30m"), "{short}");
+    assert!(short.contains("SSD"), "{short}");
     // The Overview and the enlarged view both use it.
     let screen = render_app(&app, 180, 50);
     assert!(screen.contains("cache I/O"), "{screen}");
     app.charts.focused = Chart::Cache;
     app.charts.expanded = true;
     assert!(render_app(&app, 120, 40).contains("cache I/O"));
+}
 
-    // Short panels say what the disk is doing in words.
-    for (rate, text) in [
-        (Some(0), "No disk traffic"),
-        (Some(400 * MIB), "Disk active"),
-        (Some(MIB), "Light disk traffic"),
-        (None, "Disk reading unavailable"),
+#[test]
+fn cache_impact_reads_activity_speed_and_shares() {
+    use crate::cache_impact::{activity, headline, last_prompt, prefill_speed, session};
+    let mut sample = Sample::default();
+    let none = VecDeque::new();
+    assert_eq!(prefill_speed(&none, &sample), None);
+    sample.llm_prefill_tps = Some(150.0);
+    assert_eq!(prefill_speed(&none, &sample), Some(150.0));
+    assert_eq!(headline(&sample, None, 60), "—");
+    sample.llm_cache_efficiency = Some(62.0);
+    assert_eq!(headline(&sample, None, 60), "reuse 62%");
+    sample.llm_total_prompt_tokens = Some(1000);
+    sample.llm_total_cached_tokens = Some(600);
+    assert_eq!(session(&sample), Some((1000, 600)));
+    assert_eq!(headline(&sample, None, 60), "600 cached");
+    assert_eq!(headline(&sample, Some(10.0), 30), "saved ≈1m 0s");
+    sample.llm_total_cached_tokens = Some(2000);
+    assert_eq!(
+        session(&sample),
+        None,
+        "more cached than sent is not believed"
+    );
+    sample.llm_requests = vec![
+        RequestUsage {
+            prompt: 100,
+            cached: Some(40),
+            ..RequestUsage::default()
+        },
+        RequestUsage {
+            prompt: 0,
+            cached: Some(0),
+            ..RequestUsage::default()
+        },
+    ];
+    assert_eq!(last_prompt(&sample), Some((100, 40)));
+    assert_eq!(activity(&sample), None);
+    for (disk, state) in [
+        (
+            domain::DiskActivity {
+                evictions: 1,
+                ..Default::default()
+            },
+            "evicting old prefixes",
+        ),
+        (
+            domain::DiskActivity {
+                loads: 1,
+                saves: 1,
+                ..Default::default()
+            },
+            "loading and saving prefixes",
+        ),
+        (
+            domain::DiskActivity {
+                saves: 1,
+                ..Default::default()
+            },
+            "saving prefixes to SSD",
+        ),
+        (
+            domain::DiskActivity {
+                read: Some(0),
+                write: Some(0),
+                ..Default::default()
+            },
+            "disk idle",
+        ),
+        (
+            domain::DiskActivity {
+                read: Some(400 * MIB),
+                write: Some(0),
+                ..Default::default()
+            },
+            "disk busy",
+        ),
+        (
+            domain::DiskActivity {
+                read: Some(MIB),
+                write: Some(0),
+                ..Default::default()
+            },
+            "light disk traffic",
+        ),
     ] {
-        let mut history = VecDeque::new();
-        push_history_with_tone(&mut history, rate, Tone::Cyan, 10);
-        push_history_with_tone(&mut history, Some(1), Tone::Cyan, 10);
-        history.pop_back();
-        app.collector.current.ssd_cache = None;
-        let screen = render_view(40, 4, |frame| {
-            app.render_indicator_chart(
-                frame,
-                frame.area(),
-                "cache I/O",
-                &history,
-                ChartMetric::Disk,
-            )
-        });
-        assert!(screen.contains(text), "missing {text}\n{screen}");
+        sample.disk = disk;
+        assert_eq!(activity(&sample).map(|(s, _)| s), Some(state));
     }
-    app.collector.current.disk = domain::DiskActivity::default();
-    let unknown = render_view(60, 6, |frame| {
-        app.render_indicator_chart(frame, frame.area(), "cache I/O", history, metric)
-    });
-    assert!(unknown.contains("read — · write —"), "{unknown}");
 }
 
 #[test]

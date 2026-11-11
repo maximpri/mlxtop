@@ -43,7 +43,7 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 
 - Overview answers: what is running, is it healthy, what is limiting it, and
   what should the operator inspect? Host-critical resources come first:
-  memory (pressure and composition), compression and paging, then prompt size,
+  memory (pressure and composition), the runtime's cache and paging, then prompt size,
   which drives KV-cache memory. Throughput is the outcome and stays compact.
 - Charts show trends and comparisons. Keep their primary reading, units and
   freshness adjacent. Keep supporting explanations shorter than the chart.
@@ -63,9 +63,8 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   Show each fact once. The runtime card's title repeats runtime prompt counters
   only when they differ from the request shown in prompt load.
   Every row shares one grid of three equal columns, so panel edges line up.
-  The host row takes all remaining height (at least six rows): memory,
-  compression and paging on macOS; on Linux, which has no compressor counters,
-  memory spans two columns beside paging. The memory reading slot shows
+  The host row takes all remaining height (at least six rows): memory, cache
+  and paging. The memory reading slot shows
   PRESSURE; bytes and resident percentage follow, then a composition bar
   (wired, app, compressed, cache, free) with the GPU wired limit marked when
   known, and a history of that composition over a pressure ribbon.
@@ -73,12 +72,18 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   in the memory legend, not repeated as a share of RAM); paging includes the
   swap capacity bar. Prompt history spans two
   columns of the next row (about 28% of the height, nine to fourteen rows; one
-  line until the first request); Cache and Queue stack in the third. Each
-  prompt bar carries its cached share as a green segment, so reuse per request
-  is read there; the cache panel (`cache I/O`) plots the runtime's own disk
-  reads and writes, with the session's reuse above and the SSD cache's fill
-  as a capacity bar along the bottom, like swap. Without OS disk readings
-  (remote or non-macOS runtimes) it plots each interval's reuse. Generation,
+  line until the first request); compression and queue stack in the third, and
+  on Linux, which has no compressor counters, the queue takes it alone. Each
+  prompt bar carries its cached share as a green segment. The cache panel
+  (`cache I/O`) shows what the cache is worth, never raw disk speeds: its title
+  is the prefill time the cache saved this session (cached tokens at the
+  median measured prefill speed); two green bars give the share of prompt
+  tokens served from cache over the session and for the last prompt, each with
+  the time it saved; the runtime's disk traffic is charted beneath (a
+  sparkline when short, never a sentence), the SSD cache's fill is a capacity
+  bar along the bottom, like swap, and the bottom edge says what the SSD tier
+  did last: loading, saving or evicting prefixes, or idle. Without OS disk
+  readings (remote or non-macOS runtimes) it plots each interval's reuse. Generation,
   prefill and GPU take one column each in a seven- to ten-row row (four on
   short terminals, where readings stay in the titles). Journal grows from five
   to ten rows on tall terminals; everything else goes to the host row.

@@ -491,6 +491,14 @@ impl Collector {
             }
         });
         sample.llm_cache_efficiency = llm_stats.and_then(|stats| stats.cache_efficiency);
+        sample.llm_total_prompt_tokens = llm_stats.and_then(|stats| stats.total_prompt_tokens);
+        sample.llm_total_cached_tokens = llm_stats
+            .and_then(|stats| stats.total_cached_tokens)
+            .filter(|cached| {
+                sample
+                    .llm_total_prompt_tokens
+                    .is_some_and(|prompt| *cached <= prompt)
+            });
         sample.llm_cache_interval_efficiency =
             cache_interval_efficiency(&mut self.previous_llm_cache, llm_stats, live_is_stale)
                 .or_else(|| {

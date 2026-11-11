@@ -564,6 +564,10 @@ pub(crate) struct Sample {
     pub(crate) llm_prompt_tokens: Option<u64>,
     pub(crate) llm_requests: Vec<RequestUsage>,
     pub(crate) llm_cache_efficiency: Option<f64>,
+    /// The runtime's own session totals: every prompt token it was sent and
+    /// how many of them came from its cache instead of being computed.
+    pub(crate) llm_total_prompt_tokens: Option<u64>,
+    pub(crate) llm_total_cached_tokens: Option<u64>,
     pub(crate) llm_cache_interval_efficiency: Option<f64>,
     pub(crate) llm_prefix_hit_rate: Option<f64>,
     pub(crate) llm_active_requests: Option<u64>,
@@ -702,6 +706,8 @@ impl Default for Sample {
             llm_prompt_tokens: None,
             llm_requests: Vec::new(),
             llm_cache_efficiency: None,
+            llm_total_prompt_tokens: None,
+            llm_total_cached_tokens: None,
             llm_cache_interval_efficiency: None,
             llm_prefix_hit_rate: None,
             llm_active_requests: None,
@@ -749,7 +755,7 @@ pub(crate) struct VmCounters {
     pub(crate) reactivations: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RequestUsage {
     pub provider: String,
     pub model: String,

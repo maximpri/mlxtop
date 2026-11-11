@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0 — 2026-11-11
+## 3.3.0-rc.9 — 2026-11-11
 
 ### Diagnosis
 
@@ -51,6 +51,16 @@
   the generation chart at once; an unusual reading of the host is magenta on
   its own chart or in the header. A host reading that stays unusual for 30
   seconds at the usual speed becomes its usual value.
+- **Cache I/O shows what the cache is worth, not disk speeds.** Its title
+  reads the prefill time the cache saved this session (`saved ≈1h 25m of
+  prefill`): cached tokens at the measured prefill speed. Two bars show the
+  share of prompt tokens served from cache, over the session and for the last
+  prompt, each with the time it saved. The disk chart is always drawn, and the
+  bottom edge says what the SSD tier is doing: loading, saving or evicting
+  prefixes, or idle.
+- **Cache I/O and compression swap places.** The cache sits in the host row
+  between memory and paging; compression stacks above the queue. On Linux,
+  with no compressor counters, the queue takes that column.
 - **Charts are no longer shaded during a slowdown.** The panel behind it says
   what it did instead: `▲ slowed GEN ↓50%` or `▲ stalled GEN`.
 - **Generation and prefill bars are green.** They were graded yellow and red
