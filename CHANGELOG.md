@@ -25,7 +25,7 @@
 - **The usual-speed line follows the work.** The generation chart draws
   each sample's usual speed, column by column: it steps when a request joins
   or leaves, and runs through bars that pass it. The bottom edge, Diagnostics
-  and `--once` say what it is for: `usual 30.0 for 2 requests · 131k
+  and `--once` say what it is for: `usual 30.0 for 2 requests · 131.2k
   context`.
 
 ## 3.3.0-rc.7 — 2026-11-10
