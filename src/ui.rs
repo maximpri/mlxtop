@@ -485,7 +485,9 @@ impl App {
         let queue_width =
             operator_charts::queue_plot_width(&self.collector.operator_history, grid[2].width);
         let samples = [
-            host[0].width.saturating_sub(7),
+            host[0]
+                .width
+                .saturating_sub(2 + crate::memory_headroom::AXIS_GUTTER),
             host[1].width.saturating_sub(14),
             host.last()
                 .map_or(0, |column| column.width.saturating_sub(14)),

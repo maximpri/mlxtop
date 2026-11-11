@@ -2857,3 +2857,82 @@ fn the_enlarged_memory_view_gives_each_kinds_size() {
         "the Overview panel keeps to its meters"
     );
 }
+
+#[test]
+fn one_moment_sits_at_the_same_place_on_every_chart() {
+    // A slowdown three samples long, ten seconds ago, marked on generation
+    // and memory: its marks must line up, or a cause cannot be read across
+    // the charts. Memory's axis labels are wider than the others', and the
+    // window once ignored that, so memory showed fewer seconds.
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let sizes = crate::memory_composition::segments(&app.collector.current);
+    let now = SystemTime::now();
+    let point = |value, tone| ChartPoint {
+        value: Some(value),
+        tone,
+        observed_at: now,
+        usual: None,
+    };
+    let collector = &mut app.collector;
+    collector.generation_history.clear();
+    collector.load_history.clear();
+    collector.composition_history.clear();
+    for index in 0..400 {
+        let tone = if (387..390).contains(&index) {
+            Tone::Unusual
+        } else {
+            Tone::Green
+        };
+        collector.generation_history.push_back(point(500, tone));
+        collector.load_history.push_back(point(57, tone));
+        collector.composition_history.push_back(sizes);
+    }
+    for (width, height) in [(120, 40), (160, 48), (211, 55)] {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let regions = app.charts.regions.borrow().clone();
+        // Where the marked samples fall across each chart's plotted span.
+        let place = |chart: Chart| {
+            let area = regions.iter().find(|(key, _)| *key == chart).unwrap().1;
+            let painted = |x: u16, y: u16, color| {
+                let cell = &buffer[(x, y)];
+                (cell.fg == color && "▁▂▃▄▅▆▇█".contains(cell.symbol())) || cell.bg == color
+            };
+            let (mut first, mut last) = (u16::MAX, 0);
+            let (mut marked_first, mut marked_last) = (u16::MAX, 0);
+            for y in area.top() + 1..area.bottom() - 1 {
+                for x in area.left() + 1..area.right() - 1 {
+                    let marked = painted(x, y, UNUSUAL);
+                    if marked || painted(x, y, GREEN) {
+                        first = first.min(x);
+                        last = last.max(x);
+                    }
+                    if marked {
+                        marked_first = marked_first.min(x);
+                        marked_last = marked_last.max(x);
+                    }
+                }
+            }
+            assert!(
+                marked_first <= marked_last,
+                "{chart:?} has no marks at {width}x{height}"
+            );
+            let span = f64::from(last - first + 1);
+            (
+                f64::from(marked_first - first) / span,
+                f64::from(marked_last + 1 - first) / span,
+            )
+        };
+        let generation = place(Chart::Generation);
+        let memory = place(Chart::Memory);
+        for (a, b) in [(generation.0, memory.0), (generation.1, memory.1)] {
+            assert!(
+                (a - b).abs() < 0.03,
+                "at {width}x{height} generation marks {generation:?}, memory {memory:?}"
+            );
+        }
+    }
+}

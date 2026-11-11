@@ -84,6 +84,9 @@ fn meter(frame: &mut Frame, row: Rect, prefix: &str, reading: &str, color: Color
 /// Draw the panel body. `columns` gives, for a plot of that many columns,
 /// what was left in each with the pressure it was under. Returns false when
 /// the OS reports no composition to draw.
+/// Cells the history's axis labels take (`5.0 GiB ` and a space).
+pub(crate) const AXIS_GUTTER: u16 = 9;
+
 pub(crate) fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -221,7 +224,7 @@ pub(crate) fn draw(
     if rows < 2 || area.width <= 10 {
         return true;
     }
-    const GUTTER: u16 = 9;
+    const GUTTER: u16 = AXIS_GUTTER;
     let plot = Rect::new(area.x + GUTTER, y, area.width - GUTTER, rows);
     let points = columns(usize::from(plot.width));
     if points.iter().all(Option::is_none) {
