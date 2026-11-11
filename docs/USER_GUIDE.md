@@ -41,18 +41,18 @@ first. Select a chart and press Enter for its full view. Each panel keeps its
 place when requests arrive or the model becomes idle; an empty prompt load is
 one line, and the host charts get its rows.
 
-**Memory** puts the OS **PRESSURE** label in the reading slot, then bytes in
-use and the resident percentage, then a bar of what RAM holds: wired, app,
-compressed, cache and free, with the GPU wired limit marked (yellow, with a
-legend reason, when wired memory exceeds it). Its history stacks the same
-kinds for every sample, at eighth-cell precision with free memory empty at
-the top, so a model load reads as wired memory jumping while cache is
-squeezed out. The bottom row is a ribbon in each sample's pressure colour:
-green for normal, yellow for warning, red for critical. Linux stacks app and
-cache, Windows memory in use; without composition counters the history is an
-area of resident occupancy. Resident memory is total RAM minus free (and, on
-macOS, speculative) pages, so it includes reclaimable file cache; a full cache
-alone does not establish memory pressure. Linux derives pressure from
+**Memory** puts the OS **PRESSURE** label in the reading slot and shows
+headroom beneath it. The **GPU** meter is wired memory against the GPU wired
+limit, with what is left under it (`25.6 / 32.0 GiB`, `6.4 GiB left`); it
+turns yellow from 90%, red from 97%, and says so when wired memory is over
+the limit. The **RAM** meter is memory in use (wired, app and compressed)
+with the file cache as its last segment, and what is left: free memory plus
+that cache, which the OS gives back on demand. Under the meters, a trace
+shows what was left over time, each sample in its pressure colour: green
+for normal, yellow for warning, red for critical. A model load reads as the
+trace dropping. There is no resident percentage: a full file cache fills RAM
+without establishing memory pressure. Without composition counters the
+history is an area of occupancy. Linux derives pressure from
 unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
 `memory_warn_load` and `memory_critical_load` configure those Linux bands.
 macOS uses native pressure rather than percentage thresholds. macOS
@@ -756,7 +756,7 @@ observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
 
 | Chart | Form | Reading |
 | --- | --- | --- |
-| memory | stacked composition history over a pressure ribbon (area without composition counters) | PRESSURE, bytes in use, resident % and a composition bar |
+| memory | what RAM has left over time, in each sample's pressure colour (occupancy area without composition counters) | PRESSURE; a GPU meter (wired against the GPU limit) and a RAM meter (in use, cache, what is left) |
 | compression | bars from zero, axis at least the warning rate | stored / compressed bytes and ratio, compressing / decompressing rates, share of RAM |
 | paging / I/O | bars from zero, axis at least the warning rate | page-in / page-out rates, swap capacity bar |
 | generation, prefill | bars from zero | live tok/s, or a labeled `LAST` reading |

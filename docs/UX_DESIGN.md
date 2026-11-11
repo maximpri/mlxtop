@@ -64,10 +64,14 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   only when they differ from the request shown in prompt load.
   Every row shares one grid of three equal columns, so panel edges line up.
   The host row takes all remaining height (at least six rows): memory, cache
-  and paging. The memory reading slot shows
-  PRESSURE; bytes and resident percentage follow, then a composition bar
-  (wired, app, compressed, cache, free) with the GPU wired limit marked when
-  known, and a history of that composition over a pressure ribbon.
+  and paging. The memory reading slot shows PRESSURE. Its body is headroom,
+  never a resident percentage, which reads as an alarm on a machine whose
+  cache is full and whose pressure is normal: a GPU meter of wired memory
+  against the GPU wired limit, with what is left under it; a RAM meter of
+  what is in use (wired, app, compressed) with file cache as its last
+  segment, and what is left (free plus cache); and a trace of what was left
+  over time, each sample in its pressure colour. Short panels keep the two
+  meters. Without composition counters it is an occupancy area.
   Compression charts compress + decompress traffic (the compressor's size is
   in the memory legend, not repeated as a share of RAM); paging includes the
   swap capacity bar. Prompt history spans two

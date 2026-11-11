@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.14 — 2026-11-11
+## 3.3.0-rc.15 — 2026-11-11
 
 ### Diagnosis
 
@@ -79,6 +79,14 @@
 - **KV cache and compression swap places.** The cache sits in the host row
   between memory and paging; compression stacks above the queue. On Linux,
   with no compressor counters, the queue takes that column.
+- **Memory shows headroom.** A GPU meter reads wired memory against the GPU
+  limit and what is left (`25.6 / 32.0 GiB`, `6.4 GiB left`); a RAM meter
+  reads memory in use with the file cache as its last segment and what is
+  left, free plus cache (`31.7 / 36.0 GiB`, `4.3 GiB left`); a trace shows
+  what was left over time in each sample's pressure colour. `98% resident`
+  is gone: it read as an alarm on a Mac whose cache was full and whose
+  pressure was normal. The stacked composition history and its two-row
+  legend made way for the meters.
 - **The header reads GPU memory against the GPU limit** the memory legend
   marks (`iogpu.wired_limit_mb`, or the runtime's recommended working set),
   not the driver's current allocation, which grows with use and read

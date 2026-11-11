@@ -97,6 +97,17 @@ fn kinds() -> [Kind; 5] {
 
 /// A one-row bar of RAM composition. Returns false when counters are missing.
 pub(crate) fn draw_bar(frame: &mut Frame, area: Rect, sample: &Sample) -> bool {
+    draw_composition(frame, area, sample, true)
+}
+
+/// The composition bar, with the GPU limit marked on it or left to a meter
+/// of its own.
+pub(crate) fn draw_composition(
+    frame: &mut Frame,
+    area: Rect,
+    sample: &Sample,
+    marker: bool,
+) -> bool {
     let Some(sizes) = segments(sample) else {
         return false;
     };
@@ -125,7 +136,7 @@ pub(crate) fn draw_bar(frame: &mut Frame, area: Rect, sample: &Sample) -> bool {
         }
     }
     // GPU working-set limit: wired model memory beyond it slows generation.
-    if let Some(limit) = gpu_limit(sample) {
+    if let Some(limit) = gpu_limit(sample).filter(|_| marker) {
         let column = (u128::from(limit.min(total)) * u128::from(width) / u128::from(total))
             .min(u128::from(width) - 1) as u16;
         let over = sample.wired > limit;

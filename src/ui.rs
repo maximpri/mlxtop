@@ -1195,6 +1195,31 @@ impl App {
             return;
         }
         if metric == ChartMetric::Memory {
+            // Headroom first: wired against the GPU limit, RAM against what
+            // is left, and what was left over time. Without the OS's
+            // composition counters, the plain occupancy reading below.
+            let visible = |width: usize| self.charts.visible_samples(Chart::Memory, width);
+            let columns = |width: usize| {
+                let tones = &self.collector.load_history;
+                let lefts = self.composition_columns(visible(width), width);
+                let shown = visible(width);
+                let start = tones.len().saturating_sub(shown);
+                let padding = shown - (tones.len() - start);
+                lefts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(column, sizes)| {
+                        let tone = (column * shown / width)
+                            .checked_sub(padding)
+                            .and_then(|offset| tones.get(start + offset))
+                            .map_or(Tone::Green, |point| point.tone);
+                        sizes.map(|sizes| (crate::memory_headroom::left(sizes), tone))
+                    })
+                    .collect()
+            };
+            if crate::memory_headroom::draw(frame, inner, sample, columns) {
+                return;
+            }
             let usage = match (sample.resident_memory, current) {
                 (Some(used), _) => format!("{} / {}", bytes(used), bytes(sample.total_memory)),
                 (None, Some(_)) if sample.total_memory > 0 => {

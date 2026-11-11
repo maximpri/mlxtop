@@ -658,7 +658,7 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
         (
             ChartMetric::Memory,
             &app.collector.load_history,
-            "57% resident",
+            "17.2 / 36.0 GiB",
         ),
         (ChartMetric::Gpu, &app.collector.gpu_history, "95%"),
     ] {
@@ -680,7 +680,7 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
             ChartMetric::Memory,
         )
     });
-    for label in ["20.5 GiB / 36.0 GiB", "57% resident", "wired 3.2 GiB"] {
+    for label in ["3.2 / 27.0 GiB", "17.2 / 36.0 GiB"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(!screen.contains("50%"), "no percentage axis\n{screen}");
@@ -4461,7 +4461,7 @@ fn overview_review_fixes_keep_one_reading_per_fact_and_identity_during_alarms() 
         "3 Journal",
         "35.5 tok/s",
         "decoding",
-        "20.5/36.0 GiB · 57%",
+        "17.2 / 36.0 GiB",
     ] {
         assert!(narrow.contains(label), "missing {label}\n{narrow}");
     }
@@ -4528,7 +4528,11 @@ fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     let screen = render_app(&app, 120, 40);
-    for label in ["PRESSURE normal", "wired 3.2 GiB"] {
+    for label in [
+        "PRESSURE normal",
+        "█wired █app █comp █cache",
+        "18.8 GiB left",
+    ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     // The compressor's size is in the memory legend; a share of RAM says nothing new.
@@ -4896,7 +4900,7 @@ fn short_rate_panels_draw_a_sparkline_instead_of_a_hint() {
 }
 
 #[test]
-fn memory_history_stacks_what_ram_holds_over_a_pressure_ribbon() {
+fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
     let gib = 1024 * MIB;
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
@@ -4913,53 +4917,95 @@ fn memory_history_stacks_what_ram_holds_over_a_pressure_ribbon() {
             })
         })
         .collect();
-    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
-    terminal
-        .draw(|frame| {
-            app.render_indicator_chart(
-                frame,
-                frame.area(),
-                "memory",
-                &app.collector.load_history,
-                ChartMetric::Memory,
-            )
-        })
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    let fills = crate::memory_composition::history_colors();
-    let wired_rows = |x: u16| (0..20).filter(|y| buffer[(x, *y)].bg == fills[0]).count();
-    // Before the load little is wired; after it, much more.
+    {
+        let sample = &mut app.collector.current;
+        sample.total_memory = 36 * gib;
+        sample.wired = 20 * gib;
+        sample.anonymous = 6 * gib;
+        sample.compressor = 2 * gib;
+        sample.file_backed = 4 * gib;
+        sample.metal.resource_limit = Some(32 * gib);
+        sample.pressure_tone = Tone::Yellow;
+    }
+    let draw = |app: &App, width: u16, height: u16| {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.render_indicator_chart(
+                    frame,
+                    frame.area(),
+                    "memory",
+                    &app.collector.load_history,
+                    ChartMetric::Memory,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let buffer = draw(&app, 60, 20);
+    let text: String = (0..20)
+        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+        .collect();
+    for label in [
+        "GPU",
+        "20.0 / 32.0 GiB",
+        "wired, against the GPU limit",
+        "12.0 GiB left",
+        "RAM",
+        "28.0 / 36.0 GiB",
+        "█wired █app █comp █cache",
+        "8.0 GiB left",
+        "18.0 GiB",
+    ] {
+        assert!(text.contains(label), "missing {label}\n{text}");
+    }
+    assert!(!text.contains("resident"), "{text}");
+    // The GPU meter fills to wired over the limit.
+    let filled = (0..60).filter(|x| buffer[(*x, 1)].bg == CYAN).count();
+    let track = (0..60).filter(|x| buffer[(*x, 1)].bg == EDGE).count();
     assert!(
-        wired_rows(57) > wired_rows(30) + 2,
-        "{} vs {}",
-        wired_rows(57),
-        wired_rows(30)
+        filled > track,
+        "20 of 32 GiB: {filled} filled, {track} empty"
     );
-    // The ribbon under the stack carries each sample's pressure grade.
-    let ribbon = (0..20)
-        .rev()
-        .find(|y| buffer[(57, *y)].symbol() == "▀")
-        .expect("pressure ribbon");
-    assert_eq!(buffer[(57, ribbon)].fg, YELLOW);
-    assert_eq!(buffer[(30, ribbon)].fg, GREEN);
-    // No line: the stack's top is the level.
-    assert!((0..20).all(|y| buffer[(57, y)].symbol() != "━"));
+    // What was left: 18 GiB before the load, 8 GiB after, under its pressure.
+    let height = |x: u16| {
+        (0..20)
+            .filter(|y| "▁▂▃▄▅▆▇█".contains(buffer[(x, *y)].symbol()))
+            .count()
+    };
+    assert!(
+        height(30) > height(57) + 2,
+        "{} vs {}",
+        height(30),
+        height(57)
+    );
+    assert_eq!(buffer[(57, 18)].fg, YELLOW);
+    assert_eq!(buffer[(30, 18)].fg, GREEN);
+
+    // Wired past the limit says so, in red.
+    app.collector.current.wired = 33 * gib;
+    let buffer = draw(&app, 60, 20);
+    let text: String = (0..20)
+        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+        .collect();
+    assert!(text.contains("wired over the GPU limit"), "{text}");
+    assert!(text.contains("0 B left"), "{text}");
+    assert_eq!(buffer[(6, 1)].bg, RED);
+
+    // No GPU limit known: RAM alone. A short panel keeps the meters only.
+    app.collector.current.metal.resource_limit = None;
+    app.collector.current.mlx.recommended_working_set = None;
+    let buffer = draw(&app, 40, 4);
+    let text: String = (0..4)
+        .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+        .collect();
+    assert!(text.contains("RAM") && !text.contains("GPU"), "{text}");
 
     // Without composition counters (Linux), memory stays an area chart.
+    app.collector.current.vm_available = false;
     app.collector.composition_history = std::iter::repeat_n(None, 40).collect();
-    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
-    terminal
-        .draw(|frame| {
-            app.render_indicator_chart(
-                frame,
-                frame.area(),
-                "memory",
-                &app.collector.load_history,
-                ChartMetric::Memory,
-            )
-        })
-        .unwrap();
-    let buffer = terminal.backend().buffer();
+    let buffer = draw(&app, 60, 20);
     assert!((0..20).any(|y| buffer[(57, y)].symbol() == "━"));
 }
 

@@ -41,7 +41,7 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 | runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, GPU memory meter (yellow from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
 | generation / prefill | Separate tok/s bar histories with independent axes; no outer throughput box |
 | prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling; generated tokens under the sizes when the panel keeps four bar rows |
-| memory | PRESSURE in the reading slot; bytes and resident %; a composition bar of wired, app, compressed, cache and free RAM with the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set) marked, yellow with a legend reason when wired memory exceeds it; composition history over a pressure ribbon |
+| memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), yellow from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache); a trace of what was left, in each sample's pressure colour |
 | compression | macOS compress + decompress traffic bars (B/s, axis at least `compression_warn_rate`), stored/compressor bytes and ratio, compressing/decompressing rates and the compressor's share of RAM; yellow from `compression_warn_rate`, never red |
 | GPU | Utilization area and load state; hardware belongs in the runtime card |
 | paging / I/O | Paging-rate bars (axis at least `swap_warn_rate`), page-in/page-out rates and a horizontal swap used/total capacity bar, `swap off` without swap |
@@ -157,12 +157,13 @@ green. The compact paging label uses the finding's words: `Light paging`,
 `Watch paging` (from 1 MiB/s), `Paging active` (from 4 MiB/s).
 
 RAM percentage and bytes still measure physical occupancy including file cache.
-The memory chart's reading slot shows the PRESSURE label in its severity color;
-resident percentage follows the bytes. The history stacks each sample's
-composition, and its bottom-row ribbon keeps the pressure severity captured
-with each sample, so a full but healthy RAM stays green. Without composition
-counters the history is an occupancy area graded the same way. Below five
-inner rows, memory shows bytes and a composition bar instead of a history.
+The memory chart's reading slot shows the PRESSURE label in its severity color.
+Its meters read wired memory against the GPU limit and RAM in use against
+the total, each with what is left. The history is what was left (free plus
+file cache), and each sample keeps the pressure severity captured with it,
+so a full but healthy RAM stays green. Without composition counters the
+history is an occupancy area graded the same way. Short panels keep the
+meters and drop the history.
 Missing occupancy remains muted.
 
 On macOS, paging counts file page-ins and page-outs as well as swap, because
