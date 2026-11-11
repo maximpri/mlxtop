@@ -256,7 +256,7 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     // shown, with its usual value.
     let insight = &sample.correlation;
     if let Some(thermal) = thermal_reading(sample) {
-        let color = if insight.note(CorrelationCause::Thermal).is_some() {
+        let color = if insight.impact(CorrelationCause::Thermal).is_some() {
             Tone::Unusual.color()
         } else if thermal_note(sample).is_some() {
             YELLOW
@@ -268,7 +268,7 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     fields.extend(gpu_memory_meter(sample));
     if sample.llm_count > 0 {
         let mut field = muted(format!("LLM {} · ", bytes(sample.llm_rss)));
-        field.push(match insight.note(CorrelationCause::Cpu) {
+        field.push(match insight.impact(CorrelationCause::Cpu) {
             Some(note) => Span::styled(
                 note.trim_start_matches("runtime ").to_owned(),
                 Style::default().fg(Tone::Unusual.color()),

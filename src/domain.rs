@@ -379,6 +379,13 @@ impl CorrelationInsight {
         self.notes.get(index).map(String::as_str)
     }
 
+    /// What `cause`'s signal is doing while the model is slowed or stalled.
+    /// Colour means impact: a reading that is unusual while the model keeps
+    /// its speed is said in Diagnostics, not painted.
+    pub(crate) fn impact(&self, cause: CorrelationCause) -> Option<&str> {
+        self.note(cause).filter(|_| self.is_material_drop())
+    }
+
     /// Samples this finding colours, newest last. A slowdown is known at
     /// its third slow sample, so the two before it are coloured then.
     pub(crate) fn marked_samples(&self) -> usize {

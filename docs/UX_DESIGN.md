@@ -161,7 +161,7 @@ Use the existing palette; do not introduce per-widget color schemes.
 | RAM composition | Wired blue, app cyan, compressed and cache two greys of different lightness, free empty; softened toward the panel in the history |
 | GPU utilization | Green/yellow/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
 | Throughput | Green; a speed has no threshold and no grade |
-| Unusual samples | Magenta, on every time chart, and used for nothing else: an unusually slow sample on the generation chart, and an unusual reading of the host on its own chart, slowdown or not |
+| Impact | Magenta, on every time chart, and used for nothing else: the samples of a slowdown or stall on the generation chart, and the readings unusual beside it on their own charts. People react to colour, so a reading that is unusual while the model keeps its speed is not painted |
 | Cache reuse | Green from 50%, yellow from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
 | Queue waiting series | Yellow only while requests wait in view; muted at zero |
 | Supporting text, unknown data, historical advice | Muted |
@@ -267,16 +267,15 @@ colors in time-series history instead of recoloring old samples on refresh.
   latest is for (`tok/s · ┄ usual 30.0 for 2 requests · 131.2k context`). A screen that looks the same
   healthy as it did before the detector existed gives no reason to trust
   it.
-- Mark each unusual sample where it is, when it happens: an unusually slow
-  sample on the generation chart at once, without waiting for three in a
-  row, and an unusual reading of the host (thermal, pressure, paging, disk,
-  compression, memory, runtime CPU, idle GPU) on its own chart while
-  generation runs at its usual speed. The workload (requests, prompts, the
-  queue) is not marked on its own: it changes because someone asked. A reading that stays unusual for
+- Colour means impact. The app exists to find what limits the model, so
+  nothing is painted for being unusual alone: an unusual reading of the host
+  (thermal, pressure, paging, disk, compression, memory, runtime CPU, idle
+  GPU) while generation keeps its usual speed is listed in Diagnostics and
+  keeps its colour. The workload (requests, prompts, the queue) is never a
+  finding on its own: it changes because someone asked. A reading that stays unusual for
   30 s with speed still usual becomes its usual value; one that comes and
   goes widens its usual range. None of this is journaled: the Journal is
-  for slowdowns. On one server's log this marks about one sample every
-  80 s.
+  for slowdowns.
 - Draw a slowdown with the same colour, on the samples it concerns, and
   nowhere else. Its samples are magenta on the generation chart, and so are
   the samples of each signal that was unusual with it on that signal's

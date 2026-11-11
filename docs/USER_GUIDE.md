@@ -149,14 +149,17 @@ that pass it. The bottom edge says what the latest is for, for example
 `┄ usual 30.0 for 2 requests · 131.2k context`. The line is grey while all is
 well.
 
-Magenta means unusual and nothing else. It appears as it happens, slowdown or
-not:
+Magenta means impact and nothing else. It appears only while the model is
+slowed or stalled:
 
-- a sample on the generation chart that is unusually slow, even a single one;
-- a sample on another chart whose reading is unusual for the host: paging,
+- the slowdown's samples on the generation chart;
+- the samples on another chart whose reading was unusual beside it: paging,
   compression, memory, disk, or a GPU left idle;
 - readings without a chart, in place: the header's `CPU 380% (usual 95%)` and
   `THERMAL` note.
+
+A reading that is unusual while the model keeps its speed changes no colour;
+Diagnostics lists it under `Unusual:`.
 
 A reading that stays unusual for 30 seconds while generation keeps its usual
 speed becomes the usual value. Requests, prompts and the queue are not marked

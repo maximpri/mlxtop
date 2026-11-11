@@ -6698,8 +6698,8 @@ fn a_slowdown_colours_its_samples_on_the_charts_of_what_was_unusual() {
     assert!(tones(&collector.disk_history)[5]);
     assert!(!tones(&collector.generation_history)[4]);
 
-    // Outside a slowdown an unusually slow sample and an unusual reading
-    // are each coloured on their own chart, that one sample only.
+    // Colour means impact: outside a slowdown an unusually slow sample and
+    // an unusual reading are said in Diagnostics, and nothing is painted.
     reset(&mut collector);
     sample.correlation = CorrelationInsight {
         direction: ThroughputDirection::Flat,
@@ -6710,10 +6710,13 @@ fn a_slowdown_colours_its_samples_on_the_charts_of_what_was_unusual() {
         ..CorrelationInsight::default()
     };
     collector.mark_unusual(&sample);
-    let latest = [false, false, false, false, false, true];
-    assert_eq!(tones(&collector.generation_history), latest);
-    assert_eq!(tones(&collector.gpu_history), latest);
-    assert!(tones(&collector.swap_history).iter().all(|u| !u));
+    for history in [
+        &collector.generation_history,
+        &collector.gpu_history,
+        &collector.swap_history,
+    ] {
+        assert!(tones(history).iter().all(|unusual| !unusual));
+    }
 
     // A sample with nothing unusual in it touches nothing.
     reset(&mut collector);

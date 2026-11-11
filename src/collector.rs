@@ -692,13 +692,17 @@ impl Collector {
         sample
     }
 
-    /// Draws what is unusual where it happened, and nowhere else: an
-    /// unusually slow sample takes the anomaly colour on the generation
-    /// chart, and an unusual reading takes it on its own chart, slowdown or
-    /// not. A slowdown is known at its third slow sample, so its reason's
-    /// two samples before that are marked then.
+    /// Draws a slowdown or stall where it happened: its samples take the
+    /// anomaly colour on the generation chart, and what was unusual beside
+    /// it on that signal's own chart. A slowdown is known at its third slow
+    /// sample, so the two samples before that are marked then.
     pub(crate) fn mark_unusual(&mut self, sample: &Sample) {
         let insight = &sample.correlation;
+        // Colour means impact: nothing is painted while the model keeps
+        // its speed, however unusual a reading is.
+        if !insight.is_material_drop() {
+            return;
+        }
         let span = insight.marked_samples();
         let mut charts: Vec<Chart> = insight
             .unusual

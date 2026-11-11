@@ -139,10 +139,10 @@ The current configured defaults are:
 | GPU wired-limit marker | — | wired memory over the limit, with `wired over GPU limit` in the legend | — |
 
 Generation and prefill speeds have no threshold and no grade: their samples
-are green. Magenta marks an unusual sample on any time chart and is used for
-nothing else: on the generation chart, a sample whose speed was unusually far
-below its usual value; on another chart, a sample whose reading was unusual
-for the host, or was the reason for a slowdown. The generation chart's
+are green. Magenta marks impact on any time chart and is used for nothing
+else: on the generation chart, the samples of a slowdown or stall; on another
+chart, the samples whose reading was unusual beside it. A reading that is
+unusual while the model keeps its speed keeps its ordinary colour. The generation chart's
 dashed reference line is each sample's usual speed for the work it was doing
 (requests writing and their context), drawn column by column and cut through
 bars that pass it: grey ordinarily, magenta over slow samples. Prompt CACHED shares below 4,096 tokens stay

@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.15 — 2026-11-11
+## 3.3.0-rc.16 — 2026-11-11
 
 ### Diagnosis
 
@@ -52,10 +52,12 @@
   pass it. It is grey while speed is usual and magenta during a slowdown. The
   bottom edge, Diagnostics and `--once` say what it is for: `usual 30.0 for
   2 requests · 131.2k context`.
-- **Magenta means unusual, and nothing else.** A slow sample is magenta on
-  the generation chart at once; an unusual reading of the host is magenta on
-  its own chart or in the header. A host reading that stays unusual for 30
-  seconds at the usual speed becomes its usual value.
+- **Magenta means impact, and nothing else.** During a slowdown or stall its
+  samples are magenta on the generation chart, and what was unusual beside
+  it is magenta on that signal's own chart or in the header, so the cause
+  reads off the charts. A reading that is unusual while the model keeps its
+  speed changes no colour: Diagnostics lists it. A host reading that stays
+  unusual for 30 seconds at the usual speed becomes its usual value.
 - **The KV cache panel shows weights streamed from disk.** For engines that load MoE
   experts from disk, such as Splash and Strata, what the runtime reads while
   it decodes, with no prompt prefilling and no prompt-cache block loaded,

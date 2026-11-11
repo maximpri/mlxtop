@@ -249,14 +249,12 @@ fn the_header_colours_a_reading_that_is_unusual() {
         Some(Tone::Unusual.color())
     );
 
-    // The same holds with no slowdown: a reading that is unusual on its
-    // own is coloured where it is shown.
+    // Colour means impact: with no slowdown the same unusual readings keep
+    // their ordinary colours.
     sample.correlation.direction = ThroughputDirection::Flat;
     let footer = host_footer(&sample, 160);
-    assert_eq!(
-        colour_of(&footer, "CPU 380% (usual 95%)"),
-        Some(Tone::Unusual.color())
-    );
+    assert_eq!(colour_of(&footer, "CPU 380%"), Some(MUTED));
+    assert_eq!(colour_of(&footer, "THERMAL limited 60%"), Some(YELLOW));
 }
 
 #[test]
