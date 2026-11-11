@@ -611,6 +611,10 @@ pub(crate) struct Sample {
     pub(crate) thermal: String,
     /// Power the whole machine draws, in milliwatts, where macOS reports it.
     pub(crate) system_power_mw: Option<u64>,
+    /// The vm_stat counters the memory reading parsed, handed on to the
+    /// rate calculation so one call serves both. Never recorded.
+    #[serde(skip)]
+    pub(crate) vm_counters: Option<VmCounters>,
     pub(crate) llm_count: u32,
     pub(crate) llm_rss: u64,
     #[serde(skip)]
@@ -765,6 +769,7 @@ impl Default for Sample {
             mlx: MlxTelemetry::default(),
             thermal: "unavailable".into(),
             system_power_mw: None,
+            vm_counters: None,
             llm_count: 0,
             llm_rss: 0,
             process_memory: None,
@@ -821,7 +826,7 @@ impl Default for Sample {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct VmCounters {
     pub(crate) free: Option<u64>,
     pub(crate) speculative: Option<u64>,

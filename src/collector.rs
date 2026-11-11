@@ -47,6 +47,10 @@ pub(crate) struct PreviousCounters {
     pub(crate) swap_used: u64,
 }
 
+/// How often readings that change over seconds (thermal state, power) are
+/// taken; each costs a process.
+const SLOW_READ_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub(crate) struct CollectorView {
     pub(crate) current: Sample,
@@ -92,6 +96,8 @@ pub(crate) struct Collector {
     /// The runtime's cached-token total when mlxtop first saw it, with the
     /// runtime it belongs to: what was saved before then is not counted.
     pub(crate) cached_at_start: Option<(String, u64)>,
+    /// When thermal state and power were last read.
+    pub(crate) slow_read_at: Option<Instant>,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
@@ -202,6 +208,7 @@ impl Collector {
             previous: None,
             previous_llm_cache: None,
             cached_at_start: None,
+            slow_read_at: None,
             session: Default::default(),
             current: Sample::default(),
             generation_history: VecDeque::with_capacity(history_limit),
@@ -264,7 +271,11 @@ impl Collector {
             ),
         }
         let counters = match self.platform {
-            Platform::MacOs => macos_counters_for_rates(host, self.page_size),
+            // The memory reading already ran vm_stat: one call serves both.
+            Platform::MacOs => sample
+                .vm_counters
+                .take()
+                .unwrap_or_else(|| macos_counters_for_rates(host, self.page_size)),
             Platform::Linux => linux_counters_for_rates(host),
             Platform::Windows => VmCounters::default(),
         };
@@ -326,7 +337,20 @@ impl Collector {
         });
 
         match self.platform {
-            Platform::MacOs => sample_macos_gpu_thermal(host, &mut sample),
+            Platform::MacOs => {
+                // Thermal state and power change over seconds: read them
+                // every few polls and keep the last reading between.
+                let slow = self
+                    .slow_read_at
+                    .is_none_or(|at| now.duration_since(at) >= SLOW_READ_INTERVAL);
+                sample_macos_gpu_thermal(host, &mut sample, slow);
+                if slow {
+                    self.slow_read_at = Some(now);
+                } else {
+                    sample.thermal = self.current.thermal.clone();
+                    sample.system_power_mw = self.current.system_power_mw;
+                }
+            }
             Platform::Linux => sample_linux_gpu_thermal(host, &mut sample, &self.current.gpus),
             Platform::Windows => sample_windows_gpu_thermal(host, &mut sample, &self.current.gpus),
         }

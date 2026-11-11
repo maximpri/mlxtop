@@ -1350,3 +1350,39 @@ fn cached_tokens_count_from_when_mlxtop_started_watching() {
     // So does another runtime.
     assert_eq!(crate::collector::watched(&mut start, "vLLM", 9_000), 0);
 }
+
+#[test]
+fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
+    let host = macos_host();
+    let mut collector = collector(host.clone(), Platform::MacOs, None);
+    let before = host.calls().len();
+    let first = collector.sample();
+    let second = collector.sample();
+    let calls: Vec<String> = host.calls().into_iter().skip(before).collect();
+    let count = |prefix: &str| calls.iter().filter(|call| call.starts_with(prefix)).count();
+    assert_eq!(count("/usr/bin/vm_stat"), 2, "one per poll: {calls:?}");
+    assert_eq!(
+        count("/usr/bin/pmset"),
+        1,
+        "thermal is read every few seconds"
+    );
+    assert_eq!(
+        count("/usr/sbin/ioreg -r -d 1 -w 0 -c AppleSmartBattery"),
+        1
+    );
+    // Between readings, the last one stands.
+    assert_eq!(second.thermal, first.thermal);
+    assert_eq!(second.system_power_mw, first.system_power_mw);
+    // Five seconds on, they are read again.
+    collector.slow_read_at = collector
+        .slow_read_at
+        .map(|at| at - std::time::Duration::from_secs(6));
+    collector.sample();
+    let again = host
+        .calls()
+        .into_iter()
+        .skip(before)
+        .filter(|c| c.starts_with("/usr/bin/pmset"))
+        .count();
+    assert_eq!(again, 2);
+}

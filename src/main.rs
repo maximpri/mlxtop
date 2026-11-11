@@ -6,6 +6,7 @@ mod anomaly;
 mod app;
 mod cache_impact;
 mod chart_navigation;
+mod chart_panels;
 mod chart_render;
 mod chart_scale;
 mod cli;
@@ -51,6 +52,9 @@ mod theme;
 mod transport;
 mod ui;
 mod update;
+mod view_chrome;
+mod view_journal;
+mod view_processes;
 
 fn main() {
     cli::entry();

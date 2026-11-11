@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.19 — 2026-11-11
+## 3.3.0-rc.20 — 2026-11-11
 
 ### Diagnosis
 
@@ -192,6 +192,11 @@
   blocks loaded and saved. `generating=` reads 0 when nothing is.
 
 ### Changed
+
+- **Lighter sampling.** One `vm_stat` per poll serves both the memory
+  reading and paging rates (it ran twice), and thermal state and power,
+  which change over seconds, are read every five seconds instead of every
+  poll: three fewer processes per second on macOS.
 
 - `--once` prints `SLOWDOWN`, `UNUSUAL` and `USUAL SPEED` where it printed
   `CORRELATION` and `EVIDENCE`.
