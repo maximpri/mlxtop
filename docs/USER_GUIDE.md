@@ -566,7 +566,7 @@ you leave out keeps its built-in default.
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in yellow |
-| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; considered in slowdown correlation; never an alarm by itself |
+| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
 | `swap_critical_rate` | integer | 16 MiB/s | Swap rate that counts as thrashing (in and out); critical paging findings turn the paging chart red |

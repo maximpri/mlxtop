@@ -35,11 +35,11 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
   prompts or touches your models or runtime settings.
 
-**What's new in 3.2.1:** a bug fix brings the prefill progress bar and its
-time-left readout back to prompt load. 3.2.0 added Strata and TensorFold,
-dashboard panels that resize with your terminal, and the Journal recording
-overhaul. 3.1.2 gave running requests their own generation speeds and Linux
-AMD detection without ROCm.
+**What's new in 3.3.0:** mlxtop finds slowdowns by anomaly detection,
+judging speed against earlier work of the same size, and names what else was
+unusual at the time: paging, memory, heat, disk or the queue. The generation
+chart draws its usual speed, and stalls are seen as they happen. 3.2 added
+Strata and TensorFold and dashboard panels that resize with your terminal.
 [Release notes →](CHANGELOG.md)
 
 ## Install
