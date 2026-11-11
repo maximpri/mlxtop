@@ -1187,23 +1187,45 @@ impl CorrelationEngine {
             Some(gpu) => with.push(format!("GPU {gpu}%")),
             None => {}
         }
+        // A host reading explains a stall only when the model has not been
+        // running fast beside it: disk writes at the rate they ran at a
+        // minute ago, at full speed, are not why it stopped now.
+        let mut blamed = Vec::new();
+        let mut as_usual = Vec::new();
+        let mut weigh = |signal: Signal, text: String| {
+            if self.seen_while_fast(signal, current) {
+                as_usual.push(text);
+            } else {
+                with.push(text);
+                blamed.push(signal.cause());
+            }
+        };
         if let Some(disk) = current.disk_label() {
-            with.push(disk);
+            weigh(Signal::Disk, disk);
         }
         if current.paging_rate >= PAGING_ACTIVE_ENTER_RATE {
-            with.push(format!("paging {}", rate(current.paging_rate)));
+            weigh(
+                Signal::Paging,
+                format!("paging {}", rate(current.paging_rate)),
+            );
         }
         if current.compression_rate >= thresholds.compression_warn_rate {
-            with.push(format!("compression {}", rate(current.compression_rate)));
+            weigh(
+                Signal::Compression,
+                format!("compression {}", rate(current.compression_rate)),
+            );
         }
         if current.pressure >= 2 {
-            with.push("memory pressure".into());
+            weigh(Signal::Pressure, "memory pressure".into());
         }
         if running(current) > 1 {
             with.push(format!("{} requests running", running(current)));
         }
         if !with.is_empty() {
             evidence = format!("{evidence} · {}", with.join(" · "));
+        }
+        if !as_usual.is_empty() {
+            evidence = format!("{evidence} · as when it ran fast: {}", as_usual.join(", "));
         }
         let seconds = self
             .episode
@@ -1235,11 +1257,36 @@ impl CorrelationEngine {
             ended: None,
             repeat: false,
             slow: true,
-            unusual: Vec::new(),
+            unusual: blamed,
             notes: Vec::new(),
             usual_speed: slow_range(&self.speed.usual(self.work)),
             usual_for: self.work.label(),
         }
+    }
+
+    /// Whether `signal` reached its current level at least twice in recent
+    /// samples taken while the model ran at its usual speed (learned, or
+    /// held while being judged). With too little history it is not known,
+    /// and the reading keeps its place as a possible reason.
+    fn seen_while_fast(&self, signal: Signal, current: &CorrelationObservation) -> bool {
+        let Some(index) = SIGNALS.iter().position(|known| *known == signal) else {
+            return false;
+        };
+        let Some(value) = signal.value(current).filter(|value| *value > 0.0) else {
+            return false;
+        };
+        let fast: Vec<f64> = self.host[index]
+            .values()
+            .chain(self.held[index].1.iter().copied())
+            .collect();
+        if fast.len() < crate::anomaly::LEARN_SAMPLES {
+            return false;
+        }
+        // Within a third of it counts as the same level: rates jitter.
+        fast.iter()
+            .filter(|seen| **seen >= value * 2.0 / 3.0)
+            .count()
+            >= 2
     }
 
     pub(crate) fn reset(&mut self) {

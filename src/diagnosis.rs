@@ -29,6 +29,10 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
         })
         .unwrap_or_default();
     let limit = crate::memory_composition::gpu_limit(sample);
+    let blamed = |cause| sample.correlation.unusual.contains(&cause);
+    // A stall blames the disk only when it ran differently while fast.
+    let disk =
+        sample.correlation.cause == CorrelationCause::DiskIo || blamed(CorrelationCause::DiskIo);
     match sample.correlation.cause {
         CorrelationCause::Paging => format!(
             "The model no longer fits in RAM{headroom}: close other apps or models, or use a smaller quant."
@@ -54,23 +58,24 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
             ),
             None => "macOS is limiting speed for heat: improve airflow, or run fewer requests at once.".into(),
         },
-        // The engine stopped with nothing on the host to show for it:
-        // the reason is inside the runtime, in its log at this time.
-        // Any disk work beside a stall is the runtime's own prompt cache.
-        CorrelationCause::Stall | CorrelationCause::DiskIo if lead.contains("SSD cache full") => {
+        // The engine stopped with nothing on the host running differently
+        // from when it was fast: the reason is inside the runtime.
+        CorrelationCause::Stall
+            if sample.correlation.unusual.is_empty() && lead.contains("GPU idle") =>
+        {
+            "The runtime paused with the GPU idle and nothing on this machine out of the ordinary: the cause is inside it; check its log at this time.".into()
+        }
+        CorrelationCause::Stall | CorrelationCause::DiskIo if disk && lead.contains("SSD cache full") => {
             "The SSD prompt cache is evicting to make room as it reads: a faster disk, or a larger cache, keeps prefixes ready.".into()
         }
         CorrelationCause::Stall | CorrelationCause::DiskIo
-            if lead.contains("disk ") || lead.contains("SSD cache") =>
+            if disk && (lead.contains("disk ") || lead.contains("SSD cache")) =>
         {
             format!("The runtime waited on its disk ({lead}): put its cache on a faster disk.")
         }
         CorrelationCause::DiskIo => format!(
             "The runtime used its disk mid-answer ({lead}): check what it reads, and that disk's speed."
         ),
-        CorrelationCause::Stall if lead.contains("GPU idle") && !lead.contains("paging") => {
-            "The runtime stopped with the machine idle: the cause is inside it; check its log at this time.".into()
-        }
         CorrelationCause::Stall => format!("Generation stopped beside {lead}: start there."),
         CorrelationCause::ConcurrentPrefill => {
             "A prompt is being read beside this answer: expected; it recovers when the prompt is read.".into()

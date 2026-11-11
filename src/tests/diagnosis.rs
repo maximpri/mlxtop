@@ -279,7 +279,15 @@ fn advice_carries_the_readings_that_make_it_worth_acting_on() {
     assert!(next(&mut sample, CorrelationCause::ModelMemory).starts_with("The model's memory"));
     assert!(!next(&mut sample, CorrelationCause::Thermal).contains(" W"));
     sample.correlation.lead = "disk read 900.0 MiB/s".into();
+    sample.correlation.unusual = vec![CorrelationCause::DiskIo];
     assert!(next(&mut sample, CorrelationCause::Stall).contains("waited on its disk (disk read"));
+    // Disk work at the rate it ran while the model was fast is not blamed.
+    sample.correlation.lead =
+        "no new token for 2s · GPU idle · as when it ran fast: disk write 38.0 MiB/s".into();
+    sample.correlation.unusual.clear();
+    assert!(next(&mut sample, CorrelationCause::Stall)
+        .starts_with("The runtime paused with the GPU idle and nothing on this machine"));
     sample.correlation.lead = "paging 90.0 MiB/s".into();
+    sample.correlation.unusual = vec![CorrelationCause::Paging];
     assert!(next(&mut sample, CorrelationCause::Stall).contains("beside paging 90.0 MiB/s"));
 }

@@ -34,13 +34,10 @@ pub(crate) fn linked(insight: &CorrelationInsight) -> Option<Chart> {
     if !insight.is_material_drop() || insight.lead.is_empty() {
         return None;
     }
-    let lead = insight.lead.as_str();
     match insight.cause {
-        CorrelationCause::Stall if lead.contains("disk ") || lead.contains("SSD cache") => {
-            Some(Chart::Cache)
-        }
-        CorrelationCause::Stall if lead.contains("paging") => Some(Chart::Paging),
-        CorrelationCause::Stall if lead.contains("memory pressure") => Some(Chart::Memory),
+        // A stall names a host reading only when it ran differently while
+        // the model was fast; readings as usual are not marked.
+        CorrelationCause::Stall => insight.unusual.first().copied().and_then(chart_of),
         cause => chart_of(cause),
     }
 }

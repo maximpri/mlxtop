@@ -59,6 +59,15 @@
 - **Disk-cache stalls are named.** mlxtop reads the runtime's own storage
   traffic and oMLX's SSD-cache counters (blocks loaded, saved, evicted, and
   how full the cache is), and points the next step at the cache disk.
+- **A stall blames only what ran differently while the model was fast.**
+  On one server two requests wrote 38 MiB/s to disk at 60–85 tok/s, then
+  stopped for seven seconds with the GPU idle and the writes unchanged. The
+  stall was blamed on the disk and its samples coloured on the cache chart.
+  A disk, paging, compression or memory-pressure reading now explains a
+  stall only if it was not reached twice in recent samples at the usual
+  speed; otherwise it is listed as `as when it ran fast: disk write 37.1
+  MiB/s`, nothing but generation is coloured, and the advice points inside
+  the runtime.
 - **A slowdown is remembered until it ends**, keeps the speed it fell from,
   and keeps its first reason for as long as that reason holds.
 - The diagnostic log records `generating=` and `context=` for each sample,

@@ -282,6 +282,76 @@ fn speculative_decoding_jitter_within_a_request_is_not_a_slowdown() {
 }
 
 #[test]
+fn a_stall_does_not_blame_disk_writes_that_ran_as_fast_as_ever() {
+    // The server, 11 Nov 17:02:44–17:03:06: two requests wrote ~38 MiB/s to
+    // disk at 60–85 tok/s; then for seven seconds no token came, the GPU
+    // idle, the writes unchanged; then 80 tok/s again. The writes ran the
+    // same while it was fast, so they are not why it stopped.
+    let mib = 1024 * 1024;
+    let mut engine = CorrelationEngine::default();
+    let mut out = 1_000;
+    let mut stalled = None;
+    // (tok/s, disk write MiB/s, GPU %), one second each.
+    let mut seconds: Vec<(f64, u64, u8)> = Vec::new();
+    for _ in 0..3 {
+        seconds.extend([(58.0, 39, 99), (68.0, 34, 99), (52.0, 0, 99), (50.0, 0, 99)]);
+    }
+    seconds.extend([(77.0, 1, 99), (44.0, 20, 99)]);
+    seconds.extend([(0.0, 37, 0); 6]);
+    seconds.extend([(86.0, 38, 99), (75.0, 31, 99)]);
+    let mut idle = 0.0;
+    for (second, (tps, write, gpu)) in seconds.into_iter().enumerate() {
+        if tps > 0.0 {
+            out += tps as u64;
+            idle = 0.05;
+        } else {
+            idle += 1.0;
+        }
+        let mut sample = decoding(second as u64, tps, out, idle, gpu);
+        sample.disk.write = Some(write * mib);
+        sample.disk.read = Some(0);
+        let insight = engine.observe(&sample, defaults());
+        if insight.cause == CorrelationCause::Stall && insight.is_material_drop() {
+            stalled.get_or_insert(insight);
+        }
+    }
+    let stall = stalled.expect("the pause is a stall");
+    assert!(stall.unusual.is_empty(), "{:?}", stall.unusual);
+    assert!(
+        stall
+            .lead
+            .contains("GPU idle · as when it ran fast: disk write"),
+        "{}",
+        stall.lead
+    );
+    assert!(crate::drop_marks::linked(&stall).is_none());
+
+    // Writes it had not done while fast are still named.
+    let mut engine = CorrelationEngine::default();
+    let mut stall = None;
+    for second in 0..20u64 {
+        let pause = second >= 14;
+        let tps = if pause { 0.0 } else { 50.0 };
+        let mut sample = decoding(
+            second,
+            tps,
+            1_000 + second.min(14) * 50,
+            if pause { (second - 13) as f64 } else { 0.05 },
+            if pause { 0 } else { 99 },
+        );
+        sample.disk.write = Some(if pause { 400 * mib } else { 0 });
+        sample.disk.read = Some(0);
+        let insight = engine.observe(&sample, defaults());
+        if insight.cause == CorrelationCause::Stall && insight.is_material_drop() {
+            stall.get_or_insert(insight);
+        }
+    }
+    let stall = stall.expect("the pause is a stall");
+    assert_eq!(stall.unusual, vec![CorrelationCause::DiskIo]);
+    assert_eq!(crate::drop_marks::linked(&stall), Some(Chart::Cache));
+}
+
+#[test]
 fn a_stall_is_named_with_what_the_host_was_doing_and_journaled_with_its_end() {
     // The captured stall: 1,693 tokens out, then none for four polls while
     // the GPU sat idle and Metal memory stayed at 97%, then 31 tok/s again.
@@ -335,7 +405,7 @@ fn a_stall_is_named_with_what_the_host_was_doing_and_journaled_with_its_end() {
         vec![
             (
                 "STALL".to_owned(),
-                "no new token for 2s at 1.7k out · GPU idle → The runtime stopped with the machine idle: the cause is inside it; check its log at this time.".to_owned()
+                "no new token for 2s at 1.7k out · GPU idle → The runtime paused with the GPU idle and nothing on this machine out of the ordinary: the cause is inside it; check its log at this time.".to_owned()
             ),
             (
                 "RESUMED".to_owned(),
@@ -565,6 +635,21 @@ fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
         let mut insight = app.collector.current.correlation.clone();
         insight.cause = cause;
         insight.lead = lead.into();
+        // A stall names what ran differently from when the model was fast,
+        // as the engine does; readings as usual name nothing.
+        if cause == CorrelationCause::Stall {
+            let named = lead.split(" · as when").next().unwrap_or("");
+            insight.unusual = [
+                ("disk ", CorrelationCause::DiskIo),
+                ("SSD cache", CorrelationCause::DiskIo),
+                ("paging", CorrelationCause::Paging),
+                ("memory pressure", CorrelationCause::MemoryPressure),
+            ]
+            .into_iter()
+            .filter(|(word, _)| named.contains(word))
+            .map(|(_, cause)| cause)
+            .collect();
+        }
         crate::drop_marks::linked(&insight)
     };
     for (cause, lead, chart) in [
@@ -607,6 +692,13 @@ fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
         (
             CorrelationCause::Stall,
             "no new token for 2s · GPU idle",
+            None,
+        ),
+        // Disk writes at the rate they ran while the model was fast are
+        // not the reason it stopped: nothing is tagged.
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · GPU idle · as when it ran fast: disk write 38.0 MiB/s",
             None,
         ),
         // Nothing else unusual: nothing is tagged.
@@ -1248,6 +1340,7 @@ fn a_slowdown_colours_its_samples_on_the_charts_of_what_was_unusual() {
         direction: ThroughputDirection::Down,
         cause: CorrelationCause::Stall,
         lead: "no new token for 2s · disk read 900.0 MiB/s".into(),
+        unusual: vec![CorrelationCause::DiskIo],
         stall_seconds: Some(2.0),
         slow: true,
         ..CorrelationInsight::default()
