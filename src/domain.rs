@@ -293,8 +293,37 @@ pub(crate) struct CorrelationKey {
     pub(crate) cause: CorrelationCause,
 }
 
+/// Which part of a request's work a finding is about: reading its prompt, or
+/// writing its answer. Both are the model's performance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Phase {
+    #[default]
+    Generation,
+    Prefill,
+}
+
+impl Phase {
+    /// `generation` or `prefill`, as a sentence says it.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Generation => "generation",
+            Self::Prefill => "prefill",
+        }
+    }
+
+    /// `GEN` or `PREFILL`, as a label says it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Generation => "GEN",
+            Self::Prefill => "PREFILL",
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CorrelationInsight {
+    /// The work this finding is about.
+    pub(crate) phase: Phase,
     pub(crate) direction: ThroughputDirection,
     pub(crate) cause: CorrelationCause,
     pub(crate) summary: String,
@@ -377,6 +406,14 @@ impl CorrelationInsight {
     pub(crate) fn note(&self, cause: CorrelationCause) -> Option<&str> {
         let index = self.unusual.iter().position(|found| *found == cause)?;
         self.notes.get(index).map(String::as_str)
+    }
+
+    /// Whether this finding is about the speed `metric` charts.
+    pub(crate) fn concerns(&self, metric: ChartMetric) -> bool {
+        matches!(
+            (self.phase, metric),
+            (Phase::Generation, ChartMetric::Generation) | (Phase::Prefill, ChartMetric::Prefill)
+        )
     }
 
     /// What `cause`'s signal is doing while the model is slowed or stalled.

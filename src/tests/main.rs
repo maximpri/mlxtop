@@ -7313,3 +7313,96 @@ fn a_request_that_starts_or_ends_between_polls_is_shown_not_judged() {
         "whole intervals are judged"
     );
 }
+
+/// A prompt being read is the model's performance too: a slow prefill is
+/// found by the same rule as a slow answer, against prefill's own usual
+/// speed, and drawn on the prefill chart.
+#[test]
+fn a_slow_prefill_is_found_named_and_drawn_like_a_slow_answer() {
+    let reading = |second: u64, tps: f64, swap: u64| {
+        let mut sample = paging(second, 0.0, swap);
+        sample.llm_status = "prefilling".into();
+        sample.llm_generation_tps = None;
+        sample.llm_generation_tps_live = false;
+        sample.llm_prefill_tps = Some(tps);
+        sample.llm_prefill_tps_live = true;
+        for request in &mut sample.llm_requests {
+            request.prompt = 30_000;
+            request.cached = Some(0);
+            request.output = None;
+            request.output_tps = None;
+            request.idle_for = None;
+            request.prefilled = Some(second * 180);
+        }
+        sample
+    };
+    let swap = defaults().swap_warn_rate * 2;
+    let mut samples: Vec<Sample> = (0..12).map(|second| reading(second, 180.0, 0)).collect();
+    samples.extend((12..18).map(|second| reading(second, 70.0, swap)));
+    let mut engine = CorrelationEngine::default();
+    observe_all(&mut engine, &mut samples);
+
+    let usual = &samples[11].correlation;
+    assert_eq!(usual.phase, domain::Phase::Prefill);
+    assert!(!usual.is_material_drop());
+    assert_eq!(usual.usual_speed.map(|(speed, _)| speed), Some(180.0));
+    assert!(
+        !samples[13].correlation.is_material_drop(),
+        "two slow polls"
+    );
+    let slow = &samples[14].correlation;
+    assert!(slow.is_material_drop(), "three slow polls of prefill");
+    assert_eq!(slow.phase, domain::Phase::Prefill);
+    assert!(
+        slow.summary
+            .starts_with("PREFILL ↓61.1% (180.0→70.0 tok/s)"),
+        "{}",
+        slow.summary
+    );
+    assert!(
+        slow.unusual.contains(&CorrelationCause::Paging),
+        "{:?}",
+        slow.summary
+    );
+    assert!(slow.concerns(ChartMetric::Prefill) && !slow.concerns(ChartMetric::Generation));
+    // Generation has learned nothing from prompts being read.
+    assert_eq!(engine.speed.level(), None);
+
+    // It is drawn on the prefill chart, with paging beside it.
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for _ in 0..4 {
+        for history in [
+            &mut collector.prefill_history,
+            &mut collector.generation_history,
+            &mut collector.swap_history,
+        ] {
+            push_history_with_tone(history, Some(700), Tone::Green, 60);
+        }
+    }
+    collector.mark_unusual(&samples[14]);
+    let marked = |history: &VecDeque<ChartPoint>| {
+        history
+            .iter()
+            .filter(|point| point.tone == Tone::Unusual)
+            .count()
+    };
+    assert_eq!(marked(&collector.prefill_history), 3);
+    assert_eq!(marked(&collector.swap_history), 3);
+    assert_eq!(marked(&collector.generation_history), 0);
+    assert!(crate::drop_marks::tag(slow, 40).contains("slowed PREFILL"));
+
+    // An answer being written beside a prompt keeps the finding on generation.
+    let mut both = beside(paging(20, 50.0, 0), 30_000, true);
+    both.llm_prefill_tps = Some(70.0);
+    both.llm_prefill_tps_live = true;
+    assert_eq!(
+        engine.observe(&both, defaults()).phase,
+        domain::Phase::Generation
+    );
+}

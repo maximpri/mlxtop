@@ -267,6 +267,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   latest is for (`tok/s · ┄ usual 30.0 for 2 requests · 131.2k context`). A screen that looks the same
   healthy as it did before the detector existed gives no reason to trust
   it.
+- Performance is the prompt read as well as the answer written. With no
+  answer being written, prefill speed is judged by the same rule against
+  earlier prefills of similar prompts, with its own usual values, and a slow
+  prefill is drawn on the prefill chart as a slow answer is on generation's.
 - Colour means impact. The app exists to find what limits the model, so
   nothing is painted for being unusual alone: an unusual reading of the host
   (thermal, pressure, paging, disk, compression, memory, runtime CPU, idle

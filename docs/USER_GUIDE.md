@@ -134,7 +134,11 @@ Work mlxtop has not seen before is learned for eight samples before it is
 judged; it is never compared with different work.
 
 Generation is **slow** when its speed is unusually low for its work (and at
-least a fifth below usual) for three samples in a row. The reason given is
+least a fifth below usual) for three samples in a row. While no answer is
+being written, **prefill** is judged the same way against earlier prefills of
+similar prompts, and a slow one reads `PREFILL ↓61% (180.0→70.0 tok/s)`. A
+sample in which a request started or ended is not judged: its tokens are
+divided over an interval it worked for only part of. The reason given is
 whatever else is unusual at the same time: thermal limiting, memory pressure,
 paging, the runtime's disk work, a prompt prefilling beside the answer,
 compression, the queue, model or Metal memory, the runtime's CPU, or a GPU

@@ -897,13 +897,13 @@ impl App {
         // is known. It is quiet until generation is slow, and then takes the
         // anomaly colour: the gap under it is the drop.
         let insight = &sample.correlation;
-        let slowed = metric == ChartMetric::Generation && insight.is_material_drop();
+        let slowed = insight.concerns(metric) && insight.is_material_drop();
         let normal = insight
             .episode
             .filter(|_| slowed)
             .map(|episode| episode.reference)
             .or(insight.usual_speed.map(|(usual, _)| usual))
-            .filter(|usual| metric == ChartMetric::Generation && *usual > 0.0)
+            .filter(|usual| insight.concerns(metric) && *usual > 0.0)
             .map(|usual| (usual * 10.0).round() as u64);
         let (warning, guide_tone) = match normal {
             Some(normal) if slowed => (Some(normal), Tone::Unusual),
@@ -969,9 +969,7 @@ impl App {
             ]);
         }
         // What this chart's slowdowns are judged against.
-        if let Some((usual, slow_below)) = insight
-            .usual_speed
-            .filter(|_| metric == ChartMetric::Generation)
+        if let Some((usual, slow_below)) = insight.usual_speed.filter(|_| insight.concerns(metric))
         {
             details.push(format!("usual {usual:.1} · slow below {slow_below:.1}"));
         }
@@ -1030,19 +1028,22 @@ impl App {
                 // What the dashed line is: the speed slowdowns are judged
                 // against. It gives way before the unit does.
                 // With the work it is for, when it is for one kind of work.
-                let usual = insight.usual_speed.and_then(|(usual, _)| {
-                    let mut texts = Vec::new();
-                    if !insight.usual_for.is_empty() {
-                        texts.push(format!(
-                            "{unit} · ┄ usual {usual:.1} for {}",
-                            insight.usual_for
-                        ));
-                    }
-                    texts.push(format!("{unit} · ┄ usual {usual:.1}"));
-                    texts.into_iter().find(|text| {
-                        Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
-                    })
-                });
+                let usual = insight
+                    .usual_speed
+                    .filter(|_| insight.concerns(metric))
+                    .and_then(|(usual, _)| {
+                        let mut texts = Vec::new();
+                        if !insight.usual_for.is_empty() {
+                            texts.push(format!(
+                                "{unit} · ┄ usual {usual:.1} for {}",
+                                insight.usual_for
+                            ));
+                        }
+                        texts.push(format!("{unit} · ┄ usual {usual:.1}"));
+                        texts.into_iter().find(|text| {
+                            Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
+                        })
+                    });
                 Some(usual.unwrap_or(unit))
             }
             ChartMetric::Memory => None,
@@ -1152,7 +1153,7 @@ impl App {
             // While generation is slow, its chart says why under the bars
             // that show it, in the anomaly colour: ▼ and what else is unusual.
             let room = usize::from(area.width.saturating_sub(4));
-            let reason = (metric == ChartMetric::Generation && insight.is_material_drop())
+            let reason = (insight.concerns(metric) && insight.is_material_drop())
                 .then(|| {
                     let lead = insight.lead.split(" → ").next().unwrap_or("");
                     // With nothing else unusual the label says so, rather

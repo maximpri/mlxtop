@@ -50,10 +50,10 @@ pub(crate) fn tag(insight: &CorrelationInsight, room: usize) -> String {
         .filter(|_| !stall)
         .map(|percent| format!(" ↓{:.0}%", percent.abs()))
         .unwrap_or_default();
-    let (verb, short) = if stall {
-        ("stalled GEN", " ▼ STALL ")
-    } else {
-        ("slowed GEN", " ▼ GEN ")
+    let (verb, short) = match (stall, insight.phase) {
+        (true, _) => ("stalled GEN", " ▼ STALL "),
+        (false, crate::domain::Phase::Generation) => ("slowed GEN", " ▼ GEN "),
+        (false, crate::domain::Phase::Prefill) => ("slowed PREFILL", " ▼ PREFILL "),
     };
     [
         format!(" ▲ {verb}{drop} "),

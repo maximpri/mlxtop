@@ -154,10 +154,18 @@ fn assess_observation(sample: &Sample) -> Finding {
                 .duration_since(at)
                 .is_ok_and(|age| age <= Duration::from_secs(5))
         });
-    let live = fresh && sample.llm_generation_tps_live;
+    let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
+    let live = fresh
+        && if prefill {
+            sample.llm_prefill_tps_live
+        } else {
+            sample.llm_generation_tps_live
+        };
     if live && !sample.llm_remote && sample.correlation.is_material_drop() {
         finding.title = if sample.correlation.cause == CorrelationCause::Stall {
             "Generation stalled".into()
+        } else if prefill {
+            "Prefill slowed".into()
         } else {
             "Generation slowed".into()
         };

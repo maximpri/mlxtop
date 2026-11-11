@@ -604,6 +604,7 @@ impl Collector {
             };
             point.usual = point
                 .value
+                .filter(|_| sample.correlation.phase == crate::domain::Phase::Generation)
                 .and(sample.correlation.usual_speed)
                 .map(|(usual, _)| (usual * 10.0).round() as u64);
         }
@@ -711,7 +712,10 @@ impl Collector {
             .chain(crate::drop_marks::linked(insight))
             .collect();
         if insight.slow {
-            charts.push(Chart::Generation);
+            charts.push(match insight.phase {
+                crate::domain::Phase::Generation => Chart::Generation,
+                crate::domain::Phase::Prefill => Chart::Prefill,
+            });
         }
         for chart in charts {
             let history = match chart {
@@ -989,8 +993,11 @@ impl Collector {
                     add(
                         "RECOVERED",
                         format!(
-                            "generation back to {:.1} tok/s after {:.0}s · low {:.1} tok/s",
-                            end.rate, end.seconds, end.low
+                            "{} back to {:.1} tok/s after {:.0}s · low {:.1} tok/s",
+                            sample.correlation.phase.word(),
+                            end.rate,
+                            end.seconds,
+                            end.low
                         ),
                         Tone::Green,
                     );

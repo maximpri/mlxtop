@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.16 — 2026-11-11
+## 3.3.0-rc.17 — 2026-11-11
 
 ### Diagnosis
 
@@ -19,6 +19,14 @@
   Judged against similar requests, 3.5% were slow instead of 10.3%. Work not
   seen before is learned for eight samples, never judged against different
   work.
+- **A slow prefill is found like a slow answer.** While no answer is being
+  written, the speed prompts are read at is judged by the same rule,
+  against earlier prefills of similar prompts, with usual values of its own:
+  `PREFILL ↓61% (180.0→70.0 tok/s) · paging …`. Its samples are marked on
+  the prefill chart, the panel behind it is tagged `slowed PREFILL`, and
+  the headline reads `Prefill slowed`. Beside an answer being written, a
+  prefill stays a reason, not a subject. On one server's log (2,607 prefill
+  samples in 235 prefills) the rule found no slowdown.
 - **A request that starts or ends between two polls is not judged.** Its
   tokens are divided over an interval it wrote for only part of, so its
   speed reads low: a 73-token reply at 130 tok/s read 76 tok/s and was

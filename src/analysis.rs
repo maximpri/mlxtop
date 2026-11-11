@@ -8,7 +8,7 @@ use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
-    Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
+    Phase, Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
 };
 use crate::formatting::{
     bytes, compact_tokens, llm_generation_rate_label, llm_prefill_rate_label, percent, rate,
@@ -759,6 +759,10 @@ pub(crate) struct CorrelationEngine {
     seen: Option<SystemTime>,
     /// Which requests were writing at the previous sample.
     writers: Vec<String>,
+    /// Prefill is judged as generation is, with usual values of its own: a
+    /// prompt being read works the machine differently from an answer
+    /// being written.
+    prefill: Option<Box<CorrelationEngine>>,
     /// The reason last journaled, and when it was last seen.
     told: Option<(CorrelationCause, Option<SystemTime>)>,
 }
@@ -800,6 +804,33 @@ impl CorrelationEngine {
             self.reset();
             self.model = Some(model);
         }
+        // With no answer being written, a prompt being read is the work to
+        // judge. Beside an answer it is a reason, not a subject.
+        let writing = current.stalled_for.is_some()
+            || current
+                .generation_tps
+                .is_some_and(|tps| tps.is_finite() && tps > 0.0);
+        if !writing {
+            if let Some(reading) = current.reading(sample) {
+                let track = self.prefill.get_or_insert_with(Default::default);
+                let mut insight = track.judge(reading, thresholds);
+                insight.phase = Phase::Prefill;
+                insight.summary =
+                    insight
+                        .summary
+                        .replacen(Phase::Generation.label(), Phase::Prefill.label(), 1);
+                return insight;
+            }
+        }
+        self.judge(current, thresholds)
+    }
+
+    /// Judge one observation of a speed against earlier ones of similar work.
+    fn judge(
+        &mut self,
+        current: CorrelationObservation,
+        thresholds: Thresholds,
+    ) -> CorrelationInsight {
         // A request that began or ended between two polls wrote for only
         // part of the interval its speed is divided over: such a sample is
         // shown, never judged or learned. The same writers at both ends of
@@ -1002,6 +1033,7 @@ impl CorrelationEngine {
             self.told = Some((cause, current.at));
         }
         let insight = CorrelationInsight {
+            phase: Phase::Generation,
             direction: ThroughputDirection::Down,
             cause,
             summary: if texts.is_empty() {
@@ -1176,6 +1208,7 @@ impl CorrelationEngine {
             }
         });
         CorrelationInsight {
+            phase: Phase::Generation,
             direction: ThroughputDirection::Down,
             cause: CorrelationCause::Stall,
             summary: format!("GEN stalled · {evidence}"),
@@ -1204,6 +1237,40 @@ impl CorrelationEngine {
 }
 
 impl CorrelationObservation {
+    /// This sample as prefill work: the speed prompts are read at, by the
+    /// requests reading one, over the prompt tokens they hold. `None` when
+    /// no prompt is being read at a measured speed.
+    fn reading(&self, sample: &Sample) -> Option<Self> {
+        let speed = sample
+            .llm_prefill_tps
+            .filter(|tps| sample.llm_prefill_tps_live && tps.is_finite() && *tps > 0.0)?;
+        let readers: Vec<_> = sample
+            .llm_requests
+            .iter()
+            .filter(|r| !r.completed && !r.queued && r.prefilled.is_some())
+            .collect();
+        if readers.is_empty() && !sample.llm_requests.is_empty() {
+            return None;
+        }
+        let mut ids: Vec<String> = readers.iter().map(|r| r.id.clone()).collect();
+        ids.sort();
+        Some(Self {
+            generation_tps: Some(speed),
+            generating: readers.len() as u64,
+            prefilling: 0,
+            prefill_prompt: None,
+            stalled_for: None,
+            output_tokens: None,
+            context: (!readers.is_empty()).then(|| readers.iter().map(|r| r.prompt).sum()),
+            writers: if readers.is_empty() {
+                self.writers.clone()
+            } else {
+                ids
+            },
+            ..self.clone()
+        })
+    }
+
     pub(crate) fn from_sample(sample: &Sample) -> Self {
         // Runtimes report prefill progress only while a prompt is being read.
         let running: Vec<_> = sample
