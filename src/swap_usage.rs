@@ -15,8 +15,10 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, sample: &Sample) {
     let row = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(Paragraph::default().style(Style::default().bg(PANEL)), row);
     if !sample.swap_available || sample.swap_total == 0 {
+        // macOS creates swap files only when it needs them: none yet is
+        // unused swap, not swap turned off.
         let state = if sample.swap_available {
-            "swap off"
+            "swap 0 B used · no swap file yet"
         } else {
             "swap —"
         };

@@ -89,6 +89,14 @@ pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample) {
             .command("/usr/bin/pmset", &["-g", "therm"])
             .unwrap_or_default(),
     );
+    // Power telemetry needs no privileges; desktops publish it too.
+    sample.system_power_mw = host
+        .command(
+            "/usr/sbin/ioreg",
+            &["-r", "-d", "1", "-w", "0", "-c", "AppleSmartBattery"],
+        )
+        .and_then(|text| find_named_number(&text, "SystemPowerIn"))
+        .filter(|milliwatts| *milliwatts > 0);
 }
 
 // --- Linux sampling -------------------------------------------------------

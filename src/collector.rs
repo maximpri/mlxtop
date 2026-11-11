@@ -54,6 +54,7 @@ pub(crate) struct CollectorView {
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) disk_history: VecDeque<ChartPoint>,
+    pub(crate) decode_reads: VecDeque<crate::domain::DecodeRead>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
@@ -92,6 +93,7 @@ pub(crate) struct Collector {
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) disk_history: VecDeque<ChartPoint>,
+    pub(crate) decode_reads: VecDeque<crate::domain::DecodeRead>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
@@ -199,6 +201,7 @@ impl Collector {
             prefill_history: VecDeque::with_capacity(history_limit),
             cache_history: VecDeque::with_capacity(history_limit),
             disk_history: VecDeque::with_capacity(history_limit),
+            decode_reads: VecDeque::with_capacity(history_limit),
             load_history: VecDeque::with_capacity(history_limit),
             composition_history: VecDeque::with_capacity(history_limit),
             swap_history: VecDeque::with_capacity(history_limit),
@@ -514,6 +517,7 @@ impl Collector {
             sample.ssd_cache,
             self.current.ssd_cache,
         );
+        sample.disk.weights = weight_reads(&sample);
         sample.llm_active_requests = llm_stats.and_then(|stats| stats.active_requests);
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
         sample.llm_model_memory = llm_stats.and_then(|stats| stats.model_memory);
@@ -564,12 +568,30 @@ impl Collector {
             self.history_limit,
             self.thresholds,
         );
+        // Weight reads are blue, prompt-cache traffic cyan.
         push_history_with_tone(
             &mut self.disk_history,
             sample.disk.rate(),
-            Tone::Cyan,
+            if sample.disk.weights > 0 {
+                Tone::Blue
+            } else {
+                Tone::Cyan
+            },
             self.history_limit,
         );
+        if let Some(speed) = sample
+            .llm_generation_tps
+            .filter(|speed| speed.is_finite() && *speed > 0.0)
+            .filter(|_| sample.disk.read.is_some())
+        {
+            if self.decode_reads.len() >= self.history_limit {
+                self.decode_reads.pop_front();
+            }
+            self.decode_reads.push_back(crate::domain::DecodeRead {
+                speed,
+                from_disk: sample.disk.weights > 0,
+            });
+        }
         // Generation has no threshold either: a sample is its usual speed
         // or, marked below, unusually slow.
         // Each sample keeps the usual speed for the work it was doing, so
@@ -717,6 +739,7 @@ impl Collector {
             prefill_history: self.prefill_history.clone(),
             cache_history: self.cache_history.clone(),
             disk_history: self.disk_history.clone(),
+            decode_reads: self.decode_reads.clone(),
             load_history: self.load_history.clone(),
             composition_history: self.composition_history.clone(),
             swap_history: self.swap_history.clone(),
@@ -1094,6 +1117,7 @@ impl Collector {
         self.prefill_history.clear();
         self.cache_history.clear();
         self.disk_history.clear();
+        self.decode_reads.clear();
         self.load_history.clear();
         self.composition_history.clear();
         self.swap_history.clear();
@@ -1174,6 +1198,31 @@ pub(crate) fn disk_activity(
         loads,
         saves,
         evictions,
+        weights: 0,
+    }
+}
+
+/// Reads the runtime made while decoding, with no prompt being prefilled and
+/// no prompt-cache block loaded, are its weights: an engine streaming MoE
+/// experts from disk. Prompt work reads its cache; that is not counted.
+pub(crate) fn weight_reads(sample: &Sample) -> u64 {
+    let disk = sample.disk;
+    let decoding = sample.llm_generation_tps.is_some_and(|speed| speed > 0.0);
+    let prefilling = sample.llm_prefill_tokens_expected.is_some()
+        || sample
+            .llm_requests
+            .iter()
+            .any(|request| request.prefilled.is_some() && !request.completed);
+    match disk.read {
+        Some(read)
+            if decoding
+                && !prefilling
+                && disk.loads == 0
+                && read >= crate::analysis::DISK_ACTIVE_RATE =>
+        {
+            read
+        }
+        _ => 0,
     }
 }
 

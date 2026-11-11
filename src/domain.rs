@@ -446,6 +446,17 @@ pub(crate) struct DiskActivity {
     pub(crate) loads: u64,
     pub(crate) saves: u64,
     pub(crate) evictions: u64,
+    /// The part of `read` that was weights: what the runtime read while it
+    /// decoded, with no prompt prefilling and no prompt-cache block loaded.
+    /// An engine that streams MoE experts from disk reads here every token.
+    pub(crate) weights: u64,
+}
+
+/// One decoding sample: its speed, and whether weights came from disk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DecodeRead {
+    pub(crate) speed: f64,
+    pub(crate) from_disk: bool,
 }
 
 impl DiskActivity {
@@ -538,6 +549,8 @@ pub(crate) struct Sample {
     pub(crate) metal: MetalTelemetry,
     pub(crate) mlx: MlxTelemetry,
     pub(crate) thermal: String,
+    /// Power the whole machine draws, in milliwatts, where macOS reports it.
+    pub(crate) system_power_mw: Option<u64>,
     pub(crate) llm_count: u32,
     pub(crate) llm_rss: u64,
     pub(crate) process_memory: Option<process_memory::Reading>,
@@ -682,6 +695,7 @@ impl Default for Sample {
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
             thermal: "unavailable".into(),
+            system_power_mw: None,
             llm_count: 0,
             llm_rss: 0,
             process_memory: None,

@@ -74,8 +74,13 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   columns of the next row (about 28% of the height, nine to fourteen rows; one
   line until the first request); compression and queue stack in the third, and
   on Linux, which has no compressor counters, the queue takes it alone. Each
-  prompt bar carries its cached share as a green segment. The cache panel
-  (`cache I/O`) shows what the cache is worth, never raw disk speeds: its title
+  prompt bar carries its cached share as a green segment. The disk panel
+  (`disk I/O`) shows what the runtime's disk work costs and saves, never raw
+  disk speeds. Reads made while decoding, with no prompt prefilling and no
+  prompt-cache block loaded, are weights (an engine streaming MoE experts):
+  those samples are blue, and a blue `weights` bar gives the share of
+  decoding that read from disk with the median decode speed then and from
+  memory. Its title
   is the prefill time the cache saved this session (cached tokens at the
   median measured prefill speed); two green bars give the share of prompt
   tokens served from cache over the session and for the last prompt, each with

@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.9 — 2026-11-11
+## 3.3.0-rc.10 — 2026-11-11
 
 ### Diagnosis
 
@@ -51,16 +51,33 @@
   the generation chart at once; an unusual reading of the host is magenta on
   its own chart or in the header. A host reading that stays unusual for 30
   seconds at the usual speed becomes its usual value.
-- **Cache I/O shows what the cache is worth, not disk speeds.** Its title
+- **Disk I/O shows weights streamed from disk.** For engines that load MoE
+  experts from disk, such as Splash and Strata, what the runtime reads while
+  it decodes, with no prompt prefilling and no prompt-cache block loaded,
+  counts as weights. Those samples are blue on the chart, a `weights` bar
+  gives the share of decoding that read from disk, with the decode speed
+  then and from memory (`25% of decode from disk · 18 vs 42 tok/s`), and the
+  bottom edge reads `streaming weights from disk`. The panel is now titled
+  `disk I/O`.
+- **Disk I/O shows what the prompt cache is worth, not disk speeds.** Its title
   reads the prefill time the cache saved this session (`saved ≈1h 25m of
   prefill`): cached tokens at the measured prefill speed. Two bars show the
   share of prompt tokens served from cache, over the session and for the last
   prompt, each with the time it saved. The disk chart is always drawn, and the
   bottom edge says what the SSD tier is doing: loading, saving or evicting
   prefixes, or idle.
-- **Cache I/O and compression swap places.** The cache sits in the host row
+- **Disk I/O and compression swap places.** The cache sits in the host row
   between memory and paging; compression stacks above the queue. On Linux,
   with no compressor counters, the queue takes that column.
+- **The header reads GPU memory against the GPU limit** the memory legend
+  marks (`iogpu.wired_limit_mb`, or the runtime's recommended working set),
+  not the driver's current allocation, which grows with use and read
+  near full: `GPU mem 23.8 GiB / 32.0 GiB` where it said `/ 24.6 GiB`.
+- **Thermal state is always in the header**, with the power the machine
+  draws: `thermal ok · 61 W`. It was shown only when macOS reported a
+  warning. Power comes from macOS's power telemetry and needs no sudo.
+- **Swap that macOS has not created yet reads `swap 0 B used · no swap file
+  yet`**, not `swap off`: macOS adds swap files only when it needs them.
 - **Charts are no longer shaded during a slowdown.** The panel behind it says
   what it did instead: `▲ slowed GEN ↓50%` or `▲ stalled GEN`.
 - **Generation and prefill bars are green.** They were graded yellow and red

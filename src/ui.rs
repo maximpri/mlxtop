@@ -614,7 +614,7 @@ impl App {
     pub(crate) fn cache_panel(&self) -> (&'static str, &VecDeque<ChartPoint>, ChartMetric) {
         let disk = &self.collector.disk_history;
         if disk.iter().any(|point| point.value.is_some()) {
-            ("cache I/O", disk, ChartMetric::Disk)
+            ("disk I/O", disk, ChartMetric::Disk)
         } else {
             ("cache", &self.collector.cache_history, ChartMetric::Cache)
         }
@@ -1302,6 +1302,18 @@ impl App {
             // bar needs a row of chart and the SSD row left beneath it.
             let speed = cache_impact::prefill_speed(&self.collector.prefill_history, sample);
             let reserved = if sample.ssd_cache.is_some() { 2 } else { 1 };
+            // Weights read while decoding come first: they cost every token.
+            if let Some(weights) = cache_impact::weights(&self.collector.decode_reads) {
+                if inner.height > reserved {
+                    cache_impact::draw_weights(
+                        frame,
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                        weights,
+                    );
+                    inner.y += 1;
+                    inner.height -= 1;
+                }
+            }
             let session = cache_impact::session(sample);
             let bars = [
                 session.map(|reuse| ("session", reuse)),
@@ -1814,6 +1826,8 @@ impl App {
                 Paragraph::new(match (metric, inner.width >= 32) {
                     (ChartMetric::Compression, true) => "No compression in this window",
                     (ChartMetric::Compression, false) => "No compression",
+                    (ChartMetric::Disk, true) => "No disk reads or writes in this window",
+                    (ChartMetric::Disk, false) => "Disk idle",
                     (_, true) => "No paging traffic in this window",
                     (_, false) => "No paging traffic",
                 })

@@ -258,3 +258,25 @@ fn the_header_colours_a_reading_that_is_unusual() {
         Some(Tone::Unusual.color())
     );
 }
+
+#[test]
+fn gpu_memory_reads_against_the_limit_and_thermal_and_power_always_show() {
+    let mut sample = live_sample();
+    let history = request_history::History::default();
+    // Without a limit, the driver's allocation is all there is to compare with.
+    let screen = render(&sample, &history, 160, 6);
+    assert!(screen.contains("8.0 GiB / 16.0 GiB"), "{screen}");
+    // With one, the header agrees with the memory legend's GPU limit.
+    sample.metal.resource_limit = Some(32 * 1024_u64.pow(3));
+    sample.system_power_mw = Some(61_400);
+    let screen = render(&sample, &history, 160, 6);
+    assert!(screen.contains("8.0 GiB / 32.0 GiB"), "{screen}");
+    assert!(screen.contains("thermal ok · 61 W"), "{screen}");
+    sample.thermal = "unavailable".into();
+    assert!(render(&sample, &history, 160, 6).contains("thermal — · 61 W"));
+    sample.system_power_mw = None;
+    assert!(!render(&sample, &history, 160, 6).contains("thermal"));
+    sample.thermal = "serious".into();
+    sample.system_power_mw = Some(90_000);
+    assert!(render(&sample, &history, 160, 6).contains("THERMAL serious · 90 W"));
+}

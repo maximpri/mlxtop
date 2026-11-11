@@ -87,6 +87,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             prefill_history: VecDeque::new(),
             cache_history: VecDeque::new(),
             disk_history: VecDeque::new(),
+            decode_reads: Default::default(),
             load_history: VecDeque::new(),
             composition_history: VecDeque::new(),
             swap_history: VecDeque::new(),
@@ -146,6 +147,7 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         prefill_history: VecDeque::new(),
         cache_history: VecDeque::new(),
         disk_history: VecDeque::new(),
+        decode_reads: Default::default(),
         load_history: VecDeque::new(),
         composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),
@@ -5312,6 +5314,7 @@ fn disk_activity_is_storage_rates_and_cache_blocks_since_the_last_sample() {
             loads: 10,
             saves: 0,
             evictions: 1,
+            weights: 0,
         }
     );
     assert_eq!(activity.rate(), Some(402 * MIB));
@@ -5437,7 +5440,7 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
         app.render_indicator_chart(frame, frame.area(), name, history, metric)
     });
     for label in [
-        "cache I/O",
+        "disk I/O",
         "saved ≈1h 30m of prefill",
         "session",
         "90% of 1.2M · ≈1h 30m saved",
@@ -5456,10 +5459,10 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     assert!(short.contains("SSD"), "{short}");
     // The Overview and the enlarged view both use it.
     let screen = render_app(&app, 180, 50);
-    assert!(screen.contains("cache I/O"), "{screen}");
+    assert!(screen.contains("disk I/O"), "{screen}");
     app.charts.focused = Chart::Cache;
     app.charts.expanded = true;
-    assert!(render_app(&app, 120, 40).contains("cache I/O"));
+    assert!(render_app(&app, 120, 40).contains("disk I/O"));
 }
 
 #[test]
@@ -7087,4 +7090,80 @@ fn the_usual_speed_line_follows_the_work_column_by_column() {
         "{}",
         buffer_rows(&buffer).join("\n")
     );
+}
+
+#[test]
+fn decode_time_reads_are_weights_and_the_disk_panel_shows_their_cost() {
+    use crate::collector::weight_reads;
+    let mut sample = Sample {
+        llm_generation_tps: Some(18.0),
+        disk: domain::DiskActivity {
+            read: Some(900 * MIB),
+            write: Some(0),
+            ..Default::default()
+        },
+        ..Sample::default()
+    };
+    assert_eq!(
+        weight_reads(&sample),
+        900 * MIB,
+        "reads while decoding are weights"
+    );
+    sample.disk.loads = 3;
+    assert_eq!(weight_reads(&sample), 0, "a prompt-cache load is the cache");
+    sample.disk.loads = 0;
+    sample.llm_prefill_tokens_expected = Some(4000);
+    assert_eq!(weight_reads(&sample), 0, "prefill reads its cache");
+    sample.llm_prefill_tokens_expected = None;
+    sample.disk.read = Some(MIB);
+    assert_eq!(weight_reads(&sample), 0, "a trickle is not streaming");
+    sample.disk.read = Some(900 * MIB);
+    sample.llm_generation_tps = None;
+    assert_eq!(weight_reads(&sample), 0, "no decode, no weights");
+
+    let mut reads = VecDeque::new();
+    assert_eq!(crate::cache_impact::weights(&reads), None);
+    for (speed, from_disk) in [(42.0, false), (40.0, false), (18.0, true), (44.0, false)] {
+        reads.push_back(domain::DecodeRead { speed, from_disk });
+    }
+    assert_eq!(
+        crate::cache_impact::weights(&reads),
+        Some((0.25, Some(18.0), Some(42.0)))
+    );
+
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    app.collector.decode_reads = reads;
+    app.collector.current.disk = domain::DiskActivity {
+        read: Some(900 * MIB),
+        write: Some(0),
+        weights: 900 * MIB,
+        ..Default::default()
+    };
+    for second in 0..20 {
+        push_history_with_tone(
+            &mut app.collector.disk_history,
+            Some(if second % 2 == 0 { 900 * MIB } else { 0 }),
+            Tone::Blue,
+            60,
+        );
+    }
+    let (name, history, metric) = app.cache_panel();
+    let history = history.clone();
+    let screen = render_view(80, 10, |frame| {
+        app.render_indicator_chart(frame, frame.area(), name, &history, metric)
+    });
+    for label in [
+        "disk I/O",
+        "streaming weights",
+        "weights",
+        "25% of decode from disk · 18 vs 42 tok/s",
+        "streaming weights from disk",
+    ] {
+        assert!(screen.contains(label), "missing {label}\n{screen}");
+    }
+    let narrow = render_view(30, 10, |frame| {
+        app.render_indicator_chart(frame, frame.area(), name, &history, metric)
+    });
+    assert!(narrow.contains("weights"), "{narrow}");
 }

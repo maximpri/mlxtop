@@ -3,9 +3,9 @@
 //! served instead of computing, the prefill time that saved, and what its SSD
 //! tier is doing. Drawn as bars, not as raw rates.
 use crate::analysis::DISK_ACTIVE_RATE;
-use crate::domain::{ChartPoint, Sample, Tone};
+use crate::domain::{ChartPoint, DecodeRead, Sample, Tone};
 use crate::formatting::{compact_tokens, duration_label};
-use crate::theme::{EDGE, GREEN, MUTED, PANEL};
+use crate::theme::{BLUE, EDGE, GREEN, MUTED, PANEL};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -60,6 +60,9 @@ pub(crate) fn last_prompt(sample: &Sample) -> Option<(u64, u64)> {
 /// The title's reading: the prefill time the cache saved this session.
 pub(crate) fn headline(sample: &Sample, speed: Option<f64>, width: u16) -> String {
     let Some((_, cached)) = session(sample) else {
+        if sample.disk.weights > 0 {
+            return "streaming weights".into();
+        }
         return sample
             .llm_cache_efficiency
             .map(|reuse| format!("reuse {reuse:.0}%"))
@@ -77,7 +80,9 @@ pub(crate) fn headline(sample: &Sample, speed: Option<f64>, width: u16) -> Strin
 pub(crate) fn activity(sample: &Sample) -> Option<(&'static str, Tone)> {
     let disk = sample.disk;
     let traffic = disk.read.zip(disk.write).map(|(r, w)| r.saturating_add(w));
-    Some(if disk.evictions > 0 {
+    Some(if disk.weights > 0 {
+        ("streaming weights from disk", Tone::Blue)
+    } else if disk.evictions > 0 {
         ("evicting old prefixes", Tone::Yellow)
     } else if disk.loads > 0 && disk.saves > 0 {
         ("loading and saving prefixes", Tone::Cyan)
@@ -135,6 +140,74 @@ pub(crate) fn draw_reuse(
         Span::styled("█".repeat(filled), Style::default().fg(GREEN)),
         Span::styled("█".repeat(bar - filled), Style::default().fg(EDGE)),
         Span::styled(format!(" {note}"), Style::default().fg(GREEN)),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(PANEL)), row);
+}
+
+/// How decoding depended on the disk: the share of decoding samples that read
+/// weights from it, and the median speed with and without those reads.
+pub(crate) fn weights(reads: &VecDeque<DecodeRead>) -> Option<(f64, Option<f64>, Option<f64>)> {
+    let streamed = reads.iter().filter(|read| read.from_disk).count();
+    if streamed == 0 {
+        return None;
+    }
+    let median = |from_disk: bool| {
+        let mut speeds: Vec<f64> = reads
+            .iter()
+            .filter(|read| read.from_disk == from_disk)
+            .map(|read| read.speed)
+            .collect();
+        speeds.sort_by(f64::total_cmp);
+        speeds.get(speeds.len() / 2).copied()
+    };
+    Some((
+        streamed as f64 / reads.len() as f64,
+        median(true),
+        median(false),
+    ))
+}
+
+/// The weights bar: decoding samples that read weights from disk, blue, and
+/// what that cost in speed against decoding from memory.
+pub(crate) fn draw_weights(
+    frame: &mut Frame,
+    row: Rect,
+    (share, from_disk, from_memory): (f64, Option<f64>, Option<f64>),
+) {
+    if row.is_empty() {
+        return;
+    }
+    let percent = format!("{:.0}%", share * 100.0);
+    let speeds = match (from_disk, from_memory) {
+        (Some(disk), Some(memory)) => Some(format!("{disk:.0} vs {memory:.0} tok/s")),
+        (Some(disk), None) => Some(format!("{disk:.0} tok/s")),
+        _ => None,
+    };
+    let width = usize::from(row.width);
+    let prefix = format!("{:<8}", "weights");
+    let note = [
+        speeds
+            .as_ref()
+            .map(|speeds| format!("{percent} of decode from disk · {speeds}")),
+        speeds
+            .as_ref()
+            .map(|speeds| format!("{percent} · {speeds}")),
+        Some(format!("{percent} of decode from disk")),
+        Some(percent.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|note| prefix.len() + Line::from(note.as_str()).width() + 10 <= width)
+    .unwrap_or_default();
+    let bar = width
+        .saturating_sub(prefix.len() + Line::from(note.as_str()).width() + 1)
+        .max(1);
+    let filled = ((share * bar as f64).round() as usize).min(bar);
+    let line = Line::from(vec![
+        Span::styled(prefix, Style::default().fg(MUTED)),
+        Span::styled("█".repeat(filled), Style::default().fg(BLUE)),
+        Span::styled("█".repeat(bar - filled), Style::default().fg(EDGE)),
+        Span::styled(format!(" {note}"), Style::default().fg(BLUE)),
     ]);
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(PANEL)), row);
 }
