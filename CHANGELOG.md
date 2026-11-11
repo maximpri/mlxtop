@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.3.0-rc.8 — 2026-11-11
+
+### Diagnosis
+
+- **Speed is judged against similar work.** A sample is compared with
+  earlier samples with as many requests writing at once and a context within
+  a factor of two, not with every earlier sample. On one oMLX server's week
+  of 4,725 requests, speed fell from 83 to 54 tok/s as context grew from
+  under 1k to 64k–128k, and each answer ran at 73, 55, 43 and 31 tok/s with
+  one to four writing at once. Judged against similar requests, 3.5% were
+  slow instead of 10.3%, and the usual speed predicted the next sample
+  better: median error 6.8% instead of 8.5%, 90th percentile 32% instead of
+  42%.
+- Work not seen before is learned for eight samples, never judged against
+  different work. Request count and prompt size are no longer given as a
+  slowdown's reason, because the usual speed already allows for them.
+- With nothing else unusual, the suggested check is the runtime's log.
+- The diagnostic log records `generating=` and `context=` for each sample,
+  so a session can be replayed against its work.
+
+### Dashboards
+
+- **The usual-speed line follows the work.** The generation chart draws
+  each sample's usual speed, column by column: it steps when a request joins
+  or leaves, and runs through bars that pass it. The bottom edge, Diagnostics
+  and `--once` say what it is for: `usual 30.0 for 2 requests · 131k
+  context`.
+
 ## 3.3.0-rc.7 — 2026-11-10
 
 ### Dashboards

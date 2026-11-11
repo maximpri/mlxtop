@@ -47,13 +47,10 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
         CorrelationCause::ConcurrentPrefill => {
             "Expected while the prompt prefills; recheck after it finishes."
         }
-        CorrelationCause::Queueing | CorrelationCause::Concurrency => {
-            "Compare speed with one active request."
-        }
-        CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
+        CorrelationCause::Queueing => "Compare speed with one active request.",
         CorrelationCause::Cpu => "Runtime is busy on the CPU; check what it is doing there.",
         CorrelationCause::GpuIdle => "GPU is waiting on the runtime; check its CPU and disk work.",
-        CorrelationCause::None => "Compare prompt size and runtime settings.",
+        CorrelationCause::None => "Check the runtime's log at this time.",
     }
 }
 

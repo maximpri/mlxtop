@@ -66,9 +66,9 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
     let mut sample = busy_sample();
     sample.correlation = CorrelationInsight {
         direction: ThroughputDirection::Down,
-        cause: CorrelationCause::Concurrency,
-        summary: "GEN ↓20.0% (30.0→24.0 tok/s) · unusual: 2 requests running (usual 1)".into(),
-        lead: "2 requests running (usual 1)".into(),
+        cause: CorrelationCause::Queueing,
+        summary: "GEN ↓20.0% (30.0→24.0 tok/s) · unusual: 2 waiting (usual 0)".into(),
+        lead: "2 waiting (usual 0)".into(),
         ..CorrelationInsight::default()
     };
     let finding = assess(&sample);
@@ -88,7 +88,7 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
     );
     lasting.correlation.episode.as_mut().unwrap().seconds = 3.0;
     assert_eq!(assess(&lasting).evidence, "GEN ↓20.0% (30.0→24.0 tok/s)");
-    assert_eq!(finding.context, "WITH 2 requests running (usual 1)");
+    assert_eq!(finding.context, "WITH 2 waiting (usual 0)");
     assert_eq!(finding.next, "Compare speed with one active request.");
     sample.llm_status = "stale".into();
     assert!(!assess(&sample).actionable);
@@ -198,14 +198,6 @@ fn slowdown_findings_recommend_a_check_for_each_cause() {
             "Compare speed with one active request.",
         ),
         (
-            CorrelationCause::Concurrency,
-            "Compare speed with one active request.",
-        ),
-        (
-            CorrelationCause::ContextGrowth,
-            "Compare a request with a shorter prompt.",
-        ),
-        (
             CorrelationCause::Cpu,
             "Runtime is busy on the CPU; check what it is doing there.",
         ),
@@ -215,7 +207,7 @@ fn slowdown_findings_recommend_a_check_for_each_cause() {
         ),
         (
             CorrelationCause::None,
-            "Compare prompt size and runtime settings.",
+            "Check the runtime's log at this time.",
         ),
     ] {
         let mut sample = busy_sample();

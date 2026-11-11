@@ -132,6 +132,10 @@ pub(crate) struct ChartPoint {
     pub(crate) value: Option<u64>,
     pub(crate) tone: Tone,
     pub(crate) observed_at: SystemTime,
+    /// What the value usually is for the work at the time, in the same
+    /// units: drawn as a dashed line, so that a change explained by the
+    /// work shows the line moving with it.
+    pub(crate) usual: Option<u64>,
 }
 
 #[derive(Default)]
@@ -239,9 +243,6 @@ pub(crate) enum CorrelationCause {
     Queueing,
     /// A prompt prefilling beside a request that is generating.
     ConcurrentPrefill,
-    /// Several requests generating at once share the GPU.
-    Concurrency,
-    ContextGrowth,
     ModelMemory,
     /// The runtime reading or writing its disk (prompt cache) mid-answer.
     DiskIo,
@@ -263,8 +264,6 @@ impl CorrelationCause {
             Self::MetalMemory => "Metal memory pressure",
             Self::Queueing => "queueing",
             Self::ConcurrentPrefill => "prefill beside generation",
-            Self::Concurrency => "concurrent requests",
-            Self::ContextGrowth => "context/KV growth",
             Self::ModelMemory => "model memory growth",
             Self::DiskIo => "runtime disk I/O",
             Self::Cpu => "runtime CPU",
@@ -279,8 +278,6 @@ impl CorrelationCause {
             | Self::MetalMemory
             | Self::Queueing
             | Self::ConcurrentPrefill
-            | Self::Concurrency
-            | Self::ContextGrowth
             | Self::ModelMemory
             | Self::DiskIo
             | Self::Cpu
@@ -323,8 +320,12 @@ pub(crate) struct CorrelationInsight {
     /// workload counts; outside one only the host's readings are watched.
     pub(crate) unusual: Vec<CorrelationCause>,
     pub(crate) notes: Vec<String>,
-    /// The usual generation speed, and the speed below which it is slow.
+    /// The usual generation speed for the work being done, and the speed
+    /// below which it is slow.
     pub(crate) usual_speed: Option<(f64, f64)>,
+    /// The work that usual speed is for (`1 request · 40k context`), or
+    /// empty when it is taken over every kind of work.
+    pub(crate) usual_for: String,
 }
 
 /// One slowdown, from the sample where speed first fell to now. The speed

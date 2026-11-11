@@ -143,8 +143,9 @@ are green. Magenta marks an unusual sample on any time chart and is used for
 nothing else: on the generation chart, a sample whose speed was unusually far
 below its usual value; on another chart, a sample whose reading was unusual
 for the host, or was the reason for a slowdown. The generation chart's
-dashed reference line is its usual speed: grey ordinarily, magenta during a
-slowdown. Prompt CACHED shares below 4,096 tokens stay
+dashed reference line is each sample's usual speed for the work it was doing
+(requests writing and their context), drawn column by column and cut through
+bars that pass it: grey ordinarily, magenta over slow samples. Prompt CACHED shares below 4,096 tokens stay
 neutral cyan.
 
 Chart colors agree with the assessment where both grade the same signal:

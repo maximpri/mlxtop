@@ -9,7 +9,20 @@ impl ChartPoint {
             value,
             tone,
             observed_at: SystemTime::now(),
+            usual: None,
         }
+    }
+}
+
+impl crate::analysis::Speeds {
+    /// The usual speed over every earlier sample.
+    fn level(&self) -> Option<f64> {
+        // A lone request with the context the test samples hold.
+        let lone = crate::analysis::Work {
+            requests: 1,
+            context: Some(70_000),
+        };
+        self.usual(lone).level()
     }
 }
 
@@ -4637,7 +4650,7 @@ fn throughput_and_cache_charts_grade_against_their_thresholds() {
     // Generation follows the assessment: a 30% drop is red whatever its cause.
     let mut insight = CorrelationInsight {
         direction: ThroughputDirection::Down,
-        cause: CorrelationCause::Concurrency,
+        cause: CorrelationCause::Queueing,
         delta_percent: Some(-15.0),
         ..CorrelationInsight::default()
     };
@@ -5807,9 +5820,7 @@ fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
             "x",
             Some(Chart::Prefill),
         ),
-        (CorrelationCause::Concurrency, "x", Some(Chart::Queue)),
         (CorrelationCause::Queueing, "x", Some(Chart::Queue)),
-        (CorrelationCause::ContextGrowth, "x", Some(Chart::Prompt)),
         (
             CorrelationCause::Stall,
             "no new token for 2s · disk read 1 GiB/s",
@@ -5856,14 +5867,11 @@ fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
         ChartMetric::Swap,
     );
     assert!(buffer_rows(&buffer)[9].ends_with(" ▲ stalled GEN ─┘"));
-    app.collector.current.correlation.cause = CorrelationCause::Concurrency;
+    app.collector.current.correlation.cause = CorrelationCause::Queueing;
     let queue = render_view(60, 8, |frame| {
         app.draw_operator_chart(frame, frame.area(), Chart::Queue)
     });
     assert!(queue.contains("slowed GEN"), "{queue}");
-    app.collector.current.correlation.cause = CorrelationCause::ContextGrowth;
-    let prompt = render_view(80, 8, |frame| app.draw_request_chart(frame, frame.area()));
-    assert!(prompt.contains("slowed GEN"), "{prompt}");
     // Too small to hold the tag: the panel is left as drawn.
     let tiny = render_view(8, 3, |frame| app.draw_request_chart(frame, frame.area()));
     assert!(!tiny.contains('▼') && !tiny.contains('▲'), "{tiny}");
@@ -6020,7 +6028,7 @@ fn a_slowdown_with_nothing_else_unusual_becomes_the_usual_speed_after_thirty_sec
         vec![
             (
                 "SLOWDOWN".to_owned(),
-                "GEN ↓40.0% (50.0→30.0 tok/s) · nothing else unusual → Compare prompt size and runtime settings.".to_owned()
+                "GEN ↓40.0% (50.0→30.0 tok/s) · nothing else unusual → Check the runtime's log at this time.".to_owned()
             ),
             (
                 "SETTLED".to_owned(),
@@ -6130,19 +6138,6 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
             Box::new(|s| beside(s, 35_628, true)),
         ),
         (
-            CorrelationCause::Concurrency,
-            "2 requests running (usual 1)".into(),
-            Box::new(|s| beside(s, 9_000, false)),
-        ),
-        (
-            CorrelationCause::ContextGrowth,
-            "prompt 135.6k (usual 67.8k)".into(),
-            Box::new(|mut s| {
-                s.llm_requests[0].prompt = 135_586;
-                s
-            }),
-        ),
-        (
             CorrelationCause::Compression,
             format!("compression {} (usual none)", rate(compression)),
             Box::new(move |mut s| {
@@ -6226,7 +6221,7 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     let both = slowed(&|mut s| {
         s.thermal = "limited 60%".into();
         s.llm_waiting_requests = Some(2);
-        beside(s, 9_000, false)
+        s
     });
     assert_eq!(
         both.note(CorrelationCause::Queueing),
@@ -6250,38 +6245,38 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     assert_eq!(both.cause, CorrelationCause::Thermal);
     assert_eq!(
         both.summary,
-        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal limit + 2 requests running (usual 1)"
+        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal limit + 2 waiting (usual 0)"
     );
     assert_eq!(
         both.details,
-        "thermal limiting · thermal limit · 2 requests running (usual 1) · 2 waiting (usual 0)"
+        "thermal limiting · thermal limit · 2 waiting (usual 0)"
     );
     assert_eq!(
         both.unusual,
-        vec![
-            CorrelationCause::Thermal,
-            CorrelationCause::Concurrency,
-            CorrelationCause::Queueing
-        ]
+        vec![CorrelationCause::Thermal, CorrelationCause::Queueing]
     );
 }
 
 #[test]
-fn a_longer_prompt_explains_a_slowdown_and_then_becomes_usual() {
+fn a_prompt_several_times_longer_is_new_work_and_is_learned_not_called_slow() {
     let long = |second: u64| {
         let mut sample = paging(second, 30.0, 0);
-        sample.llm_requests[0].prompt = 135_586;
+        sample.llm_requests[0].prompt = 203_379;
         sample
     };
-    let samples = after_usual((10..50).map(long).collect());
-    assert_eq!(
-        samples[12].correlation.cause,
-        CorrelationCause::ContextGrowth
+    let samples = after_usual((10..30).map(long).collect());
+    // Slower than the shorter prompt ran, and expected to be: it is never
+    // a slowdown, and once seen it has a usual speed of its own.
+    assert!(samples.iter().all(|s| !s.correlation.is_material_drop()));
+    assert!(samples.iter().all(|s| !s.correlation.slow));
+    assert_eq!(samples[17].correlation.usual_speed, None);
+    let learned = &samples[29].correlation;
+    assert_eq!(learned.usual_speed.unwrap().0, 30.0);
+    assert!(
+        learned.usual_for.starts_with("1 request · 205."),
+        "{}",
+        learned.usual_for
     );
-    // It is the workload, not a fault: after thirty seconds it settles, and
-    // the longer prompt is the usual one.
-    assert!(samples[42].correlation.ended.is_some_and(|end| end.settled));
-    assert!(!samples[49].correlation.is_material_drop());
 }
 
 #[test]
@@ -6482,8 +6477,6 @@ fn a_slowdown_colours_its_samples_on_the_charts_of_what_was_unusual() {
         CorrelationCause::ConcurrentPrefill,
         CorrelationCause::DiskIo,
         // Shown per request, not per sample: nothing to colour.
-        CorrelationCause::Concurrency,
-        CorrelationCause::ContextGrowth,
     ];
     collector.mark_unusual(&sample);
     assert!(tones(&collector.generation_history).iter().all(|u| !u));
@@ -6841,4 +6834,171 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
     sample.correlation.notes.clear();
     let lines = crate::report::diagnostic_lines(&sample);
     assert!(!lines.iter().any(|line| line.starts_with("Unusual:")));
+}
+
+#[test]
+fn speed_is_judged_against_earlier_samples_of_similar_work() {
+    let mut engine = CorrelationEngine::default();
+    let mut observe = |sample: Sample| engine.observe(&sample, defaults());
+    let alone = |second: u64, tps: f64| paging(second, tps, 0);
+    let pair = |second: u64, tps: f64| beside(paging(second, tps, 0), 60_000, false);
+    let long = |second: u64, tps: f64| {
+        let mut sample = paging(second, tps, 0);
+        sample.llm_requests[0].prompt = 240_000;
+        sample
+    };
+    for second in 0..10 {
+        observe(alone(second, 50.0));
+    }
+    // Two requests writing at once, never seen before: there is nothing
+    // like it to compare with, so it is learned rather than called slow
+    // against a lone request's speed.
+    let first = observe(pair(10, 30.0));
+    assert!(!first.slow && !first.is_material_drop());
+    assert_eq!(first.usual_speed, None);
+
+    // Once two requests have run at that speed it is their usual speed,
+    // and a lone request is still judged against lone ones.
+    for second in 11..30 {
+        observe(pair(second, 30.0));
+    }
+    let two = observe(pair(30, 30.0));
+    assert!(!two.slow && two.unusual.is_empty(), "{}", two.summary);
+    assert_eq!(two.usual_speed.unwrap().0, 30.0);
+    assert_eq!(two.usual_for, "2 requests · 131.2k context");
+    let one = observe(alone(31, 50.0));
+    assert!(!one.slow);
+    assert_eq!(one.usual_speed.unwrap().0, 50.0);
+    assert_eq!(one.usual_for, "1 request · 69.5k context");
+
+    // The same holds for a context several times longer: slower, and
+    // usual for that context, while the shorter one keeps its own speed.
+    for second in 32..50 {
+        observe(long(second, 36.0));
+    }
+    let longer = observe(long(50, 36.0));
+    assert!(!longer.slow, "{}", longer.summary);
+    assert_eq!(longer.usual_speed.unwrap().0, 36.0);
+    assert_eq!(longer.usual_for, "1 request · 242.5k context");
+    let short = observe(alone(51, 36.0));
+    assert!(short.slow, "36 tok/s is slow for the shorter context");
+    assert_eq!(short.usual_speed.unwrap().0, 50.0);
+
+    // Three slow samples of familiar work are a slowdown, and the request
+    // count, already allowed for, is not given as its reason.
+    let slowdown = (52..55)
+        .map(|second| observe(pair(second, 12.0)))
+        .last()
+        .unwrap();
+    assert!(slowdown.is_material_drop());
+    assert_eq!(
+        slowdown.cause,
+        CorrelationCause::None,
+        "{}",
+        slowdown.summary
+    );
+    assert_eq!(
+        slowdown.summary,
+        "GEN ↓60.0% (30.0→12.0 tok/s) · nothing else unusual"
+    );
+}
+
+#[test]
+fn the_usual_speed_line_follows_the_work_column_by_column() {
+    let mut app = test_app(0);
+    let mut sample = paging(30, 30.0, 0);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        usual_speed: Some((30.0, 24.0)),
+        usual_for: "2 requests · 128.5k context".into(),
+        ..CorrelationInsight::default()
+    };
+    app.collector.current = sample;
+    // Eight samples alone at a usual 50 tok/s, then eight beside another
+    // request at a usual 30: every bar is at its own usual speed.
+    let mut generation: VecDeque<ChartPoint> = (0..16)
+        .map(|index| {
+            let usual = if index < 8 { 500 } else { 300 };
+            let mut point = ChartPoint::new(Some(usual * 4 / 5), Tone::Green);
+            point.usual = Some(usual);
+            point
+        })
+        .collect();
+    let buffer = chart_buffer(
+        &app,
+        68,
+        12,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let rows = buffer_rows(&buffer);
+    let text = rows.join("\n");
+    // Each column's line row, left to right.
+    let lines: Vec<(u16, u16)> = (1..67)
+        .filter_map(|x| {
+            (1..11)
+                .find(|y| buffer[(x, *y)].symbol() == "┄")
+                .map(|y| (x, y))
+        })
+        .collect();
+    let rows_seen: Vec<u16> = lines.iter().map(|(_, y)| *y).collect();
+    // The line steps down once, where the work got heavier, and is grey:
+    // nothing is unusual about a speed that matches its work.
+    let (first, last) = (lines[0], lines[lines.len() - 1]);
+    assert!(first.1 < last.1, "{lines:?}\n{text}");
+    assert!(
+        rows_seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{text}"
+    );
+    assert_eq!(buffer[last].fg, Tone::Muted.color());
+    // The border names the work the latest usual speed is for.
+    assert!(
+        rows[11].contains("tok/s · ┄ usual 30.0 for 2 requests · 128.5k context"),
+        "{text}"
+    );
+
+    // Bars past their usual speed have the line cut through them, so it
+    // reads across the whole chart.
+    let tall: VecDeque<ChartPoint> = generation
+        .iter()
+        .map(|point| ChartPoint {
+            value: point.usual.map(|usual| usual * 6 / 5),
+            ..*point
+        })
+        .collect();
+    let crossed = chart_buffer(&app, 68, 12, "generation", &tall, ChartMetric::Generation);
+    let through: Vec<u16> = (1..67)
+        .filter(|x| {
+            (1..11).any(|y| {
+                let cell = &crossed[(*x, y)];
+                cell.symbol() == "┄" && cell.bg == GREEN && cell.fg == PANEL
+            })
+        })
+        .collect();
+    assert!(
+        through.len() >= 16,
+        "{through:?}\n{}",
+        buffer_rows(&crossed).join("\n")
+    );
+
+    // A slow sample shows as a bar short of its own column's line, and the
+    // line over it takes the anomaly colour.
+    let newest = generation.back_mut().unwrap();
+    newest.value = Some(100);
+    newest.tone = Tone::Unusual;
+    let buffer = chart_buffer(
+        &app,
+        68,
+        12,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    assert_eq!(
+        buffer[last].fg,
+        UNUSUAL,
+        "{}",
+        buffer_rows(&buffer).join("\n")
+    );
 }

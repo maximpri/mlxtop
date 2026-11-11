@@ -1089,11 +1089,6 @@ fn enum_labels_and_tones_are_stable() {
         (CorrelationCause::Cpu, "runtime CPU", Tone::Yellow),
         (CorrelationCause::GpuIdle, "GPU underused", Tone::Yellow),
         (
-            CorrelationCause::ContextGrowth,
-            "context/KV growth",
-            Tone::Yellow,
-        ),
-        (
             CorrelationCause::ModelMemory,
             "model memory growth",
             Tone::Yellow,

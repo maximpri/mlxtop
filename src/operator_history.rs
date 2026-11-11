@@ -67,10 +67,7 @@ impl History {
         // A slowdown with unusually many requests running or waiting marks
         // its samples here too, back to its first slow one.
         let insight = &sample.correlation;
-        if [CorrelationCause::Concurrency, CorrelationCause::Queueing]
-            .iter()
-            .any(|cause| insight.note(*cause).is_some())
-        {
+        if insight.note(CorrelationCause::Queueing).is_some() {
             for point in self.points.iter_mut().rev().take(insight.marked_samples()) {
                 point.unusual = true;
             }

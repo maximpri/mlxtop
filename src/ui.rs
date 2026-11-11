@@ -55,6 +55,10 @@ fn overview_grid(area: Rect) -> [Rect; 3] {
     Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(area)
 }
 
+/// A bar cell the usual-speed line runs through: drawn as `┄` cut into the
+/// bar's colour.
+const USUAL_THROUGH_BAR: char = '╍';
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
@@ -896,7 +900,19 @@ impl App {
             Some(normal) => (Some(normal), Tone::Muted),
             None => (warning, Tone::Yellow),
         };
+        // The usual speed each sample was judged against, where known: the
+        // line follows the work, so the axis must reach its highest point.
+        let usual_peak = history
+            .iter()
+            .rev()
+            .take(visible_count)
+            .filter_map(|point| point.usual)
+            .max();
         let scale = chart_scale(history, metric, visible_count);
+        let scale = match usual_peak {
+            Some(peak) => (scale.0, scale.1.max(crate::chart_scale::ceiling(peak, 10))),
+            None => scale,
+        };
         let scale = match warning {
             Some(rate) => (
                 0,
@@ -1003,12 +1019,20 @@ impl App {
                 };
                 // What the dashed line is: the speed slowdowns are judged
                 // against. It gives way before the unit does.
-                let usual = insight
-                    .usual_speed
-                    .map(|(usual, _)| format!("{unit} · ┄ usual {usual:.1}"))
-                    .filter(|text| {
+                // With the work it is for, when it is for one kind of work.
+                let usual = insight.usual_speed.and_then(|(usual, _)| {
+                    let mut texts = Vec::new();
+                    if !insight.usual_for.is_empty() {
+                        texts.push(format!(
+                            "{unit} · ┄ usual {usual:.1} for {}",
+                            insight.usual_for
+                        ));
+                    }
+                    texts.push(format!("{unit} · ┄ usual {usual:.1}"));
+                    texts.into_iter().find(|text| {
                         Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
-                    });
+                    })
+                });
                 Some(usual.unwrap_or(unit))
             }
             ChartMetric::Memory => None,
@@ -1537,10 +1561,14 @@ impl App {
                 .filter(|row| row + 1 < plot_height),
             None => (!paging_idle).then_some(axis_rows.saturating_sub(1) / 2),
         };
+        // Samples that carry their own usual value draw it column by column:
+        // a line that steps down when the work gets heavier, and a bar
+        // falling short of its own column's line is the anomaly.
+        let own_usual = visible_points.iter().any(|point| point.usual.is_some());
         for (row, row_cells) in cells.iter_mut().enumerate() {
             let guide = if row + 1 == axis_rows {
                 Some(('─', Tone::Muted))
-            } else if Some(row) == guide_row {
+            } else if Some(row) == guide_row && !own_usual {
                 Some((
                     '┄',
                     if warning.is_some() {
@@ -1558,6 +1586,34 @@ impl App {
                     tone,
                     fill: false,
                 });
+            }
+        }
+
+        let usual_rows: Vec<Option<usize>> = visible_points
+            .iter()
+            .map(|point| {
+                point.usual.and_then(|usual| {
+                    trace_point(chart_display_value(metric, usual, scale), plot_height)
+                        .map(|(row, _)| row)
+                        .filter(|row| row + 1 < axis_rows)
+                })
+            })
+            .collect();
+        if own_usual {
+            for (column, point) in visible_points.iter().enumerate() {
+                let Some(row) = usual_rows[column] else {
+                    continue;
+                };
+                cells[row][column] = TraceCell {
+                    glyph: '┄',
+                    // Over a slow sample, the gap under it is the drop.
+                    tone: if point.tone == Tone::Unusual {
+                        Tone::Unusual
+                    } else {
+                        guide_tone
+                    },
+                    fill: false,
+                };
             }
         }
 
@@ -1589,6 +1645,16 @@ impl App {
                         tone: point.tone,
                         fill: false,
                     };
+                }
+            }
+        }
+        // Where a bar reaches past its usual speed the line runs through
+        // it, cut into the bar, so the line reads across the whole chart.
+        for (column, row) in usual_rows.iter().enumerate() {
+            if let Some(row) = row {
+                let cell = &mut cells[*row][column];
+                if cell.glyph == '█' {
+                    cell.glyph = USUAL_THROUGH_BAR;
                 }
             }
         }
@@ -1702,24 +1768,30 @@ impl App {
             let mut run_tone = None;
             // A full block is drawn as a filled cell: terminals leave a gap
             // between rows of glyphs, but not of backgrounds.
-            let style = |(tone, filled, fill): (Tone, bool, bool)| {
+            let style = |(tone, filled, fill, through): (Tone, bool, bool, bool)| {
                 let style = Style::default().fg(tone.color());
                 match (filled, fill) {
+                    _ if through => Style::default().fg(PANEL).bg(tone.color()),
                     (true, _) => style.bg(tone.color()),
                     (false, true) => style.bg(AREA_FILL),
                     (false, false) => style,
                 }
             };
             for cell in row_cells.iter().take(plot_width).copied() {
+                let through = cell.glyph == USUAL_THROUGH_BAR;
                 let filled = cell.glyph == '█';
-                let key = (cell.tone, filled, cell.fill);
+                let key = (cell.tone, filled, cell.fill, through);
                 if run_tone != Some(key) {
                     if let Some(key) = run_tone {
                         spans.push(Span::styled(std::mem::take(&mut run), style(key)));
                     }
                     run_tone = Some(key);
                 }
-                run.push(if filled { ' ' } else { cell.glyph });
+                run.push(match cell.glyph {
+                    '█' => ' ',
+                    USUAL_THROUGH_BAR => '┄',
+                    glyph => glyph,
+                });
             }
             if let Some(key) = run_tone {
                 spans.push(Span::styled(run, style(key)));

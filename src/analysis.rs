@@ -16,8 +16,7 @@ use crate::formatting::{
 };
 use std::collections::VecDeque;
 use std::time::SystemTime;
-/// A prompt this much longer than usual, and half as long again, is unusual.
-pub(crate) const CONTEXT_GROWTH_TOKENS: u64 = 1024;
+
 /// A generating request that goes this long without a token has stalled:
 /// at 20–90 tok/s a healthy decode produces one every 50 ms or so.
 pub(crate) const STALL_SECONDS: f64 = 1.5;
@@ -56,8 +55,7 @@ pub(crate) struct CorrelationObservation {
     /// Running requests reading their prompt, and writing their answer.
     pub(crate) prefilling: u64,
     pub(crate) generating: u64,
-    /// The largest prompt among running requests, and among those prefilling.
-    pub(crate) largest_prompt: Option<u64>,
+    /// The largest prompt among requests prefilling.
     pub(crate) prefill_prompt: Option<u64>,
     pub(crate) at: Option<SystemTime>,
     /// The longest a generating request has gone without a token, in seconds.
@@ -70,6 +68,9 @@ pub(crate) struct CorrelationObservation {
     pub(crate) ssd_full: bool,
     /// CPU the runtime's processes use, in percent of one core.
     pub(crate) cpu: Option<f64>,
+    /// Tokens held by the requests writing an answer (prompt and output so
+    /// far, together), when the runtime lists its requests.
+    pub(crate) context: Option<u64>,
 }
 
 impl CorrelationObservation {
@@ -120,8 +121,6 @@ pub(crate) enum Signal {
     Paging,
     Disk,
     Prefill,
-    Requests,
-    Prompt,
     Compression,
     Queue,
     ModelMemory,
@@ -133,14 +132,12 @@ pub(crate) enum Signal {
 /// Every signal, the host's limits before the workload: when several are
 /// unusual at once, the first is named as the reason. An idle GPU comes
 /// last: it is what a slowdown looks like, and a reason only by itself.
-pub(crate) const SIGNALS: [Signal; 13] = [
+pub(crate) const SIGNALS: [Signal; 11] = [
     Signal::Thermal,
     Signal::Pressure,
     Signal::Paging,
     Signal::Disk,
     Signal::Prefill,
-    Signal::Requests,
-    Signal::Prompt,
     Signal::Compression,
     Signal::Queue,
     Signal::ModelMemory,
@@ -171,10 +168,7 @@ impl Signal {
     /// The rest is the workload (requests and their prompts): that changes
     /// because someone asked, and is only ever the reason for a slowdown.
     fn host(self) -> bool {
-        !matches!(
-            self,
-            Self::Prefill | Self::Requests | Self::Prompt | Self::Queue
-        )
+        !matches!(self, Self::Prefill | Self::Queue)
     }
 
     pub(crate) fn cause(self) -> CorrelationCause {
@@ -184,8 +178,6 @@ impl Signal {
             Self::Paging => CorrelationCause::Paging,
             Self::Disk => CorrelationCause::DiskIo,
             Self::Prefill => CorrelationCause::ConcurrentPrefill,
-            Self::Requests => CorrelationCause::Concurrency,
-            Self::Prompt => CorrelationCause::ContextGrowth,
             Self::Compression => CorrelationCause::Compression,
             Self::Queue => CorrelationCause::Queueing,
             Self::ModelMemory => CorrelationCause::ModelMemory,
@@ -215,8 +207,6 @@ impl Signal {
             } else {
                 0.0
             }),
-            Self::Requests => Some(running(o) as f64),
-            Self::Prompt => o.largest_prompt.map(|prompt| prompt as f64),
             Self::Compression => Some(o.compression_rate as f64),
             Self::Queue => o.waiting_requests.map(|waiting| waiting as f64),
             Self::ModelMemory => fraction(o.model_memory, o.model_memory_max),
@@ -231,14 +221,9 @@ impl Signal {
     fn limits(self, thresholds: Thresholds) -> Limits {
         let (from, share, least) = match self {
             Self::Thermal | Self::Prefill | Self::Queue => (1.0, 0.0, 1.0),
-            Self::Pressure | Self::Requests => (2.0, 0.0, 1.0),
+            Self::Pressure => (2.0, 0.0, 1.0),
             Self::Paging => (thresholds.swap_warn_rate as f64, 0.5, 0.0),
             Self::Disk => (DISK_ACTIVE_RATE as f64, 0.5, 0.0),
-            Self::Prompt => (
-                CONTEXT_GROWTH_TOKENS as f64,
-                0.5,
-                CONTEXT_GROWTH_TOKENS as f64,
-            ),
             Self::Compression => (thresholds.compression_warn_rate as f64, 0.5, 0.0),
             Self::ModelMemory | Self::MetalMemory => (0.90, 0.0, 0.02),
             // Half a core, and half as much again as usual.
@@ -267,12 +252,6 @@ impl Signal {
                 Some(prompt) => format!("{} prefill beside generation", compact_tokens(prompt)),
                 None => "prefill beside generation".into(),
             },
-            Self::Requests => format!("{} requests running (usual {usual:.0})", running(o)),
-            Self::Prompt => format!(
-                "prompt {} (usual {})",
-                compact_tokens(o.largest_prompt.unwrap_or_default()),
-                compact_tokens(usual as u64)
-            ),
             Self::Compression => format!(
                 "compression {} ({})",
                 rate(o.compression_rate),
@@ -646,12 +625,126 @@ fn slow_range(speed: &Usual) -> Option<(f64, f64)> {
         .map(|(usual, margin)| (usual, (usual - margin).max(0.0)))
 }
 
+/// Generation speeds kept to compare with: about fifty minutes of
+/// generation, so that each kind of work has enough of its own.
+const SPEED_HISTORY: usize = 3000;
+/// Requests writing at once are grouped from this many up.
+const MANY_REQUESTS: u64 = 4;
+
+/// The work a speed was measured on. Speed depends on it: on one server's
+/// week of requests a lone answer ran at 83 tok/s with under 1k tokens of
+/// context and 54 tok/s with 64k–128k, and each answer ran at 73, 55, 43
+/// and 31 tok/s with one to four requests writing at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Work {
+    pub(crate) requests: u64,
+    pub(crate) context: Option<u64>,
+}
+
+impl Work {
+    pub(crate) fn from_sample(sample: &Sample) -> Self {
+        Self::of(&CorrelationObservation::from_sample(sample))
+    }
+
+    fn of(o: &CorrelationObservation) -> Self {
+        let requests = if o.generating > 0 {
+            o.generating
+        } else {
+            o.active_requests.unwrap_or(1)
+        };
+        Self {
+            requests: requests.clamp(1, MANY_REQUESTS),
+            context: o.context,
+        }
+    }
+
+    /// The same number of requests, with a context within a factor of two
+    /// (or no context known for either).
+    fn like(self, other: Self) -> bool {
+        self.requests == other.requests
+            && match (self.context, other.context) {
+                (Some(a), Some(b)) => a.max(1) <= b.max(1) * 2 && b.max(1) <= a.max(1) * 2,
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    /// What it is, in words: `1 request · 40k context`.
+    fn label(self) -> String {
+        let requests = format!(
+            "{}{} request{}",
+            self.requests,
+            if self.requests >= MANY_REQUESTS {
+                "+"
+            } else {
+                ""
+            },
+            if self.requests == 1 { "" } else { "s" }
+        );
+        match self.context {
+            Some(context) => format!("{requests} · {} context", compact_tokens(context)),
+            None => requests,
+        }
+    }
+}
+
+/// Earlier generation speeds, each with the work it was measured on. A
+/// speed is judged against earlier samples of similar work.
+#[derive(Clone, Default)]
+pub(crate) struct Speeds {
+    samples: VecDeque<(f64, Work)>,
+}
+
+impl Speeds {
+    fn learn(&mut self, speed: f64, work: Work) {
+        if !speed.is_finite() {
+            return;
+        }
+        self.samples.push_back((speed, work));
+        while self.samples.len() > SPEED_HISTORY {
+            self.samples.pop_front();
+        }
+    }
+
+    /// The usual speed for `work`: from its latest earlier samples of
+    /// similar work. Work not seen before has no usual speed until it has
+    /// been seen: it is learned, never judged against different work.
+    pub(crate) fn usual(&self, work: Work) -> Usual {
+        let mut usual = Usual::default();
+        usual.relearn(
+            self.samples
+                .iter()
+                .rev()
+                .filter(|(_, earlier)| earlier.like(work))
+                .take(WINDOW)
+                .map(|(speed, _)| *speed)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev(),
+        );
+        usual
+    }
+
+    /// A slower speed for this work has held with nothing else unusual: it
+    /// is how this work now runs. Earlier samples of the same work go.
+    fn settle(&mut self, quiet: &[(f64, Work)]) {
+        self.samples
+            .retain(|(_, earlier)| !quiet.iter().any(|(_, work)| earlier.like(*work)));
+        for (speed, work) in quiet {
+            self.learn(*speed, *work);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct CorrelationEngine {
     /// The provider and model the usual values belong to.
     model: Option<(String, String)>,
-    /// Generation speed, and every signal in `SIGNALS`, while speed was usual.
-    pub(crate) speed: Usual,
+    /// Generation speed with the work it was measured on, and every signal
+    /// in `SIGNALS`, while speed was usual.
+    pub(crate) speed: Speeds,
+    /// The work generation was last seen doing.
+    work: Work,
     host: [Usual; SIGNALS.len()],
     /// Each signal's unusual values in a row, with when the row began: held
     /// back from its usual value until it passes or has held long enough.
@@ -710,7 +803,8 @@ impl CorrelationEngine {
             // Nothing is generating: there is no speed to judge. A slowdown
             // waits for its next sample.
             return CorrelationInsight {
-                usual_speed: slow_range(&self.speed),
+                usual_speed: slow_range(&self.speed.usual(self.work)),
+                usual_for: self.work.label(),
                 ..CorrelationInsight::default()
             };
         }
@@ -728,9 +822,14 @@ impl CorrelationEngine {
         // A request that has just gone quiet may be about to stall: its
         // near-zero speed is neither slow nor usual until that is known.
         let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5);
-        let usual = slow_range(&self.speed);
-        let low = self
-            .speed
+        // Judged against earlier samples of similar work: a longer context
+        // or another request writing beside it is expected to be slower.
+        let work = Work::of(&current);
+        self.work = work;
+        let expected = self.speed.usual(work);
+        let usual_for = work.label();
+        let usual = slow_range(&expected);
+        let low = expected
             .below(speed, SLOW_SHARE, SLOW_MIN_TPS)
             .filter(|_| !quiet);
         // Outside a slowdown a sample still says what is unusual in it: its
@@ -745,6 +844,7 @@ impl CorrelationEngine {
                 .filter(|(usual, _)| *usual > 0.0)
                 .map(|(usual, _)| (speed - usual) / usual * 100.0),
             usual_speed: usual,
+            usual_for: usual_for.clone(),
             slow: low.is_some(),
             unusual: watched.iter().map(|found| found.signal.cause()).collect(),
             notes: watched.into_iter().map(|found| found.text).collect(),
@@ -755,7 +855,9 @@ impl CorrelationEngine {
         let mut open = match (self.episode.take(), low) {
             (Some(mut open), _) => {
                 open.samples += 1;
-                if low.is_some() {
+                if let Some(level) = low {
+                    // What this work should run at, as the work changes.
+                    open.reference = level;
                     open.back.clear();
                     open.low = open.low.min(speed);
                     open.lows.push_back(speed);
@@ -823,10 +925,11 @@ impl CorrelationEngine {
             };
         }
 
+        // The number of requests and their context are not reasons: the
+        // usual speed is already the one for this work.
         let findings = self.findings(&current, thresholds);
-        // A longer prompt decodes more slowly for as long as it runs: that
-        // is the workload, and like no reason at all it becomes usual.
-        if findings.iter().any(|found| found.signal != Signal::Prompt) {
+        // With no reason at all, a slower speed that holds becomes usual.
+        if !findings.is_empty() {
             open.quiet.clear();
         } else {
             open.quiet.push(current.clone());
@@ -836,17 +939,22 @@ impl CorrelationEngine {
         if seconds_between(open.quiet.first().and_then(|o| o.at), current.at) >= SETTLE_SECONDS {
             // Nothing else is unusual and it has held: this is how fast
             // generation now runs.
-            self.speed.relearn(std::iter::empty());
+            let quiet: Vec<(f64, Work)> = open
+                .quiet
+                .iter()
+                .filter_map(|o| o.generation_tps.map(|speed| (speed, Work::of(o))))
+                .collect();
+            self.speed.settle(&quiet);
             for usual in &mut self.host {
                 usual.relearn(std::iter::empty());
             }
             self.held = Default::default();
             for observation in &open.quiet {
-                self.learn(observation, thresholds);
+                self.learn_host(observation, thresholds);
             }
             return CorrelationInsight {
                 ended: ended(true, &open),
-                ..steady(slow_range(&self.speed), Vec::new())
+                ..steady(slow_range(&self.speed.usual(work)), Vec::new())
             };
         }
 
@@ -925,6 +1033,7 @@ impl CorrelationEngine {
             unusual: findings.iter().map(|found| found.signal.cause()).collect(),
             notes: texts.iter().map(|text| (*text).to_owned()).collect(),
             usual_speed: usual,
+            usual_for,
         };
         self.episode = Some(open);
         insight
@@ -932,7 +1041,7 @@ impl CorrelationEngine {
 
     /// The signals that are unusual in this sample, the most telling first.
     fn findings(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
-        let mut findings: Vec<Finding> = SIGNALS
+        let findings: Vec<Finding> = SIGNALS
             .iter()
             .zip(&self.host)
             .filter_map(|(signal, usual)| {
@@ -947,11 +1056,6 @@ impl CorrelationEngine {
                 })
             })
             .collect();
-        // A prompt prefilling beside an answer is the request that joined:
-        // it is said once, in the more telling form.
-        if findings.iter().any(|found| found.signal == Signal::Prefill) {
-            findings.retain(|found| found.signal != Signal::Requests);
-        }
         findings
     }
 
@@ -968,8 +1072,12 @@ impl CorrelationEngine {
     /// usual, it is how the signal now runs.
     fn learn(&mut self, observation: &CorrelationObservation, thresholds: Thresholds) {
         if let Some(speed) = observation.generation_tps {
-            self.speed.learn(speed);
+            self.speed.learn(speed, Work::of(observation));
         }
+        self.learn_host(observation, thresholds);
+    }
+
+    fn learn_host(&mut self, observation: &CorrelationObservation, thresholds: Thresholds) {
         for ((signal, usual), (began, held)) in
             SIGNALS.iter().zip(&mut self.host).zip(&mut self.held)
         {
@@ -1074,7 +1182,8 @@ impl CorrelationEngine {
             slow: true,
             unusual: Vec::new(),
             notes: Vec::new(),
-            usual_speed: slow_range(&self.speed),
+            usual_speed: slow_range(&self.speed.usual(self.work)),
+            usual_for: self.work.label(),
         }
     }
 
@@ -1116,11 +1225,6 @@ impl CorrelationObservation {
             waiting_requests: sample.llm_waiting_requests,
             prefilling: prefilling.len() as u64,
             generating: (running.len() - prefilling.len()) as u64,
-            largest_prompt: running
-                .iter()
-                .map(|r| r.prompt)
-                .max()
-                .or(sample.llm_prompt_tokens),
             prefill_prompt: prefilling.iter().map(|r| r.prompt).max(),
             at: sample.llm_observed_at.or_else(|| Some(SystemTime::now())),
             stalled_for: running
@@ -1136,6 +1240,12 @@ impl CorrelationObservation {
             disk: sample.disk,
             ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
             cpu: (sample.llm_count > 0).then_some(sample.llm_cpu),
+            context: (!generating.is_empty()).then(|| {
+                generating
+                    .iter()
+                    .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
+                    .sum()
+            }),
         }
     }
 }

@@ -126,17 +126,28 @@ recent samples (about five minutes of generation, for one model on one
 runtime). A runtime whose speed jumps about is rarely unusual; a steady one
 shows a small change.
 
-Generation is **slow** when its speed is unusually low (and at least a fifth
-below usual) for three samples in a row. The reason given is whatever else is
-unusual at the same time: thermal limiting, memory pressure, paging, the
-runtime's disk work, a prompt prefilling beside the answer, the number of
-requests running, prompt size, compression, the queue, model or Metal memory,
-the runtime's CPU, or a GPU left idle.
-A signal at its usual level is never the reason, however high that level is.
+Generation speed depends on the work: a longer context and more requests
+writing at once are slower. So a sample's speed is compared with earlier
+samples of **similar work**: as many requests writing at once (1, 2, 3, or 4
+and more), with a context (prompt and output so far) within a factor of two.
+Work mlxtop has not seen before is learned for eight samples before it is
+judged; it is never compared with different work.
+
+Generation is **slow** when its speed is unusually low for its work (and at
+least a fifth below usual) for three samples in a row. The reason given is
+whatever else is unusual at the same time: thermal limiting, memory pressure,
+paging, the runtime's disk work, a prompt prefilling beside the answer,
+compression, the queue, model or Metal memory, the runtime's CPU, or a GPU
+left idle. Request count and prompt size are never the reason: the usual
+speed already allows for them. A signal at its usual level is never the
+reason, however high that level is.
 
 The generation chart always shows what it judges against: a dashed line at
-the usual speed, with its value on the axis and `┄ usual 50.0` on the bottom
-edge. The line is grey while all is well.
+each sample's usual speed, for the work it was doing. The line steps up or
+down as requests join and leave and contexts grow, and runs through bars
+that pass it. The bottom edge says what the latest is for, for example
+`┄ usual 30.0 for 2 requests · 131.2k context`. The line is grey while all is
+well.
 
 Magenta means unusual and nothing else. It appears as it happens, slowdown or
 not:
@@ -156,7 +167,7 @@ During a slowdown the same colour ties the panels together:
 - the usual-speed line turns magenta and the reason is named under the bars;
 - the border of the panel that shows the reason is tagged `▲ slowed GEN ↓50%`;
 - the queue's active count and history are marked when the reason is how many
-  requests ran or waited.
+  requests waited.
 
 An expanded generation chart (`Enter`) and Diagnostics (`d`) show what a
 slowdown is judged against, for example `usual 50.0 · slow below 40.0`;
@@ -170,7 +181,8 @@ RECOVERED  generation back to 50.0 tok/s after 42s · low 25.0 tok/s
 ```
 
 When nothing else is unusual the row says `nothing else unusual`, and if the
-lower speed holds for 30 seconds it becomes the usual speed (`SETTLED`). This
+lower speed holds for 30 seconds it becomes the usual speed for that work
+(`SETTLED`). This
 is what happens together, not proof of cause. mlxtop needs eight samples of
 generation before it has a usual speed to compare with.
 

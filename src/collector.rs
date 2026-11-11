@@ -564,12 +564,18 @@ impl Collector {
         );
         // Generation has no threshold either: a sample is its usual speed
         // or, marked below, unusually slow.
+        // Each sample keeps the usual speed for the work it was doing, so
+        // the chart's dashed line follows the work.
         if let Some(point) = self.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
                 Tone::Muted
             } else {
                 Tone::Green
             };
+            point.usual = point
+                .value
+                .and(sample.correlation.usual_speed)
+                .map(|(usual, _)| (usual * 10.0).round() as u64);
         }
         push_history_with_tone(
             &mut self.load_history,
@@ -620,11 +626,13 @@ impl Collector {
 
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
+        // What generation was doing, so a log can be replayed against it.
+        let generating = crate::analysis::Work::from_sample(&sample);
         diagnostics_log(
             "INFO",
             "sample",
             format!(
-                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={}",
+                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={}",
                 sample_started.elapsed().as_millis(),
                 log_field(&sample.llm_status),
                 log_field(&sample.llm_provider),
@@ -646,6 +654,8 @@ impl Collector {
                 sample.swap_out,
                 sample.compress,
                 sample.decompress,
+                generating.requests,
+                log_optional_u64(generating.context),
             ),
         );
         self.current = sample.clone();

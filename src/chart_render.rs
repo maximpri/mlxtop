@@ -43,6 +43,7 @@ pub(crate) struct RenderPoint {
     pub(crate) value: Option<u64>,
     pub(crate) tone: Tone,
     pub(crate) break_before: bool,
+    pub(crate) usual: Option<u64>,
 }
 
 pub(crate) fn normalize_chart_value(metric: ChartMetric, value: u64) -> u64 {
@@ -194,6 +195,7 @@ pub(crate) fn chart_columns(history: &VecDeque<ChartPoint>, width: usize) -> Vec
             value: None,
             tone: Tone::Muted,
             break_before: true,
+            usual: None,
         };
         width
     ];
@@ -203,6 +205,7 @@ pub(crate) fn chart_columns(history: &VecDeque<ChartPoint>, width: usize) -> Vec
             value: point.value,
             tone: point.tone,
             break_before: point.value.is_none(),
+            usual: point.usual,
         };
     }
     columns

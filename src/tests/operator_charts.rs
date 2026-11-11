@@ -785,16 +785,16 @@ fn the_queue_colours_samples_that_were_unusual_beside_a_slowdown() {
     for _ in 0..6 {
         history.observe(&sample, 60);
     }
-    // Two requests where one is usual, as generation slows: known at the
-    // slowdown's third sample, so the two before it are marked too.
+    // Two requests waiting where none is usual, as generation slows: known
+    // at the slowdown's third sample, so the two before it are marked too.
     sample.llm_active_requests = Some(2);
     history.observe(&sample, 60);
     history.observe(&sample, 60);
     sample.correlation = CorrelationInsight {
         direction: ThroughputDirection::Down,
-        cause: CorrelationCause::Concurrency,
-        unusual: vec![CorrelationCause::Concurrency],
-        notes: vec!["2 requests running (usual 1)".into()],
+        cause: CorrelationCause::Queueing,
+        unusual: vec![CorrelationCause::Queueing],
+        notes: vec!["2 waiting (usual 0)".into()],
         episode: Some(DropEpisode {
             reference: 50.0,
             low: 25.0,

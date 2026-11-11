@@ -209,8 +209,19 @@ colors in time-series history instead of recoloring old samples on refresh.
   not survive speculative decoding: replayed over 76 minutes of one server's
   generation, the 10% rule this replaced journaled 474 slowdowns; this rule
   journals 8.
-- Generation is slow when it is unusually far below its usual speed, by at
-  least a fifth and 2 tok/s, for three samples in a row. A slowdown ends
+- Generation speed depends on the work, so its usual speed is the usual
+  speed of similar work: earlier samples with as many requests writing at
+  once (1, 2, 3, 4 or more) and a context (prompt and output, together)
+  within a factor of two. On one server's week of 4,725 requests a lone
+  answer ran at 83 tok/s with under 1k tokens of context and 54 tok/s with
+  64k–128k, and each answer ran at 73, 55, 43 and 31 tok/s with one to four
+  writing at once. Judged against all requests alike, 10.3% of them were
+  slow; against similar ones, 3.5%. Work not seen before has no usual speed
+  until eight samples of it have been: it is learned, never judged against
+  different work. Request count and prompt size are therefore never a
+  slowdown's reason.
+- Generation is slow when it is unusually far below the usual speed for its
+  work, by at least a fifth and 2 tok/s, for three samples in a row. A slowdown ends
   after three samples back at the usual speed (`RECOVERED`). The usual
   values are fixed while it lasts, so a slowdown that is still going on does
   not become usual by going on. It waits while nothing generates, and is
@@ -218,22 +229,25 @@ colors in time-series history instead of recoloring old samples on refresh.
 - A slowdown's reason is whatever else is unusual at the same time, judged
   by the same rule against its own usual value: thermal limiting, memory
   pressure, paging, the runtime's disk work, a prompt prefilling beside the
-  answer, requests running, prompt size, compression, the queue, model and
-  Metal memory, the runtime's CPU, and a GPU left idle. The host's limits
+  answer, compression, the queue, model and Metal memory, the runtime's CPU,
+  and a GPU left idle. The host's limits
   come first when several are unusual; an idle GPU comes last, because it is
   what a slowdown looks like and a reason only by itself. Each
   is said beside its usual value (`paging 96.0 MiB/s (usual 2.0 MiB/s)`,
-  `2 requests running (usual 1)`). A signal at its usual level is not the
-  reason, however high that level is. With nothing else unusual, say so
-  (`nothing else unusual`): never guess. Such a slowdown, or one with only a
-  longer prompt, becomes the usual speed after 30 s (`SETTLED`).
+  `2 waiting (usual 0)`). A signal at its usual level is not the reason,
+  however high that level is. With nothing else unusual, say so
+  (`nothing else unusual`): never guess. Such a slowdown becomes the usual
+  speed for that work after 30 s (`SETTLED`).
 - Journal writes a slowdown's start once, each further reason once, and its
   end. A slowdown that repeats the last one's reason within a minute is the
   same story: no new rows.
 - Anomaly detection is visible all the time, not only when something is
-  wrong. Once a usual speed is known the generation chart draws it as a
-  quiet dashed line with its value on the axis, and its bottom edge says
-  what the line is (`tok/s · ┄ usual 50.0`). A screen that looks the same
+  wrong. The generation chart draws each sample's usual speed, for the work
+  it was doing, as a quiet dashed line: it steps up or down as requests join
+  or leave and contexts grow, so the correlation is on the chart, and a bar
+  falling short of its own column's line is the anomaly. The line runs
+  through bars that pass it, cut into them. Its bottom edge says what the
+  latest is for (`tok/s · ┄ usual 30.0 for 2 requests · 131.2k context`). A screen that looks the same
   healthy as it did before the detector existed gives no reason to trust
   it.
 - Mark each unusual sample where it is, when it happens: an unusually slow
@@ -241,8 +255,7 @@ colors in time-series history instead of recoloring old samples on refresh.
   row, and an unusual reading of the host (thermal, pressure, paging, disk,
   compression, memory, runtime CPU, idle GPU) on its own chart while
   generation runs at its usual speed. The workload (requests, prompts, the
-  queue) is not marked on its own: it changes because someone asked, and is
-  only ever the reason for a slowdown. A reading that stays unusual for
+  queue) is not marked on its own: it changes because someone asked. A reading that stays unusual for
   30 s with speed still usual becomes its usual value; one that comes and
   goes widens its usual range. None of this is journaled: the Journal is
   for slowdowns. On one server's log this marks about one sample every
