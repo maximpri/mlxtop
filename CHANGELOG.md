@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.13 — 2026-11-11
+## 3.3.0-rc.14 — 2026-11-11
 
 ### Diagnosis
 
@@ -19,6 +19,11 @@
   Judged against similar requests, 3.5% were slow instead of 10.3%. Work not
   seen before is learned for eight samples, never judged against different
   work.
+- **A request that starts or ends between two polls is not judged.** Its
+  tokens are divided over an interval it wrote for only part of, so its
+  speed reads low: a 73-token reply at 130 tok/s read 76 tok/s and was
+  marked unusual with nothing else unusual beside it. Only samples with the
+  same requests writing at both ends of the interval are judged or learned.
 - **The reason is what else is unusual at the same time**, said beside its
   usual value: `paging 96.0 MiB/s (usual 2.0 MiB/s)`. Reasons are paging,
   compression, memory pressure, thermal limiting, disk and SSD-cache work, a
