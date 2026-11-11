@@ -687,12 +687,21 @@ pub(crate) fn parse_ssd_cache(stats: &Value) -> Option<SsdCache> {
             .filter_map(|model| json_u64(model, &["cache_rates", "cumulative", key]))
             .sum()
     };
+    // The cache tier's own token counts, where it reports them (Splash).
+    let tokens = |key: &str| -> Option<u64> {
+        models
+            .iter()
+            .filter_map(|model| json_u64(model, &["splash_cache", key]))
+            .reduce(u64::saturating_add)
+    };
     Some(SsdCache {
         used: json_u64(cache, &["total_size_bytes"]).unwrap_or(0),
         capacity: json_u64(cache, &["disk_max_bytes"]).unwrap_or(0),
         loads: sum("ssd_disk_loads"),
         saves: sum("ssd_saves"),
         evictions: sum("evictions"),
+        hit_tokens: tokens("kv_hit_tokens"),
+        disk_hit_tokens: tokens("kv_disk_hit_tokens"),
     })
 }
 

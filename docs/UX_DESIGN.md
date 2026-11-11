@@ -80,15 +80,18 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   prompt-cache block loaded, are weights (an engine streaming MoE experts):
   those samples are blue, and a blue `weights` bar gives the share of
   decoding that read from disk with the median decode speed then and from
-  memory. Its title
-  is the prefill time the cache saved this session (cached tokens at the
-  median measured prefill speed); two green bars give the share of prompt
-  tokens served from cache over the session and for the last prompt, each with
-  the time it saved; the runtime's disk traffic is charted beneath (a
-  sparkline when short, never a sentence), the SSD cache's fill is a capacity
-  bar along the bottom, like swap, and the bottom edge says what the SSD tier
-  did last: loading, saving or evicting prefixes, or idle. Without OS disk
-  readings (remote or non-macOS runtimes) it plots each interval's reuse. Generation,
+  memory. Its title is the KV cache hit rate, the share of the session's
+  prompt tokens served from cache, with the prefill time that saved at the
+  median measured prefill speed. Where the cache tier counts its own hits, one
+  bar splits them: green from memory, cyan loaded back from the SSD (never
+  thinner than a cell when it served any), dim computed; a second bar is the
+  last prompt's hit rate. The runtime's disk traffic is charted beneath (a
+  sparkline when short, never a sentence). An external KV cache is meant to
+  fill, so the SSD row gives its size and what it did this session (blocks
+  loaded back, saved, evicted), not a fill bar, and the bottom edge says what
+  the SSD tier did last: loading, saving or evicting prefixes, or idle.
+  Without OS disk readings (remote or non-macOS runtimes) it plots each
+  interval's reuse. Generation,
   prefill and GPU take one column each in a seven- to ten-row row (four on
   short terminals, where readings stay in the titles). Journal grows from five
   to ten rows on tall terminals; everything else goes to the host row.

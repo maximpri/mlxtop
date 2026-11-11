@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.10 — 2026-11-11
+## 3.3.0-rc.11 — 2026-11-11
 
 ### Diagnosis
 
@@ -59,13 +59,18 @@
   then and from memory (`25% of decode from disk · 18 vs 42 tok/s`), and the
   bottom edge reads `streaming weights from disk`. The panel is now titled
   `disk I/O`.
-- **Disk I/O shows what the prompt cache is worth, not disk speeds.** Its title
-  reads the prefill time the cache saved this session (`saved ≈1h 25m of
-  prefill`): cached tokens at the measured prefill speed. Two bars show the
-  share of prompt tokens served from cache, over the session and for the last
-  prompt, each with the time it saved. The disk chart is always drawn, and the
-  bottom edge says what the SSD tier is doing: loading, saving or evicting
-  prefixes, or idle.
+- **Disk I/O leads with the KV cache hit rate**: `KV hit 91% · ≈1h 25m
+  saved`, the share of the session's prompt tokens served from cache and
+  the prefill time that saved at the measured prefill speed. Where the cache
+  tier counts its own hits (oMLX with Splash), one bar splits them: green
+  from memory, cyan loaded back from the SSD, dim computed (`RAM 91% · SSD
+  <1%`). A second bar gives the last prompt's hit rate. The disk traffic is
+  always charted, and the bottom edge says what the SSD tier is doing:
+  loading, saving or evicting prefixes, or idle.
+- **The SSD row says what the SSD cache did, not how full it is.** An
+  external KV cache is meant to fill, so the fill bar is gone: `SSD 120.0 GiB
+  · 1.5k blocks loaded · 1.3k saved · 327 evicted` this session. A full,
+  evicting cache is no longer shown as a warning.
 - **Disk I/O and compression swap places.** The cache sits in the host row
   between memory and paging; compression stacks above the queue. On Linux,
   with no compressor counters, the queue takes that column.
@@ -76,8 +81,10 @@
 - **Thermal state is always in the header**, with the power the machine
   draws: `thermal ok · 61 W`. It was shown only when macOS reported a
   warning. Power comes from macOS's power telemetry and needs no sudo.
-- **Swap that macOS has not created yet reads `swap 0 B used · no swap file
-  yet`**, not `swap off`: macOS adds swap files only when it needs them.
+- **Swap that macOS has not created yet reads `swap 0 B used`**, not `swap
+  off`: macOS adds swap files only when it needs them.
+- **A short compression panel draws its traffic**, not `Light compression ·
+  below warning`, and drops the rate split that repeated its title.
 - **Charts are no longer shaded during a slowdown.** The panel behind it says
   what it did instead: `▲ slowed GEN ↓50%` or `▲ stalled GEN`.
 - **Generation and prefill bars are green.** They were graded yellow and red

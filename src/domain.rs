@@ -428,6 +428,10 @@ pub(crate) struct SsdCache {
     pub(crate) loads: u64,
     pub(crate) saves: u64,
     pub(crate) evictions: u64,
+    /// Prompt tokens served from cached KV this session, and the part of
+    /// them loaded back from the SSD rather than held in memory.
+    pub(crate) hit_tokens: Option<u64>,
+    pub(crate) disk_hit_tokens: Option<u64>,
 }
 
 impl SsdCache {

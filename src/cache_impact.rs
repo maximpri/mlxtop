@@ -5,7 +5,7 @@
 use crate::analysis::DISK_ACTIVE_RATE;
 use crate::domain::{ChartPoint, DecodeRead, Sample, Tone};
 use crate::formatting::{compact_tokens, duration_label};
-use crate::theme::{BLUE, EDGE, GREEN, MUTED, PANEL};
+use crate::theme::{BLUE, CYAN, EDGE, GREEN, MUTED, PANEL};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -57,21 +57,46 @@ pub(crate) fn last_prompt(sample: &Sample) -> Option<(u64, u64)> {
         })
 }
 
-/// The title's reading: the prefill time the cache saved this session.
+/// Where the session's prompt tokens came from: held in memory, loaded back
+/// from the SSD, or computed. Known where the cache tier counts its own hits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Tiers {
+    pub(crate) prompt: u64,
+    pub(crate) memory: u64,
+    pub(crate) disk: u64,
+}
+
+pub(crate) fn tiers(sample: &Sample) -> Option<Tiers> {
+    let (prompt, cached) = session(sample)?;
+    let ssd = sample.ssd_cache?;
+    let disk = ssd.disk_hit_tokens?;
+    let hits = ssd.hit_tokens.unwrap_or(cached).max(disk).min(prompt);
+    Some(Tiers {
+        prompt,
+        memory: hits - disk.min(hits),
+        disk: disk.min(hits),
+    })
+}
+
+/// The title's reading: the KV cache hit rate, the share of this session's
+/// prompt tokens served from cache instead of computed.
 pub(crate) fn headline(sample: &Sample, speed: Option<f64>, width: u16) -> String {
-    let Some((_, cached)) = session(sample) else {
-        if sample.disk.weights > 0 {
-            return "streaming weights".into();
-        }
-        return sample
-            .llm_cache_efficiency
-            .map(|reuse| format!("reuse {reuse:.0}%"))
-            .unwrap_or_else(|| "—".into());
+    let hit = session(sample)
+        .map(|(prompt, cached)| cached as f64 / prompt as f64 * 100.0)
+        .or(sample.llm_cache_efficiency);
+    let Some(hit) = hit else {
+        return if sample.disk.weights > 0 {
+            "streaming weights".into()
+        } else {
+            "—".into()
+        };
     };
-    match saved_seconds(cached, speed) {
-        Some(seconds) if width >= 40 => format!("saved ≈{} of prefill", duration_label(seconds)),
-        Some(seconds) => format!("saved ≈{}", duration_label(seconds)),
-        None => format!("{} cached", compact_tokens(cached)),
+    let saved = session(sample)
+        .and_then(|(_, cached)| saved_seconds(cached, speed))
+        .map(|seconds| format!(" · ≈{} saved", duration_label(seconds)));
+    match saved {
+        Some(saved) if width >= 44 => format!("KV hit {hit:.0}%{saved}"),
+        _ => format!("KV hit {hit:.0}%"),
     }
 }
 
@@ -83,7 +108,7 @@ pub(crate) fn activity(sample: &Sample) -> Option<(&'static str, Tone)> {
     Some(if disk.weights > 0 {
         ("streaming weights from disk", Tone::Blue)
     } else if disk.evictions > 0 {
-        ("evicting old prefixes", Tone::Yellow)
+        ("evicting old prefixes", Tone::Muted)
     } else if disk.loads > 0 && disk.saves > 0 {
         ("loading and saving prefixes", Tone::Cyan)
     } else if disk.loads > 0 {
@@ -208,6 +233,53 @@ pub(crate) fn draw_weights(
         Span::styled("█".repeat(filled), Style::default().fg(BLUE)),
         Span::styled("█".repeat(bar - filled), Style::default().fg(EDGE)),
         Span::styled(format!(" {note}"), Style::default().fg(BLUE)),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(PANEL)), row);
+}
+
+/// The session's prompt tokens as one bar: green from memory, cyan loaded
+/// from the SSD (never thinner than a cell when it served any), dim computed.
+pub(crate) fn draw_tiers(frame: &mut Frame, row: Rect, tiers: Tiers, speed: Option<f64>) {
+    if row.is_empty() {
+        return;
+    }
+    let share = |tokens: u64| tokens as f64 / tiers.prompt as f64 * 100.0;
+    let (memory, disk) = (share(tiers.memory), share(tiers.disk));
+    let disk_label = if tiers.disk > 0 && disk < 1.0 {
+        "<1%".to_owned()
+    } else {
+        format!("{disk:.0}%")
+    };
+    let saved = saved_seconds(tiers.memory + tiers.disk, speed)
+        .map(|seconds| format!(" · ≈{} saved", duration_label(seconds)))
+        .unwrap_or_default();
+    let width = usize::from(row.width);
+    let prefix = format!("{:<8}", "reused");
+    let note = [
+        format!("RAM {memory:.0}% · SSD {disk_label}{saved}"),
+        format!("RAM {memory:.0}% · SSD {disk_label}"),
+        format!("{memory:.0}% · {disk_label}"),
+    ]
+    .into_iter()
+    .find(|note| prefix.len() + Line::from(note.as_str()).width() + 10 <= width)
+    .unwrap_or_default();
+    let bar = width
+        .saturating_sub(prefix.len() + Line::from(note.as_str()).width() + 1)
+        .max(1);
+    let cells = |percent: f64| ((percent / 100.0 * bar as f64).round() as usize).min(bar);
+    let disk_cells = if tiers.disk > 0 {
+        cells(disk).max(1)
+    } else {
+        0
+    };
+    let memory_cells = cells(memory).min(bar - disk_cells);
+    let rest = bar - disk_cells - memory_cells;
+    let line = Line::from(vec![
+        Span::styled(prefix, Style::default().fg(MUTED)),
+        Span::styled("█".repeat(memory_cells), Style::default().fg(GREEN)),
+        Span::styled("█".repeat(disk_cells), Style::default().fg(CYAN)),
+        Span::styled("█".repeat(rest), Style::default().fg(EDGE)),
+        Span::styled(format!(" {note}"), Style::default().fg(GREEN)),
     ]);
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(PANEL)), row);
 }

@@ -4528,11 +4528,7 @@ fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     let screen = render_app(&app, 120, 40);
-    for label in [
-        "PRESSURE normal",
-        "wired 3.2 GiB",
-        "comp 3.0 · decomp 1.5 MiB/s",
-    ] {
+    for label in ["PRESSURE normal", "wired 3.2 GiB"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     // The compressor's size is in the memory legend; a share of RAM says nothing new.
@@ -4551,7 +4547,12 @@ fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     // Expanding compression keeps its own history and readings, the ratio among them.
     app.charts.focused = Chart::Compression;
     app.charts.expanded = true;
-    assert!(render_app(&app, 120, 40).contains("4.6 GiB stored in 1.6 GiB · 2.9× ratio"));
+    let expanded = render_app(&app, 120, 40);
+    assert!(expanded.contains("4.6 GiB stored in 1.6 GiB · 2.9× ratio"));
+    assert!(
+        expanded.contains("compressing 3.0 MiB/s · decompressing 1.5 MiB/s"),
+        "{expanded}"
+    );
     app.charts.expanded = false;
 
     // Linux exposes no compressor counters: the queue takes the column.
@@ -5261,6 +5262,8 @@ fn captured_omlx_stats_report_a_full_ssd_cache_and_its_block_counters() {
             loads: 1520,
             saves: 1314,
             evictions: 327,
+            hit_tokens: Some(26_303_360),
+            disk_hit_tokens: Some(48_640),
         }
     );
     // 99.95% of capacity: new saves evict old prefixes.
@@ -5297,6 +5300,7 @@ fn disk_activity_is_storage_rates_and_cache_blocks_since_the_last_sample() {
         loads,
         saves,
         evictions,
+        ..Default::default()
     };
     let first = reading(0, 0, 0, 1);
     let next = reading(800 * MIB, 4 * MIB, 2, 1);
@@ -5441,13 +5445,13 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     });
     for label in [
         "disk I/O",
-        "saved ≈1h 30m of prefill",
+        "KV hit 90% · ≈1h 30m saved",
         "session",
         "90% of 1.2M · ≈1h 30m saved",
         "last",
         "90% of 29.0k · ≈2m 10s saved",
         "loading prefixes from SSD",
-        "120.0/120.0 GiB full",
+        "SSD 120.0 GiB · 0 blocks loaded · 0 saved · 0 evicted",
     ] {
         assert!(tall.contains(label), "missing {label}\n{tall}");
     }
@@ -5455,7 +5459,7 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     let short = render_view(40, 5, |frame| {
         app.render_indicator_chart(frame, frame.area(), name, history, metric)
     });
-    assert!(short.contains("saved ≈1h 30m"), "{short}");
+    assert!(short.contains("KV hit 90%"), "{short}");
     assert!(short.contains("SSD"), "{short}");
     // The Overview and the enlarged view both use it.
     let screen = render_app(&app, 180, 50);
@@ -5475,12 +5479,41 @@ fn cache_impact_reads_activity_speed_and_shares() {
     assert_eq!(prefill_speed(&none, &sample), Some(150.0));
     assert_eq!(headline(&sample, None, 60), "—");
     sample.llm_cache_efficiency = Some(62.0);
-    assert_eq!(headline(&sample, None, 60), "reuse 62%");
+    assert_eq!(headline(&sample, None, 60), "KV hit 62%");
     sample.llm_total_prompt_tokens = Some(1000);
     sample.llm_total_cached_tokens = Some(600);
     assert_eq!(session(&sample), Some((1000, 600)));
-    assert_eq!(headline(&sample, None, 60), "600 cached");
-    assert_eq!(headline(&sample, Some(10.0), 30), "saved ≈1m 0s");
+    assert_eq!(headline(&sample, None, 60), "KV hit 60%");
+    assert_eq!(headline(&sample, Some(10.0), 30), "KV hit 60%");
+    assert_eq!(
+        headline(&sample, Some(10.0), 60),
+        "KV hit 60% · ≈1m 0s saved"
+    );
+    // The SSD tier's own counts split the hits into memory and disk.
+    sample.ssd_cache = Some(domain::SsdCache {
+        capacity: 1,
+        hit_tokens: Some(600),
+        disk_hit_tokens: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(
+        crate::cache_impact::tiers(&sample),
+        Some(crate::cache_impact::Tiers {
+            prompt: 1000,
+            memory: 599,
+            disk: 1
+        })
+    );
+    let bar = render_view(60, 1, |frame| {
+        crate::cache_impact::draw_tiers(
+            frame,
+            frame.area(),
+            crate::cache_impact::tiers(&sample).unwrap(),
+            Some(10.0),
+        )
+    });
+    assert!(bar.contains("RAM 60% · SSD <1% · ≈1m 0s saved"), "{bar}");
+    sample.ssd_cache = None;
     sample.llm_total_cached_tokens = Some(2000);
     assert_eq!(
         session(&sample),
@@ -5568,10 +5601,26 @@ fn the_ssd_row_shows_fill_or_says_the_cache_is_off() {
         capacity: 120 * 1024 * MIB,
         ..Default::default()
     });
+    // An external KV cache is meant to fill: its size and what it did, no fill bar.
+    sample.ssd_cache = Some(domain::SsdCache {
+        used: 30 * 1024 * MIB,
+        capacity: 120 * 1024 * MIB,
+        loads: 1520,
+        saves: 1314,
+        evictions: 327,
+        ..Default::default()
+    });
     assert!(
-        row(&sample).contains("30.0/120.0 GiB 25%"),
+        row(&sample).contains("SSD 120.0 GiB · ↑1.5k ↓1.3k ✕327"),
         "{}",
         row(&sample)
+    );
+    let wide = render_view(80, 1, |frame| {
+        crate::swap_usage::draw_ssd_cache(frame, frame.area(), &sample)
+    });
+    assert!(
+        wide.contains("1.5k blocks loaded · 1.3k saved · 327 evicted"),
+        "{wide}"
     );
     render_view(0, 0, |frame| {
         crate::swap_usage::draw_ssd_cache(frame, Rect::new(0, 0, 0, 0), &sample)

@@ -18,7 +18,7 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, sample: &Sample) {
         // macOS creates swap files only when it needs them: none yet is
         // unused swap, not swap turned off.
         let state = if sample.swap_available {
-            "swap 0 B used · no swap file yet"
+            "swap 0 B used"
         } else {
             "swap —"
         };
@@ -41,8 +41,9 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, sample: &Sample) {
     );
 }
 
-/// The runtime's SSD prompt cache: how full it is, in the same form as swap.
-/// A full cache evicts old prefixes to save new ones.
+/// The runtime's SSD prompt cache. An external KV cache is meant to fill, so
+/// its size and what it did this session say more than a fill bar: blocks
+/// loaded back for prompts, saved, and evicted to make room.
 pub(super) fn draw_ssd_cache(frame: &mut Frame, area: Rect, sample: &Sample) {
     if area.is_empty() {
         return;
@@ -56,19 +57,24 @@ pub(super) fn draw_ssd_cache(frame: &mut Frame, area: Rect, sample: &Sample) {
         );
         return;
     };
-    let fill = if cache.full() {
-        "full".to_owned()
-    } else {
-        format!("{}%", share(cache.used, cache.capacity))
-    };
-    capacity_bar(
-        frame,
-        row,
-        "SSD",
-        format!("{} {fill}", capacity(cache.used, cache.capacity)),
-        cache.used,
-        cache.capacity,
+    let size = crate::formatting::bytes(cache.capacity);
+    let count = crate::formatting::compact_tokens;
+    let (loads, saves, evicted) = (
+        count(cache.loads),
+        count(cache.saves),
+        count(cache.evictions),
     );
+    let width = usize::from(row.width);
+    let text = [
+        format!("SSD {size} · {loads} blocks loaded · {saves} saved · {evicted} evicted"),
+        format!("SSD {size} · {loads} loaded · {saves} saved · {evicted} evicted"),
+        format!("SSD {size} · ↑{loads} ↓{saves} ✕{evicted}"),
+        format!("SSD {size}"),
+    ]
+    .into_iter()
+    .find(|text| ratatui::text::Line::from(text.as_str()).width() <= width)
+    .unwrap_or_default();
+    frame.render_widget(Paragraph::new(text).style(Style::default().fg(CYAN)), row);
 }
 
 fn share(used: u64, total: u64) -> u128 {

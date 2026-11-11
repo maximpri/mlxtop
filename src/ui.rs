@@ -1047,6 +1047,9 @@ impl App {
             } else {
                 gpu_load_label(sample.gpu_util, self.thresholds).into()
             }),
+            // A short panel's title already has the rate; the split would
+            // only repeat it.
+            ChartMetric::Compression if area.height < 7 => None,
             ChartMetric::Compression => {
                 let (compress, decompress) = if sample.rate_ready && sample.vm_available {
                     (rate(sample.compress), rate(sample.decompress))
@@ -1281,18 +1284,9 @@ impl App {
                 return;
             }
             if inner.height < 3 {
-                frame.render_widget(
-                    Paragraph::new(match current {
-                        Some(0) => "No compression traffic",
-                        Some(rate) if rate >= self.thresholds.compression_warn_rate => {
-                            "Compression active"
-                        }
-                        Some(_) => "Light compression · below warning",
-                        None => "Compression unavailable",
-                    })
-                    .style(Style::default().fg(current_tone.color())),
-                    inner,
-                );
+                // Too short for an axis: the traffic as a sparkline; its rate
+                // and colour are in the title, never a sentence.
+                self.draw_sparkline(frame, inner, history, metric);
                 return;
             }
         }
@@ -1314,7 +1308,22 @@ impl App {
                     inner.height -= 1;
                 }
             }
-            let session = cache_impact::session(sample);
+            // Where the session's prompt tokens came from: memory, the SSD
+            // or computed. Without the tier's own counts, its reused share.
+            let tiers = cache_impact::tiers(sample);
+            if let Some(tiers) = tiers {
+                if inner.height > reserved {
+                    cache_impact::draw_tiers(
+                        frame,
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                        tiers,
+                        speed,
+                    );
+                    inner.y += 1;
+                    inner.height -= 1;
+                }
+            }
+            let session = cache_impact::session(sample).filter(|_| tiers.is_none());
             let bars = [
                 session.map(|reuse| ("session", reuse)),
                 cache_impact::last_prompt(sample).map(|reuse| ("last", reuse)),
@@ -1821,7 +1830,9 @@ impl App {
                 }
             }
         }
-        if paging_idle && inner.height >= 4 {
+        // An idle disk panel keeps its baseline: the rows above it say what
+        // the cache holds, and a sentence would cover them.
+        if paging_idle && inner.height >= 4 && metric != ChartMetric::Disk {
             frame.render_widget(
                 Paragraph::new(match (metric, inner.width >= 32) {
                     (ChartMetric::Compression, true) => "No compression in this window",
