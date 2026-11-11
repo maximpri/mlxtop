@@ -56,6 +56,12 @@ pub(crate) enum CliAction {
         interval: u64,
         history: usize,
         once: bool,
+        /// Append every sample to this file as a JSON line.
+        record: Option<std::path::PathBuf>,
+    },
+    /// Read a recording back through today's rules and report what fires.
+    Replay {
+        path: std::path::PathBuf,
     },
     /// Replace this binary with the newest release (`rc`: or release candidate).
     Update {
@@ -65,11 +71,13 @@ pub(crate) enum CliAction {
 
 pub(crate) fn help_text(platform: Platform) -> String {
     format!(
-        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n\n\
+        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
          update installs the latest release in place; --rc includes release candidates\n\
+         replay reads a recording back through the detection rules and reports what fires\n\
          Options: -i, --interval N  refresh interval (default 1)\n\
          -n, --history N    chart/journal history (20–3600)\n\
          -1, --once         static report\n\
+         --record FILE      append every sample to FILE (one JSON line each)\n\
          -V, --version      show version\n\
          -h, --help         show help\n\
          Config file: {}\n\
@@ -101,6 +109,19 @@ pub(crate) fn parse_args(
             [option, ..] => Err(format!("unknown option for update: {option}").into()),
         };
     }
+    if let Some(("replay", options)) = args
+        .split_first()
+        .map(|(first, rest)| (first.as_str(), rest))
+    {
+        return match options {
+            [flag] if flag == "-h" || flag == "--help" => {
+                Ok(CliAction::Print(help_text(Platform::current())))
+            }
+            [path] => Ok(CliAction::Replay { path: path.into() }),
+            [] => Err("replay needs a recording: mlxtop replay FILE".into()),
+            [_, option, ..] => Err(format!("unknown option for replay: {option}").into()),
+        };
+    }
     let (mut interval, interval_rejected) = config_interval(config);
     let (mut history, history_rejected) = config_history(config);
     if interval_rejected {
@@ -125,6 +146,7 @@ pub(crate) fn parse_args(
     }
     let mut once = false;
     let mut doctor = false;
+    let mut record = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -138,6 +160,10 @@ pub(crate) fn parse_args(
                 history = args.get(i).ok_or("missing history")?.parse()?;
             }
             "-1" | "--once" => once = true,
+            "--record" => {
+                i += 1;
+                record = Some(args.get(i).ok_or("missing recording file")?.into());
+            }
             "-V" | "--version" => return Ok(CliAction::Print(format!("mlxtop {VERSION}"))),
             "-h" | "--help" => return Ok(CliAction::Print(help_text(Platform::current()))),
             value if !value.starts_with('-') && i == 0 => interval = value.parse()?,
@@ -161,6 +187,7 @@ pub(crate) fn parse_args(
         interval,
         history,
         once,
+        record,
     })
 }
 
@@ -208,11 +235,23 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         CliAction::Update { rc } => return update(rc),
+        CliAction::Replay { path } => {
+            let thresholds = crate::config::Thresholds::from_config(&config);
+            crate::recording::run(&path, thresholds, &mut stdout().lock())?;
+            return Ok(());
+        }
         CliAction::Run {
             interval,
             history,
             once,
-        } => (interval, history, once),
+            record,
+        } => {
+            if let Some(path) = record {
+                crate::recording::start(&path)
+                    .map_err(|error| format!("cannot record to {}: {error}", path.display()))?;
+            }
+            (interval, history, once)
+        }
     };
 
     diagnostics_log(

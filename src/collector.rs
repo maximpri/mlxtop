@@ -88,6 +88,9 @@ pub(crate) struct Collector {
     pub(crate) correlation: CorrelationEngine,
     pub(crate) previous: Option<PreviousCounters>,
     pub(crate) previous_llm_cache: Option<CacheCounters>,
+    /// The runtime's cached-token total when mlxtop first saw it, with the
+    /// runtime it belongs to: what was saved before then is not counted.
+    pub(crate) cached_at_start: Option<(String, u64)>,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
@@ -196,6 +199,7 @@ impl Collector {
             correlation: CorrelationEngine::default(),
             previous: None,
             previous_llm_cache: None,
+            cached_at_start: None,
             current: Sample::default(),
             generation_history: VecDeque::with_capacity(history_limit),
             prefill_history: VecDeque::with_capacity(history_limit),
@@ -502,6 +506,9 @@ impl Collector {
                     .llm_total_prompt_tokens
                     .is_some_and(|prompt| *cached <= prompt)
             });
+        sample.llm_watched_cached_tokens = sample
+            .llm_total_cached_tokens
+            .map(|cached| watched(&mut self.cached_at_start, &sample.llm_provider, cached));
         sample.llm_cache_interval_efficiency =
             cache_interval_efficiency(&mut self.previous_llm_cache, llm_stats, live_is_stale)
                 .or_else(|| {
@@ -658,12 +665,13 @@ impl Collector {
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
         // What generation was doing, so a log can be replayed against it.
-        let generating = crate::analysis::Work::from_sample(&sample);
+        let generating = crate::analysis::CorrelationObservation::from_sample(&sample);
+        crate::recording::write(&sample);
         diagnostics_log(
             "INFO",
             "sample",
             format!(
-                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={}",
+                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={} writers={} disk_read={} disk_write={} disk_weights={} ssd_loads={} ssd_saves={}",
                 sample_started.elapsed().as_millis(),
                 log_field(&sample.llm_status),
                 log_field(&sample.llm_provider),
@@ -685,8 +693,18 @@ impl Collector {
                 sample.swap_out,
                 sample.compress,
                 sample.decompress,
-                generating.requests,
+                generating.generating,
                 log_optional_u64(generating.context),
+                if generating.writers.is_empty() {
+                    "-".to_owned()
+                } else {
+                    log_field(&generating.writers.join(","))
+                },
+                log_optional_u64(sample.disk.read),
+                log_optional_u64(sample.disk.write),
+                sample.disk.weights,
+                sample.disk.loads,
+                sample.disk.saves,
             ),
         );
         self.current = sample.clone();
@@ -1234,6 +1252,18 @@ pub(crate) fn weight_reads(sample: &Sample) -> u64 {
             read
         }
         _ => 0,
+    }
+}
+
+/// Cached tokens since mlxtop first saw `runtime`'s total. A new runtime,
+/// or one restarted with its counters back at zero, starts the count again.
+pub(crate) fn watched(start: &mut Option<(String, u64)>, runtime: &str, cached: u64) -> u64 {
+    match start {
+        Some((seen, first)) if seen == runtime && *first <= cached => cached - *first,
+        _ => {
+            *start = Some((runtime.to_owned(), cached));
+            0
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use crate::host::Host;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Device {
     pub index: u32,
     pub uuid: String,
@@ -24,7 +24,7 @@ pub(crate) struct Device {
 }
 
 /// The backend that reported a card.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Vendor {
     Nvidia,
     Amd,
@@ -49,7 +49,7 @@ impl Vendor {
 
 /// Why the driver is holding clocks below their maximum, most severe first.
 /// Idle, application-clock and sync-boost reasons are normal and excluded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Throttle {
     Thermal,
     PowerBrake,

@@ -5,7 +5,7 @@ use crate::{gpu, process_memory};
 use std::time::{Duration, SystemTime};
 pub(crate) const MIB: u64 = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Tone {
     Green,
     Yellow,
@@ -17,7 +17,7 @@ pub(crate) enum Tone {
     Unusual,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TelemetrySource {
     #[default]
     None,
@@ -145,7 +145,7 @@ pub(crate) struct Consumer {
     pub(crate) processes: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LlmProcess {
     pub(crate) pid: u32,
     pub(crate) name: String,
@@ -196,7 +196,7 @@ pub(crate) struct LlmLogStats {
 /// monitor therefore never invents these values from RSS or GPU utilization;
 /// they are populated only from a provider endpoint that can observe the
 /// serving process directly.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MlxTelemetry {
     pub(crate) version: Option<String>,
     pub(crate) active_memory: Option<u64>,
@@ -211,7 +211,7 @@ pub(crate) struct MlxTelemetry {
     pub(crate) process_footprint: Option<u64>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MetalTelemetry {
     pub(crate) device_name: Option<String>,
     pub(crate) architecture: Option<String>,
@@ -464,7 +464,7 @@ impl CorrelationInsight {
 
 /// A runtime's on-disk prompt cache (oMLX keeps KV blocks on an SSD): its
 /// fill and its lifetime counters, which the collector turns into activity.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SsdCache {
     pub(crate) used: u64,
     pub(crate) capacity: u64,
@@ -487,7 +487,7 @@ impl SsdCache {
 
 /// What the runtime did with its disk between two samples: storage bytes per
 /// second from the OS, and SSD-cache block counts from the runtime.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DiskActivity {
     pub(crate) read: Option<u64>,
     pub(crate) write: Option<u64>,
@@ -552,8 +552,13 @@ pub(crate) struct LlmTelemetry {
     pub(crate) mlx: MlxTelemetry,
 }
 
-#[derive(Clone)]
+/// One poll of the machine and the runtime. It is written to a recording
+/// as it is and read back for replay; what is derived from it (the
+/// finding, the runtime report, process readings) is not recorded.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct Sample {
+    #[serde(skip)]
     pub(crate) runtime: crate::runtime_diagnostics::RuntimeReport,
     pub(crate) updated: String,
     /// Local offset from UTC in seconds, read alongside `updated`. Request
@@ -601,6 +606,7 @@ pub(crate) struct Sample {
     pub(crate) system_power_mw: Option<u64>,
     pub(crate) llm_count: u32,
     pub(crate) llm_rss: u64,
+    #[serde(skip)]
     pub(crate) process_memory: Option<process_memory::Reading>,
     pub(crate) process_memory_growth: Option<i64>,
     /// The runtime's storage traffic and SSD-cache use since the last sample.
@@ -629,6 +635,9 @@ pub(crate) struct Sample {
     /// how many of them came from its cache instead of being computed.
     pub(crate) llm_total_prompt_tokens: Option<u64>,
     pub(crate) llm_total_cached_tokens: Option<u64>,
+    /// Of those, the prompt tokens served from cache since mlxtop started
+    /// watching: what the prefill time it saved is measured over.
+    pub(crate) llm_watched_cached_tokens: Option<u64>,
     pub(crate) llm_cache_interval_efficiency: Option<f64>,
     pub(crate) llm_prefix_hit_rate: Option<f64>,
     pub(crate) llm_active_requests: Option<u64>,
@@ -643,6 +652,7 @@ pub(crate) struct Sample {
     /// The engine a runtime serves through, when not its own: oMLX's Splash.
     pub(crate) llm_engine: Option<String>,
     pub(crate) llm_remote: bool,
+    #[serde(skip)]
     pub(crate) correlation: CorrelationInsight,
     pub(crate) llm_top: String,
     pub(crate) llm_pid: u32,
@@ -770,6 +780,7 @@ impl Default for Sample {
             llm_cache_efficiency: None,
             llm_total_prompt_tokens: None,
             llm_total_cached_tokens: None,
+            llm_watched_cached_tokens: None,
             llm_cache_interval_efficiency: None,
             llm_prefix_hit_rate: None,
             llm_active_requests: None,
@@ -817,7 +828,7 @@ pub(crate) struct VmCounters {
     pub(crate) reactivations: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RequestUsage {
     pub provider: String,
     pub model: String,

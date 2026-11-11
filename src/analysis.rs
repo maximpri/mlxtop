@@ -645,10 +645,6 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    pub(crate) fn from_sample(sample: &Sample) -> Self {
-        Self::of(&CorrelationObservation::from_sample(sample))
-    }
-
     fn of(o: &CorrelationObservation) -> Self {
         let requests = if o.generating > 0 {
             o.generating

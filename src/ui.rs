@@ -1347,7 +1347,6 @@ impl App {
                         frame,
                         Rect::new(inner.x, inner.y, inner.width, 1),
                         tiers,
-                        speed,
                     );
                     inner.y += 1;
                     inner.height -= 1;
@@ -1362,12 +1361,14 @@ impl App {
                 if inner.height <= reserved {
                     break;
                 }
+                // The runtime's lifetime share has no saved time beside it:
+                // the title counts only what mlxtop watched.
                 cache_impact::draw_reuse(
                     frame,
                     Rect::new(inner.x, inner.y, inner.width, 1),
                     label,
                     reuse,
-                    speed,
+                    speed.filter(|_| label == "last"),
                 );
                 inner.y += 1;
                 inner.height -= 1;

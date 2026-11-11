@@ -180,8 +180,32 @@ fn command_line_options_override_config_and_validate_ranges() {
         interval,
         history,
         once,
+        record: None,
     };
     assert_eq!(parse_args(&[], &config).unwrap(), run(5, 600, false));
+    // A recording is a file; replay reads one back.
+    assert_eq!(
+        parse_args(&args(&["--record", "/tmp/s.jsonl"]), &config).unwrap(),
+        CliAction::Run {
+            interval: 5,
+            history: 600,
+            once: false,
+            record: Some("/tmp/s.jsonl".into()),
+        }
+    );
+    assert!(parse_args(&args(&["--record"]), &config).is_err());
+    assert_eq!(
+        parse_args(&args(&["replay", "s.jsonl"]), &config).unwrap(),
+        CliAction::Replay {
+            path: "s.jsonl".into()
+        }
+    );
+    assert!(parse_args(&args(&["replay"]), &config).is_err());
+    assert!(parse_args(&args(&["replay", "a", "--x"]), &config).is_err());
+    assert!(matches!(
+        parse_args(&args(&["replay", "--help"]), &config).unwrap(),
+        CliAction::Print(_)
+    ));
     assert_eq!(
         parse_args(&args(&["2", "-n", "40", "--once"]), &config).unwrap(),
         run(2, 40, true)

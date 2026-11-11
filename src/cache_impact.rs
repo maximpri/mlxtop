@@ -91,8 +91,12 @@ pub(crate) fn headline(sample: &Sample, speed: Option<f64>, width: u16) -> Strin
             "—".into()
         };
     };
-    let saved = session(sample)
-        .and_then(|(_, cached)| saved_seconds(cached, speed))
+    // Saved since mlxtop started watching: the runtime's lifetime total
+    // would credit days of work nobody here saw.
+    let saved = sample
+        .llm_watched_cached_tokens
+        .filter(|cached| *cached > 0)
+        .and_then(|cached| saved_seconds(cached, speed))
         .map(|seconds| format!(" · ≈{} saved", duration_label(seconds)));
     match saved {
         Some(saved) if width >= 44 => format!("KV hit {hit:.0}%{saved}"),
@@ -239,7 +243,7 @@ pub(crate) fn draw_weights(
 
 /// The session's prompt tokens as one bar: green from memory, cyan loaded
 /// from the SSD (never thinner than a cell when it served any), dim computed.
-pub(crate) fn draw_tiers(frame: &mut Frame, row: Rect, tiers: Tiers, speed: Option<f64>) {
+pub(crate) fn draw_tiers(frame: &mut Frame, row: Rect, tiers: Tiers) {
     if row.is_empty() {
         return;
     }
@@ -250,13 +254,9 @@ pub(crate) fn draw_tiers(frame: &mut Frame, row: Rect, tiers: Tiers, speed: Opti
     } else {
         format!("{disk:.0}%")
     };
-    let saved = saved_seconds(tiers.memory + tiers.disk, speed)
-        .map(|seconds| format!(" · ≈{} saved", duration_label(seconds)))
-        .unwrap_or_default();
     let width = usize::from(row.width);
     let prefix = format!("{:<8}", "reused");
     let note = [
-        format!("RAM {memory:.0}% · SSD {disk_label}{saved}"),
         format!("RAM {memory:.0}% · SSD {disk_label}"),
         format!("{memory:.0}% · {disk_label}"),
     ]

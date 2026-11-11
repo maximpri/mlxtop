@@ -5460,6 +5460,8 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     // prefill at 200 tok/s: the cache saved 1h 30m of prefill.
     app.collector.current.llm_total_prompt_tokens = Some(1_200_000);
     app.collector.current.llm_total_cached_tokens = Some(1_080_000);
+    // Of those, mlxtop watched 360k being served from cache.
+    app.collector.current.llm_watched_cached_tokens = Some(360_000);
     app.collector.prefill_history.clear();
     for _ in 0..5 {
         push_history_with_tone(
@@ -5491,9 +5493,9 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     });
     for label in [
         "KV cache / model I/O",
-        "KV hit 90% · ≈1h 30m saved",
+        "KV hit 90% · ≈30m 0s saved",
         "session",
-        "90% of 1.2M · ≈1h 30m saved",
+        "90% of 1.2M",
         "last",
         "90% of 29.0k · ≈2m 10s saved",
         "loading prefixes from SSD",
@@ -5533,6 +5535,12 @@ fn cache_impact_reads_activity_speed_and_shares() {
     assert_eq!(headline(&sample, Some(10.0), 30), "KV hit 60%");
     assert_eq!(
         headline(&sample, Some(10.0), 60),
+        "KV hit 60%",
+        "nothing watched yet"
+    );
+    sample.llm_watched_cached_tokens = Some(600);
+    assert_eq!(
+        headline(&sample, Some(10.0), 60),
         "KV hit 60% · ≈1m 0s saved"
     );
     // The SSD tier's own counts split the hits into memory and disk.
@@ -5555,10 +5563,9 @@ fn cache_impact_reads_activity_speed_and_shares() {
             frame,
             frame.area(),
             crate::cache_impact::tiers(&sample).unwrap(),
-            Some(10.0),
         )
     });
-    assert!(bar.contains("RAM 60% · SSD <1% · ≈1m 0s saved"), "{bar}");
+    assert!(bar.contains("RAM 60% · SSD <1%"), "{bar}");
     sample.ssd_cache = None;
     sample.llm_total_cached_tokens = Some(2000);
     assert_eq!(

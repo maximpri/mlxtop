@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.17 — 2026-11-11
+## 3.3.0-rc.18 — 2026-11-11
 
 ### Diagnosis
 
@@ -156,10 +156,26 @@
 - **LM Studio's `decision` models are not counted as chat models**, and a
   model listed without loaded instances no longer empties the model list.
 
+### Recording and replay
+
+- **`--record FILE` writes every sample to a file**, one JSON line each,
+  and **`mlxtop replay FILE`** reads it back through the detection rules
+  and Journal: how many generation and prefill samples there were, how many
+  fell inside a slowdown or stall, and each finding with its time. A rule
+  can be checked against a real incident, and a recording can go with a
+  bug report. `scripts/rc.py run HOST --record FILE` records a staged RC.
+- The diagnostic log records, for each sample, which requests were
+  writing, the runtime's disk reads, writes and weight reads, and SSD
+  blocks loaded and saved. `generating=` reads 0 when nothing is.
+
 ### Changed
 
 - `--once` prints `SLOWDOWN`, `UNUSUAL` and `USUAL SPEED` where it printed
   `CORRELATION` and `EVIDENCE`.
+- **Prefill time saved counts only what mlxtop watched.** The KV cache
+  title's `≈… saved` covers prompt tokens served from cache since mlxtop
+  started, not the runtime's lifetime total (which read `≈121h saved` on
+  one server). The lifetime hit rate stays.
 
 ## 3.2.1 — 2026-11-03
 

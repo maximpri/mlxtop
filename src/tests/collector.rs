@@ -1335,3 +1335,18 @@ fn saturation_survives_gpu_busy_impact_deduplication() {
         journal(&c)
     );
 }
+
+#[test]
+fn cached_tokens_count_from_when_mlxtop_started_watching() {
+    let mut start = None;
+    assert_eq!(crate::collector::watched(&mut start, "oMLX", 80_000_000), 0);
+    assert_eq!(
+        crate::collector::watched(&mut start, "oMLX", 80_030_000),
+        30_000
+    );
+    // A restarted runtime counts again from its new total.
+    assert_eq!(crate::collector::watched(&mut start, "oMLX", 5_000), 0);
+    assert_eq!(crate::collector::watched(&mut start, "oMLX", 6_000), 1_000);
+    // So does another runtime.
+    assert_eq!(crate::collector::watched(&mut start, "vLLM", 9_000), 0);
+}

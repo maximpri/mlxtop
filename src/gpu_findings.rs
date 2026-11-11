@@ -15,7 +15,7 @@ const OFFLOAD_MIN_PERCENT: u64 = 2;
 /// Clock limits on an idle or lightly used card cost no throughput.
 const THROTTLE_MIN_UTILIZATION: u8 = 20;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum GpuIssue {
     /// Part of the loaded model runs on the CPU although a GPU is present.
     Offload { offloaded: u64, size: u64 },

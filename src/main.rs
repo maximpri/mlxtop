@@ -37,6 +37,7 @@ mod platform;
 mod process_memory;
 mod processes;
 mod providers;
+mod recording;
 mod report;
 mod request_dashboard;
 mod request_history;

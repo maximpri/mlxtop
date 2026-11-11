@@ -522,12 +522,22 @@ again each time Settings opens, so edits made by hand show up.
 -i, --interval N   refresh interval in seconds, 1–60 (default: 1)
 -n, --history N    chart/journal history, 20–3600 (default: 300)
 -1, --once         print a static report and exit
+--record FILE      append every sample to FILE, one JSON line each
 -V, --version      print the installed version and exit
 -h, --help         show help
 
 mlxtop doctor [--interval N]   diagnose the connection and readings, then exit
 mlxtop update [--rc]           install the latest release (--rc: or release candidate)
+mlxtop replay FILE             read a recording back through the detection rules
 ```
+
+A recording keeps every sample as mlxtop saw it: the machine's readings and
+the runtime's, request by request. `mlxtop replay FILE` runs them through
+today's rules and Journal and prints how many generation and prefill samples
+there were, how many fell inside a slowdown or stall, and each finding with
+its time. Record a session in which the model slowed, then replay it after a
+change to the rules, or attach it to a bug report. A recording holds request
+ids, model names and token counts, never prompts or output.
 
 `mlxtop update` downloads the release archive for this platform from GitHub,
 checks it against the release's `SHA256SUMS` and the new binary's reported
