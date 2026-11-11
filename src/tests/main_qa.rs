@@ -170,18 +170,18 @@ fn judge(case: &Case, width: u16, height: u16) -> Vec<String> {
     let rows = text(&buffer);
     let screen = rows.join("\n");
     let mut problems = Vec::new();
-    // Colour means impact: magenta only while the model is slowed or stalled.
-    let magenta = buffer
+    // Colour means impact: yellow only while the model is slowed or stalled.
+    let yellow = buffer
         .content
         .iter()
         .filter(|cell| cell.fg == UNUSUAL || cell.bg == UNUSUAL)
         .count();
-    if !case.impact && magenta > 0 {
+    if !case.impact && yellow > 0 {
         problems.push(format!(
-            "{magenta} magenta cells with nothing slowing the model"
+            "{yellow} yellow cells with nothing slowing the model"
         ));
     }
-    if case.impact && magenta == 0 && !case.app.summary_open && !case.app.diagnostics_open {
+    if case.impact && yellow == 0 && !case.app.summary_open && !case.app.diagnostics_open {
         problems.push("a slowdown that no chart shows".into());
     }
     for noise in NOISE {
@@ -255,7 +255,7 @@ fn every_screen_passes_the_qa_judge() {
 
 #[test]
 fn the_qa_judge_catches_what_it_is_for() {
-    // Magenta on a healthy screen.
+    // Yellow on a healthy screen.
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     for point in app.collector.swap_history.iter_mut() {
@@ -266,7 +266,7 @@ fn the_qa_judge_catches_what_it_is_for() {
         impact: false,
         app,
     };
-    assert!(judge(&case, 120, 40).iter().any(|p| p.contains("magenta")));
+    assert!(judge(&case, 120, 40).iter().any(|p| p.contains("yellow")));
     // A slowdown no chart shows.
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
@@ -295,7 +295,7 @@ fn qa_screens_for_the_model_judge() {
             let buffer = draw(&case.app, width, height);
             let rows = text(&buffer);
             let mut out = rows.join("\n");
-            let magenta: Vec<String> = rows
+            let yellow: Vec<String> = rows
                 .iter()
                 .enumerate()
                 .filter_map(|(y, row)| {
@@ -312,13 +312,13 @@ fn qa_screens_for_the_model_judge() {
                 })
                 .collect();
             out.push_str(&format!(
-                "\n\n[state: {} · the model is {}]\n[magenta cells: {}]\n",
+                "\n\n[state: {} · the model is {}]\n[yellow cells: {}]\n",
                 case.name,
                 if case.impact { "slowed" } else { "not slowed" },
-                if magenta.is_empty() {
+                if yellow.is_empty() {
                     "none".into()
                 } else {
-                    magenta.join("; ")
+                    yellow.join("; ")
                 }
             ));
             std::fs::write(dir.join(format!("{}-{width}x{height}.txt", case.name)), out).unwrap();

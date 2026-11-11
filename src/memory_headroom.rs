@@ -261,10 +261,12 @@ pub(crate) fn draw(
             if filled == 0 {
                 break;
             }
+            // A full cell is painted as background: terminals leave a gap
+            // between rows of glyphs, which reads as horizontal stripes.
             frame.buffer_mut()[(plot.x + column as u16, plot.bottom() - 1 - level)]
                 .set_symbol(BLOCKS[usize::from(filled)])
                 .set_fg(tone.color())
-                .set_bg(PANEL);
+                .set_bg(if filled == 8 { tone.color() } else { PANEL });
         }
     }
     true

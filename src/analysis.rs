@@ -796,6 +796,9 @@ struct Episode {
     silent: bool,
     /// Its samples since something else was last unusual.
     quiet: Vec<CorrelationObservation>,
+    /// The latest reason found in it, in words: once that reason passes
+    /// while speed is still down, the slowdown is still its doing.
+    reason: Option<(CorrelationCause, String)>,
 }
 
 impl CorrelationEngine {
@@ -942,6 +945,7 @@ impl CorrelationEngine {
                     reported: Vec::new(),
                     silent: false,
                     quiet: Vec::new(),
+                    reason: None,
                 }
             }
             (None, None) => {
@@ -1018,11 +1022,26 @@ impl CorrelationEngine {
             percent.abs(),
             open.reference
         );
-        let cause = findings
+        let mut cause = findings
             .first()
             .map(|found| found.signal.cause())
             .unwrap_or_default();
         let texts: Vec<&str> = findings.iter().map(|found| found.text.as_str()).collect();
+        if let Some(first) = findings.first() {
+            open.reason = Some((cause, first.text.clone()));
+        }
+        // What was unusual has passed and speed is still down: the slowdown
+        // keeps the reason it was found with, said as past.
+        let earlier = if findings.is_empty() {
+            open.reason
+                .clone()
+                .map(|(was, text)| (was, format!("{text} earlier")))
+        } else {
+            None
+        };
+        if let Some((was, _)) = &earlier {
+            cause = *was;
+        }
         // One Journal row per reason in a slowdown, and none for a slowdown
         // that repeats the last one's reason within a minute.
         let same_story = self.told.is_some_and(|(told, at)| {
@@ -1047,7 +1066,9 @@ impl CorrelationEngine {
             phase: Phase::Generation,
             direction: ThroughputDirection::Down,
             cause,
-            summary: if texts.is_empty() {
+            summary: if let Some((_, text)) = &earlier {
+                format!("{rate_label} · {text}")
+            } else if texts.is_empty() {
                 format!("{rate_label} · nothing else unusual")
             } else {
                 format!(
@@ -1068,6 +1089,7 @@ impl CorrelationEngine {
             lead: texts
                 .first()
                 .map(|text| (*text).to_owned())
+                .or_else(|| earlier.as_ref().map(|(_, text)| text.clone()))
                 .unwrap_or_default(),
             stall_seconds: None,
             event_key: Some(CorrelationKey {

@@ -26,7 +26,7 @@ class QaJudgeTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.screens = Path(self.dir.name)
-        (self.screens / "healthy-120x40.txt").write_text("┌ memory ┐\n[magenta cells: none]\n")
+        (self.screens / "healthy-120x40.txt").write_text("┌ memory ┐\n[yellow cells: none]\n")
         (self.screens / "stall-120x40.txt").write_text("┌ generation ┐\n")
 
     def tearDown(self):
@@ -36,7 +36,7 @@ class QaJudgeTest(unittest.TestCase):
         verdict = qa_judge.parse_verdict('<think>hmm</think>```json\n{"verdict": "pass", "issues": []}\n```')
         self.assertEqual(verdict["verdict"], "pass")
         verdict = qa_judge.parse_verdict(json.dumps({"verdict": "pass", "issues": [
-            {"severity": "blocker", "rule": 1, "where": "paging", "detail": "magenta while healthy"}]}))
+            {"severity": "blocker", "rule": 1, "where": "paging", "detail": "yellow while healthy"}]}))
         self.assertEqual(verdict["verdict"], "blocker", "a blocker is never a pass")
         self.assertEqual(qa_judge.parse_verdict("no json here")["verdict"], "issues")
         self.assertEqual(qa_judge.parse_verdict("{not json}")["verdict"], "issues")

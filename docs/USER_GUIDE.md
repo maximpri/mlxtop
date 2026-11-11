@@ -44,12 +44,12 @@ one line, and the host charts get its rows.
 **Memory** puts the OS **PRESSURE** label in the reading slot and shows
 headroom beneath it. The **GPU** meter is wired memory against the GPU wired
 limit, with what is left under it (`25.6 / 32.0 GiB`, `6.4 GiB left`); it
-turns yellow from 90%, red from 97%, and says so when wired memory is over
+turns orange from 90%, red from 97%, and says so when wired memory is over
 the limit. The **RAM** meter is memory in use (wired, app and compressed)
 with the file cache as its last segment, and what is left: free memory plus
 that cache, which the OS gives back on demand. Under the meters, a trace
 shows what was left over time, each sample in its pressure colour: green
-for normal, yellow for warning, red for critical. A model load reads as the
+for normal, orange for warning, red for critical. A model load reads as the
 trace dropping. There is no resident percentage: a full file cache fills RAM
 without establishing memory pressure. Without composition counters the
 history is an area of occupancy. Linux derives pressure from
@@ -69,7 +69,7 @@ disk. File paging counts against the system only while memory is tight
 (warning pressure, or 10% free or less); otherwise it is drawn in green as
 `Disk reads · memory not tight`, for example while a model loads. Both
 charts' axes never shrink below their warning rate, which is drawn as a
-dotted yellow line, so a trickle stays a short bar. A measured all-zero
+dotted orange line, so a trickle stays a short bar. A measured all-zero
 window says **No paging traffic** without inventing a ceiling; missing samples
 remain gaps.
 
@@ -153,7 +153,7 @@ that pass it. The bottom edge says what the latest is for, for example
 `┄ usual 30.0 for 2 requests · 131.2k context`. The line is grey while all is
 well.
 
-Magenta means impact and nothing else. It appears only while the model is
+Yellow means impact and nothing else. It appears only while the model is
 slowed or stalled:
 
 - the slowdown's samples on the generation chart;
@@ -171,7 +171,7 @@ on their own; they are what you asked the runtime to do.
 
 During a slowdown the same colour ties the panels together:
 
-- the usual-speed line turns magenta and the reason is named under the bars;
+- the usual-speed line turns yellow and the reason is named under the bars;
 - the border of the panel that shows the reason is tagged `▲ slowed GEN ↓50%`;
 - the queue's active count and history are marked when the reason is how many
   requests waited.
@@ -586,7 +586,7 @@ you leave out keeps its built-in default.
 | `omx.port` | integer | 8000 | oMLX server port; unset, discovered as described in [oMLX telemetry](#omlx-telemetry) |
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
-| `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in yellow |
+| `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in orange |
 | `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
@@ -748,7 +748,7 @@ prompt sizes in tokens, not health or latency assessments. The headline keeps
 the exact selected prompt size and its observation age visible.
 
 Request cache reuse uses the cache chart's bands for prompts of at least 4,096
-tokens: green from 50%, yellow from 20%, red below 20%. Smaller prompts stay
+tokens: green from 50%, orange from 20%, red below 20%. Smaller prompts stay
 cyan. Low reuse on a cold request is expected;
 a low percentage by itself does not establish a cache problem.
 
@@ -787,13 +787,13 @@ window in the top bar, such as `window 46s`, is the rolling history span, not
 elapsed runtime. The span stays fixed while new samples enter on the right.
 Resize the terminal, expand a chart or change zoom to change the visible span.
 
-GPU and paging samples retain green/yellow/red value bands.
-GPU defaults are green below 75%, yellow from 75% and red from 90%; these are
+GPU and paging samples retain green/orange/red value bands.
+GPU defaults are green below 75%, orange from 75% and red from 90%; these are
 load bands, not proof of a bottleneck. Configured thresholds apply consistently
 to numeric readings, traces and device meters. Percentage axes stay at 0–100;
 all other axes use the real measured unit and fit the visible data.
 
-**Queue** plots active requests in cyan and waiting requests in yellow on one
+**Queue** plots active requests in cyan and waiting requests in orange on one
 shared, labeled zero baseline. A compact queue keeps its counts and adds a
 mark per request: `●` running, `○` waiting, `+` when they do not fit. A white `═` marks equal measured counts. Overlapping connectors merge into continuous muted lines and junctions.
 Muted `≈` marks unequal values that coincide at terminal resolution. Exact

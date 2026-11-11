@@ -75,17 +75,21 @@
 
 ### Dashboards
 
+- **Impact is yellow; warnings are orange.** The anomaly colour was
+  magenta. It is now a clear yellow, and the warning grade (pressure
+  `watch`, warning lines, queued requests, a nearly full GPU) moves from amber
+  to orange so yellow still means impact and nothing else.
 - **Memory's history has an axis like every other chart's.** It topped out
   at its own peak, so steady headroom filled the plot to the top and read as
   horizontal stripes. It now rounds up past the peak, as the rate charts do.
 - **The generation chart draws its usual speed** as a dashed line, column by
   column: it steps when a request joins or leaves and runs through bars that
-  pass it. It is grey while speed is usual and magenta during a slowdown. The
+  pass it. It is grey while speed is usual and yellow during a slowdown. The
   bottom edge, Diagnostics and `--once` say what it is for: `usual 30.0 for
   2 requests · 131.2k context`.
-- **Magenta means impact, and nothing else.** During a slowdown or stall its
-  samples are magenta on the generation chart, and what was unusual beside
-  it is magenta on that signal's own chart or in the header, so the cause
+- **Yellow means impact, and nothing else.** During a slowdown or stall its
+  samples are yellow on the generation chart, and what was unusual beside
+  it is yellow on that signal's own chart or in the header, so the cause
   reads off the charts. A reading that is unusual while the model keeps its
   speed changes no colour: Diagnostics lists it. A host reading that stays
   unusual for 30 seconds at the usual speed becomes its usual value.

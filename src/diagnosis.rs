@@ -77,6 +77,9 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
             "The runtime used its disk mid-answer ({lead}): check what it reads, and that disk's speed."
         ),
         CorrelationCause::Stall => format!("Generation stopped beside {lead}: start there."),
+        CorrelationCause::ConcurrentPrefill if lead.ends_with(" earlier") => {
+            "A prompt was read beside this answer: expected; its speed comes back on its own.".into()
+        }
         CorrelationCause::ConcurrentPrefill => {
             "A prompt is being read beside this answer: expected; it recovers when the prompt is read.".into()
         }

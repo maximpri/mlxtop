@@ -150,7 +150,7 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Role | Treatment |
 | --- | --- |
 | Healthy or favorable measured condition | Green plus a label or value |
-| Condition worth inspecting | Yellow plus an explicit reason |
+| Condition worth inspecting | Orange plus an explicit reason |
 | Critical measured condition | Red plus an explicit reason |
 | Chart identity | Existing metric color; a title color alone is not severity |
 | Live request in prompt history | Cyan plus LIVE |
@@ -159,11 +159,11 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Prompt size changes | Muted numeric comparison; never warning markers on bars |
 | Resident RAM | Bytes and percentage; the PRESSURE label and the history's ribbon carry OS pressure severity |
 | RAM composition | Wired blue, app cyan, compressed and cache two greys of different lightness, free empty; softened toward the panel in the history |
-| GPU utilization | Green/yellow/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
+| GPU utilization | Green/orange/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
 | Throughput | Green; a speed has no threshold and no grade |
-| Impact | Magenta, on every time chart, and used for nothing else: the samples of a slowdown or stall on the generation chart, and the readings unusual beside it on their own charts. People react to colour, so a reading that is unusual while the model keeps its speed is not painted |
-| Cache reuse | Green from 50%, yellow from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
-| Queue waiting series | Yellow only while requests wait in view; muted at zero |
+| Impact | Yellow, on every time chart, and used for nothing else: the samples of a slowdown or stall on the generation chart, and the readings unusual beside it on their own charts. People react to colour, so a reading that is unusual while the model keeps its speed is not painted |
+| Cache reuse | Green from 50%, orange from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
+| Queue waiting series | Orange only while requests wait in view; muted at zero |
 | Supporting text, unknown data, historical advice | Muted |
 
 Never require color alone to interpret severity, freshness or selection. Use
@@ -281,20 +281,20 @@ colors in time-series history instead of recoloring old samples on refresh.
   goes widens its usual range. None of this is journaled: the Journal is
   for slowdowns.
 - Draw a slowdown with the same colour, on the samples it concerns, and
-  nowhere else. Its samples are magenta on the generation chart, and so are
+  nowhere else. Its samples are yellow on the generation chart, and so are
   the samples of each signal that was unusual with it on that signal's
   chart: the two line up by eye. No chart is tinted behind its marks, and a
   chart whose signal was usual is untouched. While a slowdown lasts, the
-  usual-speed line turns magenta (the gap under it is the drop) and the
+  usual-speed line turns yellow (the gap under it is the drop) and the
   chart names the reason
   under its bars (`▼ paging 96.0 MiB/s (usual 2.0 MiB/s)`, or
-  `▼ nothing else unusual`). The panel that shows the reason takes a magenta
+  `▼ nothing else unusual`). The panel that shows the reason takes a yellow
   border and says what it did at the right of its bottom edge:
   `▲ slowed GEN ↓50%` (`▲ stalled GEN`), shortened to `▼ GEN` on a narrow
   panel. A bottom summary that would run into the tag gives way to it.
   The assessment says how long a slowdown has lasted from 5 s.
 - Anomalies live where their signal is already shown; they get no view of
-  their own. A reading with no chart turns magenta in place with its usual
+  their own. A reading with no chart turns yellow in place with its usual
   value: the header's `CPU 380% (usual 95%)` and its `THERMAL` note, the
   queue's active count and the samples of its history. An expanded
   generation chart and Diagnostics say what a slowdown is judged against

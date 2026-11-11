@@ -38,11 +38,11 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 
 | Panel | Contents |
 | --- | --- |
-| runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, GPU memory meter (yellow from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
+| runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, GPU memory meter (orange from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
 | generation / prefill | Separate tok/s bar histories with independent axes; no outer throughput box |
 | prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling; generated tokens under the sizes when the panel keeps four bar rows |
-| memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), yellow from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache); a trace of what was left, in each sample's pressure colour |
-| compression | macOS compress + decompress traffic bars (B/s, axis at least `compression_warn_rate`), stored/compressor bytes and ratio, compressing/decompressing rates and the compressor's share of RAM; yellow from `compression_warn_rate`, never red |
+| memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), orange from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache); a trace of what was left, in each sample's pressure colour |
+| compression | macOS compress + decompress traffic bars (B/s, axis at least `compression_warn_rate`), stored/compressor bytes and ratio, compressing/decompressing rates and the compressor's share of RAM; orange from `compression_warn_rate`, never red |
 | GPU | Utilization area and load state; hardware belongs in the runtime card |
 | paging / I/O | Paging-rate bars (axis at least `swap_warn_rate`), page-in/page-out rates and a horizontal swap used/total capacity bar, `swap off` without swap |
 | cache | Interval hit % bars with reuse since start and prefix hit kept in fixed text positions |
@@ -106,7 +106,7 @@ empty, zero, constant, very small and very large observations without division
 by zero, clipping a valid visible peak or inventing observations.
 
 Paging and compression floor their axis at the warning rate and draw it as a
-dotted yellow reference line with its label, so traffic below the warning rate
+dotted orange reference line with its label, so traffic below the warning rate
 stays visibly small and the threshold is always on screen.
 
 Rescaling changes screen coordinates, never recorded values, sample order,
@@ -116,36 +116,36 @@ vertical range; zooming does not change the sampling interval.
 
 ## Color contract
 
-All charts use the same semantic palette. **Green, yellow and red encode
+All charts use the same semantic palette. **Green, orange and red encode
 defined value bands or reported memory-pressure states; a series' identity
 color must never replace its measured severity.** Match the current reading, trace and related gauge to the same rule.
 
 | Band | Meaning |
 | --- | --- |
 | Green | Within the metric's normal/favorable band |
-| Yellow | Elevated load or a measured condition to inspect |
+| Orange | Elevated load or a measured condition to inspect |
 | Red | Highest defined load band or a measured critical condition |
 | Muted | Missing/unavailable data; never a healthy zero |
 
 The current configured defaults are:
 
-| Metric | Green | Yellow | Red |
+| Metric | Green | Orange | Red |
 | --- | --- | --- | --- |
 | PRESSURE label and memory ribbon (or trace) | normal pressure | warning pressure | critical pressure |
 | GPU utilization | below 75% | 75% to below 90% (`busy`) | 90% or more (`saturated`) |
 | Paging rate (swap, plus file paging while memory is tight) | below 1 MiB/s | 1 MiB/s to below 16 MiB/s | 16 MiB/s or more, or a critical paging finding (swap thrashing, heavy paging, page-in recovery) |
-| Compression traffic | below 64 MiB/s, or below 32 MiB/s once active | 64 MiB/s or more; stays yellow down to 32 MiB/s | none: no critical threshold is defined |
+| Compression traffic | below 64 MiB/s, or below 32 MiB/s once active | 64 MiB/s or more; stays orange down to 32 MiB/s | none: no critical threshold is defined |
 | Cache reuse (interval and prompt CACHED share) | 50% or more | 20% to below 50% | below 20% |
 | GPU wired-limit marker | — | wired memory over the limit, with `wired over GPU limit` in the legend | — |
 
 Generation and prefill speeds have no threshold and no grade: their samples
-are green. Magenta marks impact on any time chart and is used for nothing
+are green. Yellow marks impact on any time chart and is used for nothing
 else: on the generation chart, the samples of a slowdown or stall; on another
 chart, the samples whose reading was unusual beside it. A reading that is
 unusual while the model keeps its speed keeps its ordinary colour. The generation chart's
 dashed reference line is each sample's usual speed for the work it was doing
 (requests writing and their context), drawn column by column and cut through
-bars that pass it: grey ordinarily, magenta over slow samples. Prompt CACHED shares below 4,096 tokens stay
+bars that pass it: grey ordinarily, yellow over slow samples. Prompt CACHED shares below 4,096 tokens stay
 neutral cyan.
 
 Chart colors agree with the assessment where both grade the same signal:
@@ -179,7 +179,7 @@ pressure is authoritative. Linux derives pressure from unavailable memory
 of 1%/5% escalating to watch/critical. Occupancy is never a pressure threshold.
 
 Use resolved configuration thresholds, not duplicated constants in renderers.
-GPU bands mean utilization/load: `busy` is yellow and `saturated` red.
+GPU bands mean utilization/load: `busy` is orange and `saturated` red.
 Utilization alone does not establish a bottleneck, so it never sounds an alarm
 or becomes a finding without a measured slowdown. GPU Journal events use load terms
 such as saturated, eased and idle; they must not call utilization critical or
@@ -198,7 +198,7 @@ itself a fault. Use labeled identity/measurement colors for those series:
 chart titles use their identity color (cyan; GPU blue). Throughput and cache
 use the graded bands above. Queue identifies
 active (cyan) and waiting series with stroke swatches, and marks exact equality
-with white `═`. The waiting series is yellow only while the visible window
+with white `═`. The waiting series is orange only while the visible window
 contains waiting requests; an empty wait queue stays muted. Overlapping
 connectors use muted continuous strokes and proper junctions.
 Unequal values rounded to one row use muted `≈`. Prompt bars distinguish reported cached tokens

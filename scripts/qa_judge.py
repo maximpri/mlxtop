@@ -35,9 +35,9 @@ what limits a local LLM's speed (memory, paging, disk, heat, the GPU, the
 queue, the runtime) and say what to change. Judge the screen against these
 rules, which its designers hold to:
 
-1. Colour means impact. The anomaly colour (magenta) appears only while the
+1. Colour means impact. The anomaly colour (yellow) appears only while the
    model is slowed or stalled, on the samples of that slowdown and on the
-   signal that explains it. Magenta on a healthy screen is a blocker.
+   signal that explains it. Yellow on a healthy screen is a blocker.
 2. Impact over readouts. A panel says what a reading means for the model
    (headroom left, time saved, what the disk is doing), not a raw rate that
    repeats its title. A rate shown twice in one panel is a major issue.
@@ -57,7 +57,7 @@ How to read a screen:
   under it by design: judge the overlay's own content, not what it hides.
 - Before the first sample, a panel may say it has none yet ("No samples
   yet"): that is an empty state, not a status sentence.
-- A "[magenta cells: …]" note under the screen lists what is drawn in the
+- A "[yellow cells: …]" note under the screen lists what is drawn in the
   anomaly colour; "[state: …]" says whether the model is slowed.
 
 Answer with JSON only, no prose around it:

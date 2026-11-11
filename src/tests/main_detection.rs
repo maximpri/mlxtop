@@ -282,6 +282,44 @@ fn speculative_decoding_jitter_within_a_request_is_not_a_slowdown() {
 }
 
 #[test]
+fn a_slowdown_keeps_its_reason_after_the_reason_passes() {
+    // The server, 11 Nov 17:25: a new prompt's prefill and disk writes
+    // slowed an answer, then ended while the answer was still slow. The
+    // headline said nothing explained it; the slowdown is still theirs.
+    let thresholds = defaults();
+    let mut engine = CorrelationEngine::default();
+    let mut last = CorrelationInsight::default();
+    for second in 0..30u64 {
+        let slow = second >= 20;
+        let tps = if slow {
+            15.0
+        } else {
+            CAPTURED_SPEEDS[second as usize % 17]
+        };
+        let mut sample = decoding(second, tps, 1_000 + second * 40, 0.05, 99);
+        sample.rate_ready = true;
+        sample.swap_in = if (20..24).contains(&second) {
+            thresholds.swap_warn_rate * 4
+        } else {
+            0
+        };
+        last = engine.observe(&sample, thresholds);
+        if second == 23 {
+            assert_eq!(last.cause, CorrelationCause::Paging, "{}", last.summary);
+        }
+    }
+    assert!(last.is_material_drop(), "{}", last.summary);
+    assert_eq!(last.cause, CorrelationCause::Paging, "{}", last.summary);
+    assert!(last.lead.ends_with(" earlier"), "{}", last.lead);
+    assert!(
+        !last.summary.contains("nothing else unusual"),
+        "{}",
+        last.summary
+    );
+    assert!(last.unusual.is_empty(), "nothing is unusual in this sample");
+}
+
+#[test]
 fn a_stall_does_not_blame_disk_writes_that_ran_as_fast_as_ever() {
     // The server, 11 Nov 17:02:44–17:03:06: two requests wrote ~38 MiB/s to
     // disk at 60–85 tok/s; then for seven seconds no token came, the GPU
