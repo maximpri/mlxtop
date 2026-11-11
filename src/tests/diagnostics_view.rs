@@ -85,3 +85,13 @@ fn summary_shows_evidence_without_turning_gpu_load_into_a_bottleneck() {
     app.collector.current.pressure = "RED".into();
     assert!(render_app(&app, 80, 24).contains("Local host: Memory bottleneck"));
 }
+
+#[test]
+fn advice_that_does_not_fit_ends_at_a_word() {
+    assert_eq!(fit_words("close other apps", 40), "close other apps");
+    assert_eq!(
+        fit_words("The model no longer fits in RAM: close other apps", 34),
+        "The model no longer fits in RAM…"
+    );
+    assert_eq!(fit_words("unbreakable", 4), "…");
+}

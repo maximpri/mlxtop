@@ -35,13 +35,13 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no usage tracking. It never
   sends prompts or touches your models or runtime settings.
 
-**What's new in 3.3.0:** mlxtop finds slowdowns by anomaly detection,
-judging speed against earlier work of the same size, and names what else was
-unusual at the time: paging, memory, heat, disk or the queue. The generation
-chart draws its usual speed, stalls are seen as they happen, and oMLX,
-Strata, llama-server and Jan are found on their current default ports. 3.2
-added Strata and TensorFold and dashboard panels that resize with your
-terminal.
+**What's new in 3.3.0:** mlxtop finds slow answers and slow prompt reads
+by judging speed against earlier work of the same size, names what else was
+happening (paging, memory, heat, disk, the queue, draft acceptance) and says
+what to change. Memory shows headroom against the GPU limit, the KV cache
+its hit rate and the prefill time it saved, and `u` sums up a session: what
+each cause cost and where requests' time went. `--record` and `mlxtop
+replay` check the rules against real sessions.
 [Release notes →](CHANGELOG.md)
 
 ## Install

@@ -66,10 +66,13 @@ fn slowed(mut app: App, cause: CorrelationCause, lead: &str) -> App {
         ..CorrelationInsight::default()
     };
     app.collector.current.correlation = insight;
-    for history in [
-        &mut app.collector.generation_history,
-        &mut app.collector.swap_history,
-    ] {
+    // The slowdown's own samples, and the signal it is given as a reason
+    // for; a stall with an idle machine marks only generation.
+    let mut marked = vec![&mut app.collector.generation_history];
+    if cause == CorrelationCause::Paging {
+        marked.push(&mut app.collector.swap_history);
+    }
+    for history in marked {
         for point in history.iter_mut().rev().take(3) {
             if point.value.is_some() {
                 point.tone = Tone::Unusual;

@@ -704,7 +704,7 @@ fn a_slowdown_is_three_slow_samples_and_ends_after_three_usual_ones() {
             (
                 "SLOWDOWN".to_owned(),
                 format!(
-                    "GEN ↓50.0% (50.0→25.0 tok/s) · {reason} → The model no longer fits beside everything else: close other apps or models, or load a smaller quantisation."
+                    "GEN ↓50.0% (50.0→25.0 tok/s) · {reason} → The model no longer fits in RAM: close other apps or models, or use a smaller quant."
                 )
             ),
             (

@@ -176,10 +176,7 @@ fn compression_and_queue_findings_name_their_evidence() {
 #[test]
 fn slowdown_findings_recommend_a_check_for_each_cause() {
     for (cause, next) in [
-        (
-            CorrelationCause::Paging,
-            "The model no longer fits beside everything else",
-        ),
+        (CorrelationCause::Paging, "The model no longer fits in RAM"),
         (
             CorrelationCause::Compression,
             "macOS is compressing memory to make room",

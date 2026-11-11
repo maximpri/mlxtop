@@ -55,6 +55,8 @@ How to read a screen:
 - The numbers at the left edge of a chart are its axis scale, not readings.
 - An overlay (Diagnostics, the session summary, help) covers the panels
   under it by design: judge the overlay's own content, not what it hides.
+- Before the first sample, a panel may say it has none yet ("No samples
+  yet"): that is an empty state, not a status sentence.
 - A "[magenta cells: …]" note under the screen lists what is drawn in the
   anomaly colour; "[state: …]" says whether the model is slowed.
 

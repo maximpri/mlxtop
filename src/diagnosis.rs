@@ -31,7 +31,7 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
     let limit = crate::memory_composition::gpu_limit(sample);
     match sample.correlation.cause {
         CorrelationCause::Paging => format!(
-            "The model no longer fits beside everything else{headroom}: close other apps or models, or load a smaller quantisation."
+            "The model no longer fits in RAM{headroom}: close other apps or models, or use a smaller quant."
         ),
         CorrelationCause::Compression => {
             "macOS is compressing memory to make room: free memory before paging starts.".into()

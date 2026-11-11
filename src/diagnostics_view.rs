@@ -43,19 +43,42 @@ pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bo
     }
     let mut lines = vec![headline];
     if !finding.next.is_empty() {
+        // Advice that does not fit ends at a word, marked, never mid-word.
+        let room = usize::from(area.width).saturating_sub(3);
+        let next = fit_words(&finding.next, room);
         lines.push(if finding.actionable {
             Line::from(Span::styled(
-                format!(" → {}", finding.next),
+                format!(" → {next}"),
                 Style::default().fg(Color::White),
             ))
         } else {
             Line::from(Span::styled(
-                format!("   {}", finding.next),
+                format!("   {next}"),
                 Style::default().fg(MUTED),
             ))
         });
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// `text` as it fits in `room` cells: whole, or cut at a word with `…`.
+pub(crate) fn fit_words(text: &str, room: usize) -> String {
+    if Line::from(text).width() <= room {
+        return text.to_owned();
+    }
+    let mut fitted = String::new();
+    for word in text.split_whitespace() {
+        let next = if fitted.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{fitted} {word}")
+        };
+        if Line::from(next.as_str()).width() + 1 > room {
+            break;
+        }
+        fitted = next;
+    }
+    format!("{}…", fitted.trim_end_matches([',', ':', ';', '·', ' ']))
 }
 
 /// Wrap once so rendering and scroll bounds use identical terminal-cell widths.
