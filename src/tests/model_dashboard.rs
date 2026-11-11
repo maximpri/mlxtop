@@ -200,7 +200,7 @@ fn strip_keeps_runtime_counters_only_when_they_differ_from_the_latest_request() 
 }
 
 #[test]
-fn the_header_colours_a_reading_that_is_unusual_beside_a_slowdown() {
+fn the_header_colours_a_reading_that_is_unusual() {
     let line_text = |line: &Line| -> String {
         line.spans
             .iter()
@@ -246,6 +246,15 @@ fn the_header_colours_a_reading_that_is_unusual_beside_a_slowdown() {
     );
     assert_eq!(
         colour_of(&footer, "THERMAL limited 60%"),
+        Some(Tone::Unusual.color())
+    );
+
+    // The same holds with no slowdown: a reading that is unusual on its
+    // own is coloured where it is shown.
+    sample.correlation.direction = ThroughputDirection::Flat;
+    let footer = host_footer(&sample, 160);
+    assert_eq!(
+        colour_of(&footer, "CPU 380% (usual 95%)"),
         Some(Tone::Unusual.color())
     );
 }

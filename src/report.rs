@@ -183,6 +183,12 @@ pub(crate) fn write_static(
         if !sample.correlation.details.is_empty() {
             writeln!(out, "UNUSUAL       {}", sample.correlation.details)?;
         }
+    } else if !sample.correlation.notes.is_empty() {
+        writeln!(
+            out,
+            "UNUSUAL       {}",
+            sample.correlation.notes.join(" · ")
+        )?;
     }
     if let Some((usual, slow_below)) = sample.correlation.usual_speed {
         writeln!(
@@ -224,16 +230,14 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
             finding.next
         ));
     }
-    // What a slowdown is judged against, and everything unusual beside one.
+    // What a slowdown is judged against, and everything unusual right now.
     let insight = &sample.correlation;
     if let Some((usual, slow_below)) = insight.usual_speed {
         lines.push(format!(
             "Usual generation speed {usual:.1} tok/s · slow below {slow_below:.1}"
         ));
     }
-    if insight.is_material_drop() {
-        lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
-    }
+    lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
     lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));
     lines

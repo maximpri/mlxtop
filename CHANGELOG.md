@@ -1,5 +1,25 @@
 # Changelog
 
+## 3.3.0-rc.7 — 2026-11-10
+
+### Dashboards
+
+- **Anomaly detection is visible when nothing is wrong.** rc.5 and rc.6 drew
+  nothing new until a slowdown began: on one healthy server, under 2% of
+  its generating samples. The generation chart now always draws its usual speed as a
+  grey dashed line, with the value on the axis and `┄ usual 50.0` on its
+  bottom edge; the line turns magenta during a slowdown.
+- **Unusual samples are marked as they happen, slowdown or not.** A single
+  unusually slow sample is magenta on the generation chart at once. An
+  unusual reading of the host is magenta on its own chart or in the header:
+  paging, compression, memory, disk, thermal, runtime CPU, an idle GPU. On
+  one server's log this marks about one sample every 80 seconds.
+- Requests, prompts and the queue are not marked on their own; they remain
+  reasons for a slowdown. A host reading that stays unusual for 30 seconds
+  at the usual speed becomes the usual value.
+- Diagnostics and `--once` list what is unusual right now, not only beside a
+  slowdown.
+
 ## 3.3.0-rc.6 — 2026-11-10
 
 ### Diagnosis

@@ -134,18 +134,33 @@ requests running, prompt size, compression, the queue, model or Metal memory,
 the runtime's CPU, or a GPU left idle.
 A signal at its usual level is never the reason, however high that level is.
 
-On the Overview, magenta means unusual and nothing else:
+The generation chart always shows what it judges against: a dashed line at
+the usual speed, with its value on the axis and `┄ usual 50.0` on the bottom
+edge. The line is grey while all is well.
 
-- the slow samples on the generation chart, with a dashed line at the usual
-  speed and the reason under the bars;
-- the samples of each unusual signal on its own chart, in the same columns;
-- the border of the panel that shows the reason, tagged `▲ slowed GEN ↓50%`;
+Magenta means unusual and nothing else. It appears as it happens, slowdown or
+not:
+
+- a sample on the generation chart that is unusually slow, even a single one;
+- a sample on another chart whose reading is unusual for the host: paging,
+  compression, memory, disk, or a GPU left idle;
 - readings without a chart, in place: the header's `CPU 380% (usual 95%)` and
-  `THERMAL` note, and the queue's active count and history.
+  `THERMAL` note.
+
+A reading that stays unusual for 30 seconds while generation keeps its usual
+speed becomes the usual value. Requests, prompts and the queue are not marked
+on their own; they are what you asked the runtime to do.
+
+During a slowdown the same colour ties the panels together:
+
+- the usual-speed line turns magenta and the reason is named under the bars;
+- the border of the panel that shows the reason is tagged `▲ slowed GEN ↓50%`;
+- the queue's active count and history are marked when the reason is how many
+  requests ran or waited.
 
 An expanded generation chart (`Enter`) and Diagnostics (`d`) show what a
 slowdown is judged against, for example `usual 50.0 · slow below 40.0`;
-Diagnostics also lists everything unusual beside the current slowdown.
+Diagnostics also lists everything unusual right now.
 
 The Journal writes one row when a slowdown begins and one when it ends:
 

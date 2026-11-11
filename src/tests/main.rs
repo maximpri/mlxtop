@@ -6243,10 +6243,6 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
         starved.unusual,
         vec![CorrelationCause::Cpu, CorrelationCause::GpuIdle]
     );
-    // Outside a slowdown nothing is unusual, whatever the lists hold.
-    let mut over = starved.clone();
-    over.direction = ThroughputDirection::Flat;
-    assert_eq!(over.note(CorrelationCause::Cpu), None);
     assert_eq!(starved.marked_samples(), 3, "known at its third sample");
     let mut later = starved.clone();
     later.episode.as_mut().unwrap().samples = 4;
@@ -6516,11 +6512,188 @@ fn a_slowdown_colours_its_samples_on_the_charts_of_what_was_unusual() {
     assert!(tones(&collector.disk_history)[5]);
     assert!(!tones(&collector.generation_history)[4]);
 
-    // Without a slowdown nothing is touched.
+    // Outside a slowdown an unusually slow sample and an unusual reading
+    // are each coloured on their own chart, that one sample only.
+    reset(&mut collector);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        slow: true,
+        unusual: vec![CorrelationCause::GpuIdle],
+        notes: vec!["GPU 40% (usual 99%)".into()],
+        usual_speed: Some((50.0, 40.0)),
+        ..CorrelationInsight::default()
+    };
+    collector.mark_unusual(&sample);
+    let latest = [false, false, false, false, false, true];
+    assert_eq!(tones(&collector.generation_history), latest);
+    assert_eq!(tones(&collector.gpu_history), latest);
+    assert!(tones(&collector.swap_history).iter().all(|u| !u));
+
+    // A sample with nothing unusual in it touches nothing.
     reset(&mut collector);
     sample.correlation = CorrelationInsight::default();
     collector.mark_unusual(&sample);
     assert!(tones(&collector.generation_history).iter().all(|u| !u));
+}
+
+#[test]
+fn outside_a_slowdown_a_sample_still_says_what_is_unusual_in_it() {
+    let usual = |second: u64| {
+        let mut sample = paging(second, 50.0, 0);
+        sample.llm_waiting_requests = Some(0);
+        sample.llm_count = 1;
+        sample.llm_cpu = 95.0;
+        sample
+    };
+    let mut engine = CorrelationEngine::default();
+    let mut observe = |sample: Sample| engine.observe(&sample, defaults());
+    for second in 0..10 {
+        observe(usual(second));
+    }
+
+    // One slow sample is not a slowdown, and is unusually slow all the same.
+    let mut slow = usual(10);
+    slow.llm_generation_tps = Some(25.0);
+    let lone = observe(slow);
+    assert!(lone.slow && !lone.is_material_drop());
+    assert_eq!(lone.usual_speed, Some((50.0, 40.0)));
+    assert!(lone.unusual.is_empty() && lone.summary.is_empty());
+    assert_eq!(lone.marked_samples(), 1);
+
+    // A reading of the host far from its usual value is unusual while
+    // generation runs at its usual speed, and says what is usual.
+    let mut busy = usual(11);
+    busy.llm_cpu = 380.0;
+    busy.gpu_util = Some(40);
+    let found = observe(busy);
+    assert!(!found.slow && !found.is_material_drop());
+    assert_eq!(
+        found.unusual,
+        vec![CorrelationCause::Cpu, CorrelationCause::GpuIdle]
+    );
+    assert_eq!(
+        found.note(CorrelationCause::Cpu),
+        Some("runtime CPU 380% (usual 95%)")
+    );
+    assert_eq!(
+        found.note(CorrelationCause::GpuIdle),
+        Some("GPU 40% (usual 99%)")
+    );
+    // Nothing for the Journal: that is for slowdowns.
+    assert!(found.summary.is_empty() && found.event_key.is_none());
+
+    // The workload is not watched: another request and a queue are what
+    // was asked for, and only ever the reason for a slowdown.
+    let mut asked = beside(usual(12), 9_000, true);
+    asked.llm_waiting_requests = Some(2);
+    assert!(observe(asked).unusual.is_empty());
+
+    // A burst that came and went leaves the usual value where it was. One
+    // that holds for thirty seconds at the usual speed is the usual value
+    // from then on.
+    for second in 13..=44 {
+        let mut sample = usual(second);
+        sample.llm_cpu = 380.0;
+        let insight = observe(sample);
+        assert_eq!(
+            insight.unusual,
+            if second <= 43 {
+                vec![CorrelationCause::Cpu]
+            } else {
+                Vec::new()
+            },
+            "second {second}"
+        );
+    }
+
+    // With nothing generating there is no speed to judge, and the usual
+    // speed is still known.
+    let mut idle = usual(45);
+    idle.llm_generation_tps = None;
+    idle.llm_generation_tps_live = false;
+    idle.llm_active_requests = Some(0);
+    idle.llm_requests.clear();
+    let idle = observe(idle);
+    assert_eq!(idle.direction, ThroughputDirection::Unknown);
+    assert_eq!(idle.usual_speed, Some((50.0, 40.0)));
+    assert!(!idle.slow && idle.unusual.is_empty());
+}
+
+#[test]
+fn the_generation_chart_always_draws_its_usual_speed_quietly() {
+    let mut app = test_app(0);
+    let mut sample = paging(30, 50.0, 0);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        usual_speed: Some((50.0, 40.0)),
+        ..CorrelationInsight::default()
+    };
+    app.collector.current = sample;
+    // Sixteen samples at the usual speed, one of them unusually slow.
+    let mut generation = history_with_drop(500, 500, Tone::Green);
+    generation[12] = ChartPoint::new(Some(200), Tone::Unusual);
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let rows = buffer_rows(&buffer);
+    let text = rows.join("\n");
+    // The dashed line sits at the usual speed, with its value on the axis,
+    // and is quiet: nothing is wrong.
+    let usual = rows
+        .iter()
+        .position(|row| row.contains('┄'))
+        .expect("a line at the usual speed") as u16;
+    assert!(
+        rows[usize::from(usual)]
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with("50 "),
+        "{text}"
+    );
+    let dashes: Vec<u16> = (1..59)
+        .filter(|x| buffer[(*x, usual)].symbol() == "┄")
+        .collect();
+    assert!(dashes.contains(&55), "{dashes:?}\n{text}");
+    assert!(dashes
+        .iter()
+        .all(|x| buffer[(*x, usual)].fg == Tone::Muted.color()));
+    // The border says what the line is. No reason is given: nothing slowed.
+    assert!(rows[9].contains("tok/s · ┄ usual 50.0"), "{text}");
+    assert!(!text.contains('▼'), "{text}");
+    // The slow sample alone is in the anomaly colour.
+    assert_eq!(buffer[(55, 8)].fg, UNUSUAL);
+    assert!((43..59)
+        .filter(|x| *x != 55)
+        .all(|x| buffer[(x, 8)].fg == GREEN));
+
+    // A narrow panel keeps the unit and lets the usual value go.
+    let narrow = buffer_rows(&chart_buffer(
+        &app,
+        22,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ));
+    assert!(narrow[9].contains("tok/s"), "{}", narrow[9]);
+    assert!(!narrow[9].contains("usual"), "{}", narrow[9]);
+
+    // Before a usual speed is known there is nothing to say about it.
+    app.collector.current.correlation = CorrelationInsight::default();
+    let unknown = buffer_rows(&chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ));
+    assert!(!unknown.join("\n").contains("usual"));
 }
 
 #[test]
@@ -6640,11 +6813,32 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
     .remove(0);
     assert!(!compact.contains("usual"), "{compact}");
 
-    // Once usual again, the figures stay and the list of what was unusual goes.
-    sample.correlation.direction = ThroughputDirection::Flat;
+    // Outside a slowdown the figures stay, and a reading that is unusual
+    // on its own is still listed, here and in the one-shot report.
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        unusual: vec![CorrelationCause::GpuIdle],
+        notes: vec!["GPU 40% (usual 99%)".into()],
+        usual_speed: Some((50.0, 40.0)),
+        ..CorrelationInsight::default()
+    };
     let lines = crate::report::diagnostic_lines(&sample);
     assert!(lines
         .iter()
         .any(|line| line.starts_with("Usual generation speed")));
+    assert!(lines.contains(&"Unusual: GPU 40% (usual 99%)".to_owned()));
+    let mut report = Vec::new();
+    crate::report::write_static(&mut report, &sample, 2, defaults(), Platform::MacOs).unwrap();
+    let report = String::from_utf8(report).unwrap();
+    assert!(
+        report.contains("UNUSUAL       GPU 40% (usual 99%)"),
+        "{report}"
+    );
+    assert!(!report.contains("SLOWDOWN"), "{report}");
+
+    // With nothing unusual, nothing is listed.
+    sample.correlation.unusual.clear();
+    sample.correlation.notes.clear();
+    let lines = crate::report::diagnostic_lines(&sample);
     assert!(!lines.iter().any(|line| line.starts_with("Unusual:")));
 }

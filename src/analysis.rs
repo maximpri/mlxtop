@@ -167,6 +167,16 @@ fn usual_rate(usual: f64) -> String {
 }
 
 impl Signal {
+    /// A reading of the host or the runtime, which is watched all the time.
+    /// The rest is the workload (requests and their prompts): that changes
+    /// because someone asked, and is only ever the reason for a slowdown.
+    fn host(self) -> bool {
+        !matches!(
+            self,
+            Self::Prefill | Self::Requests | Self::Prompt | Self::Queue
+        )
+    }
+
     pub(crate) fn cause(self) -> CorrelationCause {
         match self {
             Self::Thermal => CorrelationCause::Thermal,
@@ -643,6 +653,9 @@ pub(crate) struct CorrelationEngine {
     /// Generation speed, and every signal in `SIGNALS`, while speed was usual.
     pub(crate) speed: Usual,
     host: [Usual; SIGNALS.len()],
+    /// Each signal's unusual values in a row, with when the row began: held
+    /// back from its usual value until it passes or has held long enough.
+    held: [(Option<SystemTime>, Vec<f64>); SIGNALS.len()],
     /// Slow samples not yet enough in a row to be a slowdown.
     pending: Vec<CorrelationObservation>,
     episode: Option<Episode>,
@@ -696,11 +709,14 @@ impl CorrelationEngine {
         if stalled.is_none() && speed.is_none() {
             // Nothing is generating: there is no speed to judge. A slowdown
             // waits for its next sample.
-            return CorrelationInsight::default();
+            return CorrelationInsight {
+                usual_speed: slow_range(&self.speed),
+                ..CorrelationInsight::default()
+            };
         }
         // A slowdown whose request went idle long ago is over.
         if seconds_between(self.seen, current.at) >= SETTLE_SECONDS {
-            self.keep_pending();
+            self.keep_pending(thresholds);
             self.episode = None;
         }
         self.seen = current.at;
@@ -717,7 +733,9 @@ impl CorrelationEngine {
             .speed
             .below(speed, SLOW_SHARE, SLOW_MIN_TPS)
             .filter(|_| !quiet);
-        let steady = |usual: Option<(f64, f64)>| CorrelationInsight {
+        // Outside a slowdown a sample still says what is unusual in it: its
+        // own speed, and any reading of the host.
+        let steady = |usual: Option<(f64, f64)>, watched: Vec<Finding>| CorrelationInsight {
             direction: if usual.is_some() {
                 ThroughputDirection::Flat
             } else {
@@ -727,8 +745,12 @@ impl CorrelationEngine {
                 .filter(|(usual, _)| *usual > 0.0)
                 .map(|(usual, _)| (speed - usual) / usual * 100.0),
             usual_speed: usual,
+            slow: low.is_some(),
+            unusual: watched.iter().map(|found| found.signal.cause()).collect(),
+            notes: watched.into_iter().map(|found| found.text).collect(),
             ..CorrelationInsight::default()
         };
+        let watched = self.watched(&current, thresholds);
 
         let mut open = match (self.episode.take(), low) {
             (Some(mut open), _) => {
@@ -745,7 +767,7 @@ impl CorrelationEngine {
             (None, Some(reference)) => {
                 self.pending.push(current.clone());
                 if self.pending.len() < SLOW_SAMPLES {
-                    return steady(usual);
+                    return steady(usual, watched);
                 }
                 let speeds: Vec<f64> = self
                     .pending
@@ -770,10 +792,10 @@ impl CorrelationEngine {
             (None, None) => {
                 // An ordinary sample; a slow one or two before it were too.
                 if !quiet {
-                    self.keep_pending();
-                    self.learn(&current);
+                    self.keep_pending(thresholds);
+                    self.learn(&current, thresholds);
                 }
-                return steady(usual);
+                return steady(usual, watched);
             }
         };
         while open.lows.len() > SLOW_SAMPLES {
@@ -793,11 +815,11 @@ impl CorrelationEngine {
         // Back at its usual speed for three samples: it recovered.
         if open.back.len() >= SLOW_SAMPLES {
             for observation in &open.back {
-                self.learn(observation);
+                self.learn(observation, thresholds);
             }
             return CorrelationInsight {
                 ended: ended(false, &open),
-                ..steady(usual)
+                ..steady(usual, watched)
             };
         }
 
@@ -818,12 +840,13 @@ impl CorrelationEngine {
             for usual in &mut self.host {
                 usual.relearn(std::iter::empty());
             }
+            self.held = Default::default();
             for observation in &open.quiet {
-                self.learn(observation);
+                self.learn(observation, thresholds);
             }
             return CorrelationInsight {
                 ended: ended(true, &open),
-                ..steady(slow_range(&self.speed))
+                ..steady(slow_range(&self.speed), Vec::new())
             };
         }
 
@@ -932,22 +955,51 @@ impl CorrelationEngine {
         findings
     }
 
-    /// A sample at the usual speed: what every signal is doing is usual too.
-    fn learn(&mut self, observation: &CorrelationObservation) {
+    /// The host readings that are unusual in this sample, slowdown or not.
+    fn watched(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
+        let mut findings = self.findings(current, thresholds);
+        findings.retain(|found| found.signal.host());
+        findings
+    }
+
+    /// A sample at the usual speed teaches what is usual. A signal that is
+    /// unusual in it is held back: if it passes, it was part of the usual
+    /// range after all; if it holds for `SETTLE_SECONDS` with speed still
+    /// usual, it is how the signal now runs.
+    fn learn(&mut self, observation: &CorrelationObservation, thresholds: Thresholds) {
         if let Some(speed) = observation.generation_tps {
             self.speed.learn(speed);
         }
-        for (signal, usual) in SIGNALS.iter().zip(&mut self.host) {
-            if let Some(value) = signal.value(observation) {
+        for ((signal, usual), (began, held)) in
+            SIGNALS.iter().zip(&mut self.host).zip(&mut self.held)
+        {
+            let Some(value) = signal.value(observation) else {
+                continue;
+            };
+            let limits = signal.limits(thresholds);
+            let unusual =
+                value >= limits.from && usual.above(value, limits.share, limits.least).is_some();
+            if !unusual {
+                for value in held.drain(..) {
+                    usual.learn(value);
+                }
                 usual.learn(value);
+                continue;
+            }
+            if held.is_empty() {
+                *began = observation.at;
+            }
+            held.push(value);
+            if seconds_between(*began, observation.at) >= SETTLE_SECONDS {
+                usual.relearn(held.drain(..));
             }
         }
     }
 
     /// Slow samples that did not become a slowdown were ordinary after all.
-    fn keep_pending(&mut self) {
+    fn keep_pending(&mut self, thresholds: Thresholds) {
         for observation in std::mem::take(&mut self.pending) {
-            self.learn(&observation);
+            self.learn(&observation, thresholds);
         }
     }
 

@@ -315,10 +315,12 @@ pub(crate) struct CorrelationInsight {
     pub(crate) ended: Option<DropEnd>,
     /// This cause was already journaled for this slowdown.
     pub(crate) repeat: bool,
-    /// This sample's own speed is unusually low (or it is a stall).
+    /// This sample's own speed is unusually low (or it is a stall), whether
+    /// or not it is part of a slowdown.
     pub(crate) slow: bool,
-    /// Every signal that is unusual in this sample, the reason first, and
-    /// each in words beside its usual value.
+    /// Every signal that is unusual in this sample, and each in words beside
+    /// its usual value. In a slowdown the reason comes first and the
+    /// workload counts; outside one only the host's readings are watched.
     pub(crate) unusual: Vec<CorrelationCause>,
     pub(crate) notes: Vec<String>,
     /// The usual generation speed, and the speed below which it is slow.
@@ -370,12 +372,10 @@ impl CorrelationInsight {
         self.direction == ThroughputDirection::Down
     }
 
-    /// What `cause`'s signal is doing, when it is unusual beside a slowdown.
+    /// What `cause`'s signal is doing, when it is unusual in this sample.
     pub(crate) fn note(&self, cause: CorrelationCause) -> Option<&str> {
         let index = self.unusual.iter().position(|found| *found == cause)?;
-        self.is_material_drop()
-            .then(|| self.notes.get(index).map(String::as_str))
-            .flatten()
+        self.notes.get(index).map(String::as_str)
     }
 
     /// Samples this finding colours, newest last. A slowdown is known at

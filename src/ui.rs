@@ -879,15 +879,21 @@ impl App {
             ChartMetric::Compression => Some(self.thresholds.compression_warn_rate),
             _ => None,
         };
-        // While generation is slow its chart draws its usual speed, in the
-        // anomaly colour: the gap under that line is the drop.
+        // The generation chart's dashed line is its usual speed, once that
+        // is known. It is quiet until generation is slow, and then takes the
+        // anomaly colour: the gap under it is the drop.
         let insight = &sample.correlation;
+        let slowed = metric == ChartMetric::Generation && insight.is_material_drop();
         let normal = insight
             .episode
-            .filter(|_| metric == ChartMetric::Generation && insight.is_material_drop())
-            .map(|episode| (episode.reference * 10.0).round() as u64);
+            .filter(|_| slowed)
+            .map(|episode| episode.reference)
+            .or(insight.usual_speed.map(|(usual, _)| usual))
+            .filter(|usual| metric == ChartMetric::Generation && *usual > 0.0)
+            .map(|usual| (usual * 10.0).round() as u64);
         let (warning, guide_tone) = match normal {
-            Some(normal) => (Some(normal), Tone::Unusual),
+            Some(normal) if slowed => (Some(normal), Tone::Unusual),
+            Some(normal) => (Some(normal), Tone::Muted),
             None => (warning, Tone::Yellow),
         };
         let scale = chart_scale(history, metric, visible_count);
@@ -943,7 +949,7 @@ impl App {
         {
             details.push(format!("usual {usual:.1} · slow below {slow_below:.1}"));
         }
-        if let Some(episode) = insight.episode.filter(|_| normal.is_some()) {
+        if let Some(episode) = insight.episode.filter(|_| slowed) {
             details.push(format!(
                 "slow {:.0}s · low {:.1}",
                 episode.seconds, episode.low
@@ -989,11 +995,22 @@ impl App {
             }
             // oMLX and Splash report generation summed over running requests;
             // say so when there are several, since each gets only its share.
-            ChartMetric::Generation => Some(match generating_requests(sample) {
-                n if n > 1 && area.width >= 38 => format!("tok/s · total of {n} requests"),
-                n if n > 1 => format!("tok/s · {n} req"),
-                _ => "tok/s".into(),
-            }),
+            ChartMetric::Generation => {
+                let unit = match generating_requests(sample) {
+                    n if n > 1 && area.width >= 38 => format!("tok/s · total of {n} requests"),
+                    n if n > 1 => format!("tok/s · {n} req"),
+                    _ => "tok/s".into(),
+                };
+                // What the dashed line is: the speed slowdowns are judged
+                // against. It gives way before the unit does.
+                let usual = insight
+                    .usual_speed
+                    .map(|(usual, _)| format!("{unit} · ┄ usual {usual:.1}"))
+                    .filter(|text| {
+                        Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
+                    });
+                Some(usual.unwrap_or(unit))
+            }
             ChartMetric::Memory => None,
             ChartMetric::Gpu => Some(if current == Some(0) {
                 "idle".into()

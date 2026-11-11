@@ -225,8 +225,8 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
 fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     let muted = |text: String| vec![Span::styled(text, Style::default().fg(MUTED))];
     let mut fields: Vec<Vec<Span<'static>>> = vec![muted(hardware_parts(sample).join(" · "))];
-    // A reading that is unusual beside a slowdown takes the anomaly colour
-    // here, where it is shown, with its usual value.
+    // A reading that is unusual takes the anomaly colour here, where it is
+    // shown, with its usual value.
     let insight = &sample.correlation;
     if let Some(thermal) = thermal_note(sample) {
         let color = if insight.note(CorrelationCause::Thermal).is_some() {
