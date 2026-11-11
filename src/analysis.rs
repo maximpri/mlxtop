@@ -1,41 +1,42 @@
 // SPDX-License-Identifier: MIT
-//! Health classification and measured throughput correlation; no terminal rendering.
+//! Health classification and generation slowdowns; no terminal rendering.
+//!
+//! A slowdown is found by anomaly detection (`crate::anomaly`): generation
+//! speed unusually far below its usual value, three samples running. Its
+//! reason is whatever else is unusual at the same time.
+use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
     Sample, TelemetrySource, ThroughputDirection, Tone, MIB,
 };
 use crate::formatting::{
-    bytes, compact_tokens, count, llm_generation_rate_label, llm_prefill_rate_label, percent,
-    pressure_state_label, rate, signed_rate,
+    bytes, compact_tokens, llm_generation_rate_label, llm_prefill_rate_label, percent, rate,
+    signed_rate,
 };
 use std::collections::VecDeque;
 use std::time::SystemTime;
-pub(crate) const CORRELATION_HISTORY_LIMIT: usize = 16;
-pub(crate) const THROUGHPUT_CHANGE_MIN_TPS: f64 = 2.0;
-pub(crate) const THROUGHPUT_CHANGE_RATIO: f64 = 0.10;
+/// A prompt this much longer than usual, and half as long again, is unusual.
 pub(crate) const CONTEXT_GROWTH_TOKENS: u64 = 1024;
-pub(crate) const MODEL_MEMORY_GROWTH: u64 = 256 * MIB;
 /// A generating request that goes this long without a token has stalled:
 /// at 20–90 tok/s a healthy decode produces one every 50 ms or so.
 pub(crate) const STALL_SECONDS: f64 = 1.5;
-/// Speculative decoding makes one-second speeds jump by a third between
-/// polls; slowdowns are judged on the mean of this many samples.
-const SMOOTHING_SAMPLES: usize = 3;
 /// Runtime storage traffic worth naming. A decoding runtime touches its disk
 /// only to load or save prompt cache; weights are already in memory.
 pub(crate) const DISK_ACTIVE_RATE: u64 = 16 * MIB;
-/// A slowdown nothing on the host explains becomes the request's normal
-/// speed after this long: content alone moves a request's speed by a third.
+/// Generation is slow when it is unusually far below its usual speed, and
+/// by at least this share of it and this many tok/s.
+pub(crate) const SLOW_SHARE: f64 = 0.20;
+pub(crate) const SLOW_MIN_TPS: f64 = 2.0;
+/// Slow samples in a row that begin a slowdown, and samples back at the
+/// usual speed that end one: a single jumpy poll does neither.
+pub(crate) const SLOW_SAMPLES: usize = 3;
+/// A slowdown with nothing else unusual becomes the usual speed after this
+/// long, and one whose request has been idle this long is over.
 pub(crate) const SETTLE_SECONDS: f64 = 30.0;
-/// A request this far below earlier requests of its size is slow from its
-/// start, when the host also shows why. Content alone never differs so much.
-const SLOW_START_RATIO: f64 = 0.6;
-/// Samples at normal speed, just before a drop, that a condition is
-/// compared with: one unchanged from then does not explain the drop.
-const BEFORE_SAMPLES: usize = 5;
-/// Finished requests remembered as the normal speed for their prompt size.
-const NORM_LIMIT: usize = 16;
+/// A slowdown with the same reason as one seen within this long is the same
+/// story: the Journal does not tell it again.
+pub(crate) const SAME_STORY_SECONDS: f64 = 60.0;
 
 #[derive(Clone, Default)]
 pub(crate) struct CorrelationObservation {
@@ -53,7 +54,6 @@ pub(crate) struct CorrelationObservation {
     pub(crate) model_memory_max: Option<u64>,
     pub(crate) metal_in_use: Option<u64>,
     pub(crate) metal_alloc: Option<u64>,
-    pub(crate) context_tokens: Option<u64>,
     pub(crate) active_requests: Option<u64>,
     pub(crate) waiting_requests: Option<u64>,
     /// Running requests reading their prompt, and writing their answer.
@@ -65,87 +65,13 @@ pub(crate) struct CorrelationObservation {
     pub(crate) at: Option<SystemTime>,
     /// The longest a generating request has gone without a token, in seconds.
     pub(crate) stalled_for: Option<f64>,
-    /// The one request generating, when only one is: a request is compared
-    /// with its own earlier speed before any other.
-    pub(crate) request: Option<String>,
+    /// Tokens written so far, when one request is generating.
     pub(crate) output_tokens: Option<u64>,
     /// The runtime's storage reads and writes per second, and SSD-cache
     /// blocks it loaded, saved and evicted since the previous sample.
     pub(crate) disk: DiskActivity,
     pub(crate) ssd_full: bool,
-    /// Taken during a slowdown or stall: not the speed to compare with.
-    pub(crate) slow: bool,
 }
-
-/// What the host was doing while generation ran at its normal speed, just
-/// before a drop. A condition that held then, at the same level, was there
-/// when speed was fine: it is not what changed.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Levels {
-    pub(crate) paging: u64,
-    pub(crate) compression: u64,
-    pub(crate) pressure: u8,
-    pub(crate) thermal: bool,
-    pub(crate) waiting: u64,
-    pub(crate) model: f64,
-    pub(crate) disk: bool,
-    /// Requests running, and whether a prompt prefilled beside an answer.
-    pub(crate) running: u64,
-    pub(crate) prefill_beside: bool,
-}
-
-/// The middle of a few values; the upper one of an even count.
-fn middle<T: Ord + Copy>(mut values: Vec<T>) -> T {
-    values.sort_unstable();
-    values[values.len() / 2]
-}
-
-/// The host's levels over the samples just before `onset`, when there are any.
-fn levels_before(all: &[&CorrelationObservation], onset: usize) -> Option<Levels> {
-    // Only samples where generation ran at its normal speed count: what
-    // the host did while nothing was generating says nothing about speed.
-    let before: Vec<&CorrelationObservation> = all[..onset]
-        .iter()
-        .rev()
-        .filter(|o| !o.slow && o.generation_tps.is_some_and(|tps| tps > 0.0))
-        .take(BEFORE_SAMPLES)
-        .copied()
-        .collect();
-    if before.is_empty() {
-        return None;
-    }
-    let most = |held: &dyn Fn(&CorrelationObservation) -> bool| {
-        before.iter().filter(|o| held(o)).count() * 2 > before.len()
-    };
-    Some(Levels {
-        paging: middle(before.iter().map(|o| o.paging_rate).collect()),
-        compression: middle(before.iter().map(|o| o.compression_rate).collect()),
-        pressure: middle(before.iter().map(|o| o.pressure).collect()),
-        thermal: most(&|o| o.thermal_limited),
-        waiting: middle(
-            before
-                .iter()
-                .map(|o| o.waiting_requests.unwrap_or(0))
-                .collect(),
-        ),
-        model: before
-            .iter()
-            .filter_map(|o| fraction(o.model_memory, o.model_memory_max))
-            .fold(0.0, f64::max),
-        disk: most(&|o| o.disk_label().is_some()),
-        running: middle(before.iter().map(|o| running(o)).collect()),
-        prefill_beside: most(&|o| o.prefilling > 0 && o.generating > 0),
-    })
-}
-
-/// A rate now against the same rate before the drop: `None` when it was
-/// below `floor` then (it is new), otherwise whether it has grown by half.
-fn grew(now: u64, was: u64, floor: u64) -> Option<bool> {
-    (was >= floor).then(|| now >= was.saturating_add(was / 2))
-}
-
-/// Marks evidence that held, unchanged, while speed was still normal.
-const SAME_BEFORE: &str = "same before the drop";
 
 impl CorrelationObservation {
     /// The runtime's disk work in this sample, in words, when it is enough to
@@ -181,202 +107,175 @@ impl CorrelationObservation {
     }
 }
 
-/// Lookback before a drop's first slow sample in which a change is a candidate
-/// cause: samples are taken every second or two, and a runtime's rate lags.
-const EVENT_LOOKBACK: usize = 3;
-
-/// Something that changed between two samples, which a slowdown that starts
-/// soon after can be attributed to.
-struct Event {
-    cause: CorrelationCause,
-    text: String,
-    /// Position in the history, oldest first; the current sample is last.
-    index: usize,
-    at: Option<SystemTime>,
-}
-
 fn running(observation: &CorrelationObservation) -> u64 {
     observation.prefilling + observation.generating
 }
 
-/// The changes from one sample to the next that can slow generation, most
-/// specific first: a prompt starting to prefill beside a running answer
-/// explains a request joining, so it is reported instead.
-fn events_between(
-    previous: &CorrelationObservation,
-    current: &CorrelationObservation,
-    index: usize,
-    thresholds: Thresholds,
-) -> Vec<Event> {
-    let mut events = Vec::new();
-    let mut push = |cause, text: String| {
-        events.push(Event {
-            cause,
-            text,
-            index,
-            at: current.at,
-        })
-    };
-    let beside_generation = current.generating > 0 || previous.generating > 0;
-    if current.prefilling > previous.prefilling && beside_generation {
-        push(
-            CorrelationCause::ConcurrentPrefill,
-            match current.prefill_prompt {
-                Some(prompt) => {
-                    format!("{} prefill began beside generation", compact_tokens(prompt))
-                }
-                None => "a prefill began beside generation".into(),
-            },
-        );
-    } else if running(current) > running(previous) && running(current) > 1 {
-        push(
-            CorrelationCause::Concurrency,
-            format!(
-                "request joined ({} → {} running)",
-                running(previous),
-                running(current)
-            ),
-        );
+/// What a slowdown can be explained by. Each is judged by the one rule in
+/// `crate::anomaly`, against its own usual value while generation ran at its
+/// usual speed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Thermal,
+    Pressure,
+    Paging,
+    Disk,
+    Prefill,
+    Requests,
+    Prompt,
+    Compression,
+    Queue,
+    ModelMemory,
+    MetalMemory,
+}
+
+/// Every signal, the host's limits before the workload: when several are
+/// unusual at once, the first is named as the reason.
+pub(crate) const SIGNALS: [Signal; 11] = [
+    Signal::Thermal,
+    Signal::Pressure,
+    Signal::Paging,
+    Signal::Disk,
+    Signal::Prefill,
+    Signal::Requests,
+    Signal::Prompt,
+    Signal::Compression,
+    Signal::Queue,
+    Signal::ModelMemory,
+    Signal::MetalMemory,
+];
+
+/// When a signal's value matters: the level it must reach at all, and how
+/// far above its usual value it must be (a share of that value, and at least
+/// a fixed step).
+struct Limits {
+    from: f64,
+    share: f64,
+    least: f64,
+}
+
+fn usual_rate(usual: f64) -> String {
+    if usual < 1.0 {
+        "usual none".into()
+    } else {
+        format!("usual {}", rate(usual as u64))
     }
-    if let (Some(before), Some(after)) = (previous.largest_prompt, current.largest_prompt) {
-        if after >= before.saturating_add(CONTEXT_GROWTH_TOKENS) && after >= before * 3 / 2 {
-            push(
-                CorrelationCause::ContextGrowth,
-                format!(
-                    "prompt {} → {}",
-                    compact_tokens(before),
-                    compact_tokens(after)
-                ),
-            );
+}
+
+impl Signal {
+    pub(crate) fn cause(self) -> CorrelationCause {
+        match self {
+            Self::Thermal => CorrelationCause::Thermal,
+            Self::Pressure => CorrelationCause::MemoryPressure,
+            Self::Paging => CorrelationCause::Paging,
+            Self::Disk => CorrelationCause::DiskIo,
+            Self::Prefill => CorrelationCause::ConcurrentPrefill,
+            Self::Requests => CorrelationCause::Concurrency,
+            Self::Prompt => CorrelationCause::ContextGrowth,
+            Self::Compression => CorrelationCause::Compression,
+            Self::Queue => CorrelationCause::Queueing,
+            Self::ModelMemory => CorrelationCause::ModelMemory,
+            Self::MetalMemory => CorrelationCause::MetalMemory,
         }
     }
-    if current.pressure > previous.pressure && current.pressure >= 2 {
-        push(
-            CorrelationCause::MemoryPressure,
-            format!(
-                "memory pressure rose to {}",
-                if current.pressure >= 4 {
-                    "critical"
+
+    fn value(self, o: &CorrelationObservation) -> Option<f64> {
+        match self {
+            Self::Thermal => Some(f64::from(u8::from(o.thermal_limited))),
+            Self::Pressure => Some(f64::from(o.pressure)),
+            Self::Paging => Some(o.paging_rate as f64),
+            // Cache blocks moved count as disk work whatever the byte rate.
+            Self::Disk => {
+                let traffic = o.disk.read.unwrap_or(0).max(o.disk.write.unwrap_or(0));
+                Some(if o.disk.loads + o.disk.saves > 0 {
+                    traffic.max(DISK_ACTIVE_RATE) as f64
                 } else {
-                    "watch"
-                }
-            ),
-        );
-    }
-    if current.paging_rate >= thresholds.swap_warn_rate
-        && previous.paging_rate < thresholds.swap_warn_rate
-    {
-        push(
-            CorrelationCause::Paging,
-            format!("paging began ({})", rate(current.paging_rate)),
-        );
-    }
-    if previous.disk_label().is_none() {
-        if let Some(disk) = current.disk_label() {
-            push(CorrelationCause::DiskIo, format!("{disk} began"));
+                    traffic as f64
+                })
+            }
+            // A prompt being read only slows an answer being written.
+            Self::Prefill => Some(if o.generating > 0 {
+                o.prefilling as f64
+            } else {
+                0.0
+            }),
+            Self::Requests => Some(running(o) as f64),
+            Self::Prompt => o.largest_prompt.map(|prompt| prompt as f64),
+            Self::Compression => Some(o.compression_rate as f64),
+            Self::Queue => o.waiting_requests.map(|waiting| waiting as f64),
+            Self::ModelMemory => fraction(o.model_memory, o.model_memory_max),
+            Self::MetalMemory => fraction(o.metal_in_use, o.metal_alloc),
         }
     }
-    if current.thermal_limited && !previous.thermal_limited {
-        push(CorrelationCause::Thermal, "thermal limiting began".into());
-    }
-    let metal = |o: &CorrelationObservation| fraction(o.metal_in_use, o.metal_alloc);
-    if metal(current).is_some_and(|r| r >= 0.90) && metal(previous).is_none_or(|r| r < 0.90) {
-        push(
-            CorrelationCause::MetalMemory,
-            format!(
-                "Metal memory crossed {:.0}%",
-                metal(current).unwrap_or(0.0) * 100.0
+
+    fn limits(self, thresholds: Thresholds) -> Limits {
+        let (from, share, least) = match self {
+            Self::Thermal | Self::Prefill | Self::Queue => (1.0, 0.0, 1.0),
+            Self::Pressure | Self::Requests => (2.0, 0.0, 1.0),
+            Self::Paging => (thresholds.swap_warn_rate as f64, 0.5, 0.0),
+            Self::Disk => (DISK_ACTIVE_RATE as f64, 0.5, 0.0),
+            Self::Prompt => (
+                CONTEXT_GROWTH_TOKENS as f64,
+                0.5,
+                CONTEXT_GROWTH_TOKENS as f64,
             ),
-        );
+            Self::Compression => (thresholds.compression_warn_rate as f64, 0.5, 0.0),
+            Self::ModelMemory | Self::MetalMemory => (0.90, 0.0, 0.02),
+        };
+        Limits { from, share, least }
     }
-    events
-}
 
-/// Whether the change an event marks is still in effect: a prefill that has
-/// finished or pressure that has eased no longer explains a slow sample.
-fn still_holds(
-    cause: CorrelationCause,
-    then: &CorrelationObservation,
-    now: &CorrelationObservation,
-    thresholds: Thresholds,
-) -> bool {
-    match cause {
-        CorrelationCause::ConcurrentPrefill => now.prefilling > 0 && now.generating > 0,
-        CorrelationCause::Concurrency => running(now) > 1,
-        CorrelationCause::ContextGrowth => now.largest_prompt >= then.largest_prompt,
-        CorrelationCause::MemoryPressure => now.pressure >= 2,
-        CorrelationCause::Paging => now.paging_rate >= thresholds.swap_warn_rate,
-        CorrelationCause::Thermal => now.thermal_limited,
-        CorrelationCause::DiskIo => now.disk_label().is_some(),
-        CorrelationCause::MetalMemory => {
-            fraction(now.metal_in_use, now.metal_alloc).is_some_and(|r| r >= 0.90)
+    /// The signal now, beside its usual value.
+    fn describe(self, o: &CorrelationObservation, usual: f64) -> String {
+        match self {
+            Self::Thermal => "thermal limit".into(),
+            Self::Pressure => format!(
+                "memory pressure {}",
+                if o.pressure >= 4 { "critical" } else { "watch" }
+            ),
+            Self::Paging => format!("paging {} ({})", rate(o.paging_rate), usual_rate(usual)),
+            Self::Disk => format!(
+                "{} ({})",
+                o.disk_label().unwrap_or_else(|| "disk work".into()),
+                usual_rate(usual)
+            ),
+            Self::Prefill => match o.prefill_prompt {
+                Some(prompt) => format!("{} prefill beside generation", compact_tokens(prompt)),
+                None => "prefill beside generation".into(),
+            },
+            Self::Requests => format!("{} requests running (usual {usual:.0})", running(o)),
+            Self::Prompt => format!(
+                "prompt {} (usual {})",
+                compact_tokens(o.largest_prompt.unwrap_or_default()),
+                compact_tokens(usual as u64)
+            ),
+            Self::Compression => format!(
+                "compression {} ({})",
+                rate(o.compression_rate),
+                usual_rate(usual)
+            ),
+            Self::Queue => format!(
+                "{} waiting (usual {usual:.0})",
+                o.waiting_requests.unwrap_or_default()
+            ),
+            Self::ModelMemory => format!(
+                "model MEM {:.0}% of ceiling (usual {:.0}%)",
+                fraction(o.model_memory, o.model_memory_max).unwrap_or_default() * 100.0,
+                usual * 100.0
+            ),
+            Self::MetalMemory => format!(
+                "Metal MEM {:.0}% (usual {:.0}%)",
+                fraction(o.metal_in_use, o.metal_alloc).unwrap_or_default() * 100.0,
+                usual * 100.0
+            ),
         }
-        _ => true,
     }
 }
 
-/// Seconds between two sample times, in words, when both are known.
-fn gap_label(event: Option<SystemTime>, onset: Option<SystemTime>) -> String {
-    match event
-        .zip(onset)
-        .and_then(|(event, onset)| onset.duration_since(event).ok())
-    {
-        Some(gap) if gap.as_secs() == 0 => " as the drop began".into(),
-        Some(gap) => format!(" {}s before the drop", gap.as_secs()),
-        None => String::new(),
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct CorrelationEngine {
-    pub(crate) observations: VecDeque<CorrelationObservation>,
-    /// The slowdown in progress, if any.
-    episode: Option<Episode>,
-    /// The request whose slowdown last ended, and the speed it returned to.
-    normal: Option<(String, f64)>,
-    /// Finished requests: their prompt size and normal speed.
-    norms: Vec<Norm>,
-    stalled: bool,
-}
-
-/// A slowdown from its first slow sample. The speed it fell from is fixed
-/// here: a rolling baseline would absorb the slow samples within seconds
-/// and call a slowdown that is still going on normal.
-struct Episode {
-    request: Option<String>,
-    /// Requests generating when it began: several are judged on their sum.
-    generating: u64,
-    reference: f64,
-    began: Option<SystemTime>,
-    samples: u32,
-    low: f64,
-    /// The change that began the drop, and the sample it was seen in: kept
-    /// after it leaves the history, for as long as it still holds.
-    lead: Option<(CorrelationFactor, CorrelationObservation)>,
-    before: Option<Levels>,
-    /// Causes already journaled for this slowdown.
-    reported: Vec<CorrelationCause>,
-    /// Since when nothing on the host has explained it.
-    unexplained: Option<SystemTime>,
-    /// Measured against earlier requests rather than this one's own speed.
-    slow_start: bool,
-}
-
-struct Norm {
-    provider: String,
-    model: String,
-    prompt: u64,
-    tps: f64,
-}
-
-/// What the analysis of one sample found beyond the insight it reports.
-pub(crate) struct Trace {
-    /// Samples since the drop's first slow one; zero when this is it.
-    onset_ago: usize,
-    onset_at: Option<SystemTime>,
-    before: Option<Levels>,
-    /// The strongest factor, when it is a change that began the drop.
-    onset_lead: Option<CorrelationFactor>,
+/// A signal that is unusual in this sample, in words.
+struct Finding {
+    signal: Signal,
+    text: String,
 }
 
 fn seconds_between(from: Option<SystemTime>, to: Option<SystemTime>) -> f64 {
@@ -707,105 +606,40 @@ pub(crate) fn llm_is_observed(sample: &Sample) -> bool {
         || sample.llm_model != "not detected"
 }
 
-pub(crate) fn correlation_evidence_label(sample: &Sample) -> String {
-    match sample.correlation.cause {
-        CorrelationCause::Paging if sample.paging_churn() > 0 => {
-            format!("I/O {}", rate(sample.paging_churn()))
-        }
-        CorrelationCause::Compression if sample.compress.saturating_add(sample.decompress) > 0 => {
-            format!(
-                "compress {}",
-                rate(sample.compress.saturating_add(sample.decompress))
-            )
-        }
-        CorrelationCause::MemoryPressure => {
-            format!("pressure {}", pressure_state_label(sample))
-        }
-        CorrelationCause::Thermal => "thermal limit".into(),
-        CorrelationCause::MetalMemory => fraction(sample.gpu_in_use, sample.gpu_alloc)
-            .map(|ratio| format!("Metal mem {:.0}%", ratio * 100.0))
-            .unwrap_or_else(|| "Metal mem".into()),
-        CorrelationCause::GpuSaturation => [
-            sample.gpu_util,
-            sample.metal.renderer_util,
-            sample.metal.tiler_util,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .map(|value| format!("GPU {value}%"))
-        .unwrap_or_else(|| "GPU".into()),
-        CorrelationCause::Queueing => sample
-            .llm_waiting_requests
-            .map(|waiting| format!("queue {waiting} waiting"))
-            .unwrap_or_else(|| "queueing".into()),
-        CorrelationCause::ConcurrentPrefill => sample
-            .llm_requests
-            .iter()
-            .filter(|r| !r.completed && !r.queued && r.prefilled.is_some())
-            .map(|r| r.prompt)
-            .max()
-            .map(|prompt| format!("{} prefill beside generation", compact_tokens(prompt)))
-            .unwrap_or_else(|| "prefill beside generation".into()),
-        CorrelationCause::Concurrency => sample
-            .llm_active_requests
-            .map(|active| format!("{active} requests running"))
-            .unwrap_or_else(|| "concurrent requests".into()),
-        CorrelationCause::ContextGrowth => llm_context_tokens(sample)
-            .map(|tokens| format!("context {}", compact_tokens(tokens)))
-            .unwrap_or_else(|| "context/KV".into()),
-        CorrelationCause::ModelMemory => {
-            fraction(sample.llm_model_memory, sample.llm_model_memory_max)
-                .map(|ratio| format!("model mem {:.0}%", ratio * 100.0))
-                .unwrap_or_else(|| "model memory".into())
-        }
-        CorrelationCause::Runtime => "workload/runtime".into(),
-        CorrelationCause::Stall | CorrelationCause::DiskIo => sample.correlation.lead.clone(),
-        CorrelationCause::None => String::new(),
-        CorrelationCause::Paging | CorrelationCause::Compression => String::new(),
-    }
+#[derive(Default)]
+pub(crate) struct CorrelationEngine {
+    /// The provider and model the usual values belong to.
+    model: Option<(String, String)>,
+    /// Generation speed, and every signal in `SIGNALS`, while speed was usual.
+    pub(crate) speed: Usual,
+    host: [Usual; SIGNALS.len()],
+    /// Slow samples not yet enough in a row to be a slowdown.
+    pending: Vec<CorrelationObservation>,
+    episode: Option<Episode>,
+    /// When generation was last seen running.
+    seen: Option<SystemTime>,
+    /// The reason last journaled, and when it was last seen.
+    told: Option<(CorrelationCause, Option<SystemTime>)>,
 }
 
-/// A lone request's measured speeds at its normal pace. Its first poll
-/// carries the runtime's average, not a measured speed; stalls and samples
-/// inside a slowdown are not what it is compared with.
-fn healthy(comparable: &[&CorrelationObservation], id: &str) -> Vec<f64> {
-    comparable
-        .iter()
-        .filter(|o| o.request.as_deref() == Some(id))
-        .skip(1)
-        .filter(|o| !o.slow && o.stalled_for.is_none_or(|idle| idle < STALL_SECONDS))
-        .filter_map(|o| o.generation_tps)
-        .collect()
-}
-
-/// The middle speed of one provider and model's samples at a normal pace.
-pub(crate) fn rolling_baseline<'a>(
-    observations: impl Iterator<Item = &'a CorrelationObservation>,
-    provider: &str,
-    model: &str,
-) -> Option<f64> {
-    let rates: Vec<f64> = observations
-        .filter(|o| o.provider == provider && o.model == model && !o.slow)
-        .filter_map(|o| o.generation_tps)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .collect();
-    (!rates.is_empty()).then(|| median(rates))
-}
-
-/// A slowdown is pinned on the host from its first sample only for what
-/// the host itself does to a decode; workload signals need an onset.
-fn host_explained(insight: &CorrelationInsight) -> bool {
-    insight.confidence >= 60
-        && matches!(
-            insight.cause,
-            CorrelationCause::Paging
-                | CorrelationCause::MemoryPressure
-                | CorrelationCause::Thermal
-                | CorrelationCause::Compression
-                | CorrelationCause::DiskIo
-                | CorrelationCause::ModelMemory
-        )
+/// A slowdown from its first slow sample. The speed it fell from is fixed
+/// here, and nothing is learned while it lasts: a slowdown that is still
+/// going on must not become the usual speed by going on.
+struct Episode {
+    reference: f64,
+    began: Option<SystemTime>,
+    samples: u32,
+    low: f64,
+    /// Its latest slow speeds: their middle is the speed it is reported at.
+    lows: VecDeque<f64>,
+    /// Samples back at the usual speed, in a row.
+    back: Vec<CorrelationObservation>,
+    /// Reasons already journaled for this slowdown.
+    reported: Vec<CorrelationCause>,
+    /// Told as part of an earlier slowdown: its end is not journaled either.
+    silent: bool,
+    /// Its samples since something else was last unusual.
+    quiet: Vec<CorrelationObservation>,
 }
 
 impl CorrelationEngine {
@@ -818,484 +652,280 @@ impl CorrelationEngine {
             self.reset();
             return CorrelationInsight::default();
         }
-        let mut current = CorrelationObservation::from_sample(sample);
-        let Self {
-            observations,
-            episode,
-            normal,
-            norms,
-            stalled,
-        } = self;
-        // The run of samples from this provider and model up to now: a
-        // change of either starts a new history.
-        let comparable: Vec<&CorrelationObservation> = observations
-            .iter()
-            .rev()
-            .take_while(|o| o.provider == current.provider && o.model == current.model)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        // A lone request that has just ended is the normal speed for its
-        // prompt size, which later requests of that size are held to.
-        if let Some(ended) = comparable
-            .last()
-            .and_then(|o| o.request.as_ref())
-            .filter(|id| Some(*id) != current.request.as_ref())
-        {
-            let speeds = healthy(&comparable, ended);
-            let prompt = comparable
-                .iter()
-                .rev()
-                .find(|o| o.request.as_ref() == Some(ended))
-                .and_then(|o| o.largest_prompt);
-            if let (3.., Some(prompt)) = (speeds.len(), prompt) {
-                norms.push(Norm {
-                    provider: current.provider.clone(),
-                    model: current.model.clone(),
-                    prompt,
-                    tps: median(speeds),
-                });
-                if norms.len() > NORM_LIMIT {
-                    norms.remove(0);
-                }
-            }
+        let current = CorrelationObservation::from_sample(sample);
+        // Usual values belong to one model on one runtime.
+        let model = (current.provider.clone(), current.model.clone());
+        if self.model.as_ref() != Some(&model) {
+            self.reset();
+            self.model = Some(model);
         }
-        // A slowdown belongs to one request (or to several at once) on one
-        // model: when that changes it is over, with nothing to compare.
-        if episode.as_ref().is_some_and(|open| {
-            open.request != current.request
-                || open.generating != current.generating
-                || comparable.is_empty()
-        }) {
-            *episode = None;
+        let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
+        let speed = current.generation_tps.filter(|tps| {
+            tps.is_finite() && (*tps > 0.0 || current.active_requests.unwrap_or_default() > 0)
+        });
+        if stalled.is_none() && speed.is_none() {
+            // Nothing is generating: there is no speed to judge. A slowdown
+            // waits for its next sample.
+            return CorrelationInsight::default();
         }
-        // One request is measured against its own earlier speed: requests
-        // differ by a third with content alone.
-        let own = current
-            .request
-            .as_deref()
-            .map(|id| healthy(&comparable, id))
-            .unwrap_or_default();
-        // Until a lone request has three measured speeds there is nothing
-        // like-for-like to compare with: other requests' speeds differ by
-        // content, and a request boundary is not a slowdown.
-        let noise = (own.len() >= 3).then(|| spread(&own));
-        let own_baseline = match (&current.request, own.len()) {
-            (Some(_), 3..) => Some(median(own.clone())),
-            // After a long slowdown none of its normal samples are left:
-            // the speed it returned to stands in.
-            (Some(id), _) => normal
-                .as_ref()
-                .filter(|(request, _)| request == id)
-                .map(|(_, tps)| *tps),
-            (None, _) => rolling_baseline(
-                comparable.iter().copied(),
-                &current.provider,
-                &current.model,
-            ),
+        // A slowdown whose request went idle long ago is over.
+        if seconds_between(self.seen, current.at) >= SETTLE_SECONDS {
+            self.keep_pending();
+            self.episode = None;
+        }
+        self.seen = current.at;
+        // A request that stops producing tokens is observed, not inferred.
+        if let Some(idle) = stalled {
+            return self.stall(&current, idle, thresholds);
+        }
+        let speed = speed.unwrap_or_default();
+        // A request that has just gone quiet may be about to stall: its
+        // near-zero speed is neither slow nor usual until that is known.
+        let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5);
+        let usual = self.speed.level();
+        let low = self
+            .speed
+            .below(speed, SLOW_SHARE, SLOW_MIN_TPS)
+            .filter(|_| !quiet);
+        let steady = |usual: Option<f64>| CorrelationInsight {
+            direction: if usual.is_some() {
+                ThroughputDirection::Flat
+            } else {
+                ThroughputDirection::Unknown
+            },
+            delta_percent: usual
+                .filter(|usual| *usual > 0.0)
+                .map(|usual| (speed - usual) / usual * 100.0),
+            ..CorrelationInsight::default()
         };
-        // Judge the recent mean, not one jumpy poll.
-        let judge = |baseline: Option<f64>, hold_quiet: bool| {
-            let mut judged = current.clone();
-            if current.request.is_some() {
-                let recent: Vec<f64> = comparable
-                    .iter()
-                    .rev()
-                    .take_while(|o| o.request == current.request)
-                    // A stall was reported as one; its zeros are not the speed
-                    // the request returns to.
-                    .filter(|o| o.stalled_for.is_none_or(|idle| idle < 0.5))
-                    .take(SMOOTHING_SAMPLES - 1)
-                    .filter_map(|o| o.generation_tps)
-                    .chain(current.generation_tps)
-                    .collect();
-                if !recent.is_empty() {
-                    let mean = recent.iter().sum::<f64>() / recent.len() as f64;
-                    // A dip inside the request's own jitter is not a slowdown:
-                    // its mean of n polls varies by spread / √n, and a drop must
-                    // clear twice that.
-                    let jitter = noise.unwrap_or(0.0) * 2.0 / (recent.len() as f64).sqrt();
-                    judged.generation_tps = match baseline {
-                        Some(baseline) if baseline - mean < jitter => Some(baseline),
-                        _ => Some(mean),
-                    };
-                }
-            }
-            // A request that has just gone quiet may be about to stall; wait for
-            // the stall verdict rather than journaling a slowdown first.
-            if hold_quiet
-                && current
-                    .stalled_for
-                    .is_some_and(|idle| (0.5..STALL_SECONDS).contains(&idle))
-            {
-                judged.generation_tps = baseline;
-            }
-            judged
-        };
-        // A request far slower than earlier ones of its size, from its first
-        // samples, has no drop of its own to find. It is held to theirs, but
-        // only when the host shows a reason: content alone differs too.
-        let expected = (episode.is_none() && own.len() >= 3)
-            .then(|| expected_speed(norms, &current))
-            .flatten()
-            .filter(|expected| own_baseline.is_some_and(|own| own <= expected * SLOW_START_RATIO))
-            .filter(|expected| {
-                let judged = judge(Some(*expected), true);
-                let (insight, _) = correlate(
-                    &judged,
-                    &comparable,
-                    Some(*expected),
-                    thresholds,
-                    None,
-                    true,
-                );
-                insight.direction == ThroughputDirection::Down && host_explained(&insight)
-            });
-        let (baseline, slow_start) = match (episode.as_ref(), expected) {
-            (Some(open), _) => (Some(open.reference), open.slow_start),
-            (None, Some(expected)) => (Some(expected), true),
-            (None, None) => (own_baseline, false),
-        };
-        let judged = judge(baseline, episode.is_none());
-        let (mut insight, trace) = correlate(
-            &judged,
-            &comparable,
-            baseline,
-            thresholds,
-            episode.as_ref().and_then(|open| open.before),
-            slow_start,
-        );
-        drop(comparable);
 
-        let stalled_now = insight.stall_seconds.is_some();
-        let down = insight.direction == ThroughputDirection::Down;
-        let speed = judged.generation_tps.unwrap_or_default();
-        // Samples just before this one that were already slow, and whether
-        // the request's slow samples become its normal ones.
-        let (mut slow_before, mut settle) = (0, false);
-        match episode.take() {
-            Some(mut open) if down => {
+        let mut open = match (self.episode.take(), low) {
+            (Some(mut open), _) => {
                 open.samples += 1;
-                // A request going quiet is about to stall, not slowing further.
-                if current.stalled_for.is_none_or(|idle| idle < 0.5) {
+                if low.is_some() {
+                    open.back.clear();
                     open.low = open.low.min(speed);
+                    open.lows.push_back(speed);
+                } else if !quiet {
+                    open.back.push(current.clone());
                 }
-                // The change that began the drop explains it for as long as
-                // it holds, also once it has left the history.
-                match open.lead.take() {
-                    Some((lead, then)) if still_holds(lead.cause, &then, &current, thresholds) => {
-                        if !stalled_now && insight.confidence <= lead.score {
-                            insight.cause = lead.cause;
-                            insight.confidence = lead.score;
-                            insight.summary =
-                                format!("{} · correlated: {}", insight.rate_label(), lead.evidence);
-                            insight.lead = lead.evidence.clone();
-                            insight.event_key = Some(CorrelationKey {
-                                direction: ThroughputDirection::Down,
-                                cause: lead.cause,
-                            });
-                        }
-                        open.lead = Some((lead, then));
-                    }
-                    _ => {
-                        open.lead = trace
-                            .onset_lead
-                            .filter(|_| !stalled_now)
-                            .map(|lead| (lead, current.clone()));
-                    }
+                open
+            }
+            (None, Some(reference)) => {
+                self.pending.push(current.clone());
+                if self.pending.len() < SLOW_SAMPLES {
+                    return steady(usual);
                 }
-                // One Journal row per cause in a slowdown, however often
-                // the strongest one changes back and forth.
-                insight.repeat = !stalled_now
-                    && (open.reported.contains(&insight.cause)
-                        || (insight.lead.is_empty() && !open.reported.is_empty()));
-                if !insight.repeat && !stalled_now {
-                    open.reported.push(insight.cause);
-                }
-                // A longer prompt decodes more slowly for as long as it runs:
-                // that is the workload, and like no reason at all it settles.
-                let settles =
-                    insight.lead.is_empty() || insight.cause == CorrelationCause::ContextGrowth;
-                open.unexplained = if settles && !stalled_now {
-                    open.unexplained.or(current.at)
-                } else {
-                    None
-                };
-                let seconds = seconds_between(open.began, current.at);
-                if open.unexplained.is_some()
-                    && seconds_between(open.unexplained, current.at) >= SETTLE_SECONDS
-                {
-                    // Nothing on the host changed and it has held: this is
-                    // how fast the request now runs.
-                    insight = CorrelationInsight {
-                        direction: ThroughputDirection::Flat,
-                        delta_percent: insight.delta_percent,
-                        ended: Some(DropEnd {
-                            settled: true,
-                            seconds,
-                            low: open.low,
-                            rate: speed,
-                            reference: open.reference,
-                        }),
-                        ..CorrelationInsight::default()
-                    };
-                    settle = true;
-                    *normal = None;
-                } else {
-                    insight.episode = Some(DropEpisode {
-                        reference: open.reference,
-                        low: open.low,
-                        seconds,
-                        samples: open.samples,
-                    });
-                    *episode = Some(open);
+                let speeds: Vec<f64> = self
+                    .pending
+                    .iter()
+                    .filter_map(|o| o.generation_tps)
+                    .collect();
+                let began = self.pending[0].at;
+                let samples = self.pending.len() as u32;
+                self.pending.clear();
+                Episode {
+                    reference,
+                    began,
+                    samples,
+                    low: speeds.iter().copied().fold(speed, f64::min),
+                    lows: speeds.into(),
+                    back: Vec::new(),
+                    reported: Vec::new(),
+                    silent: false,
+                    quiet: Vec::new(),
                 }
             }
-            Some(open) => {
-                // Back within the request's normal range: it recovered.
-                if matches!(
-                    insight.direction,
-                    ThroughputDirection::Flat | ThroughputDirection::Up
-                ) {
-                    insight.ended = Some(DropEnd {
-                        settled: false,
-                        seconds: seconds_between(open.began, current.at),
-                        low: open.low,
-                        rate: current.generation_tps.unwrap_or(speed),
-                        reference: open.reference,
-                    });
-                    if let Some(id) = open.request {
-                        *normal = Some((id, open.reference));
-                    }
+            (None, None) => {
+                // An ordinary sample; a slow one or two before it were too.
+                if !quiet {
+                    self.keep_pending();
+                    self.learn(&current);
                 }
+                return steady(usual);
             }
-            // A stall is its own finding, with its own end.
-            None if down && !stalled_now => {
-                if let Some(reference) = baseline {
-                    slow_before = trace.onset_ago;
-                    let began = trace.onset_at.or(current.at);
-                    insight.episode = Some(DropEpisode {
-                        reference,
-                        low: speed,
-                        seconds: seconds_between(began, current.at),
-                        samples: trace.onset_ago as u32 + 1,
-                    });
-                    *episode = Some(Episode {
-                        request: current.request.clone(),
-                        generating: current.generating,
-                        reference,
-                        began,
-                        samples: trace.onset_ago as u32 + 1,
-                        low: speed,
-                        lead: trace.onset_lead.map(|lead| (lead, current.clone())),
-                        before: trace.before,
-                        reported: vec![insight.cause],
-                        unexplained: (insight.lead.is_empty()
-                            || insight.cause == CorrelationCause::ContextGrowth)
-                            .then_some(current.at)
-                            .flatten(),
-                        slow_start,
-                    });
-                }
-            }
-            None => {}
+        };
+        while open.lows.len() > SLOW_SAMPLES {
+            open.lows.pop_front();
         }
-        *stalled = stalled_now;
+        let seconds = seconds_between(open.began, current.at);
+        let ended = |settled: bool, open: &Episode| {
+            (!open.silent).then_some(DropEnd {
+                settled,
+                seconds,
+                low: open.low,
+                rate: speed,
+                reference: open.reference,
+            })
+        };
 
-        // Slow samples are not what later ones are compared with.
-        current.slow = down && !settle;
-        let count = observations.len();
-        for observation in observations.iter_mut().skip(count - slow_before.min(count)) {
-            observation.slow = true;
-        }
-        if settle {
-            for observation in observations
-                .iter_mut()
-                .filter(|o| o.request == current.request)
-            {
-                observation.slow = false;
+        // Back at its usual speed for three samples: it recovered.
+        if open.back.len() >= SLOW_SAMPLES {
+            for observation in &open.back {
+                self.learn(observation);
             }
+            return CorrelationInsight {
+                ended: ended(false, &open),
+                ..steady(usual)
+            };
         }
-        observations.push_back(current);
-        while observations.len() > CORRELATION_HISTORY_LIMIT {
-            observations.pop_front();
+
+        let findings = self.findings(&current, thresholds);
+        // A longer prompt decodes more slowly for as long as it runs: that
+        // is the workload, and like no reason at all it becomes usual.
+        if findings.iter().any(|found| found.signal != Signal::Prompt) {
+            open.quiet.clear();
+        } else {
+            open.quiet.push(current.clone());
+            let extra = open.quiet.len().saturating_sub(WINDOW);
+            open.quiet.drain(..extra);
         }
+        if seconds_between(open.quiet.first().and_then(|o| o.at), current.at) >= SETTLE_SECONDS {
+            // Nothing else is unusual and it has held: this is how fast
+            // generation now runs.
+            self.speed.relearn(std::iter::empty());
+            for usual in &mut self.host {
+                usual.relearn(std::iter::empty());
+            }
+            for observation in &open.quiet {
+                self.learn(observation);
+            }
+            return CorrelationInsight {
+                ended: ended(true, &open),
+                ..steady(self.speed.level())
+            };
+        }
+
+        let shown = median(open.lows.iter().copied().collect());
+        let percent = (shown - open.reference) / open.reference * 100.0;
+        let rate_label = format!(
+            "GEN ↓{:.1}% ({:.1}→{shown:.1} tok/s)",
+            percent.abs(),
+            open.reference
+        );
+        let cause = findings
+            .first()
+            .map(|found| found.signal.cause())
+            .unwrap_or_default();
+        let texts: Vec<&str> = findings.iter().map(|found| found.text.as_str()).collect();
+        // One Journal row per reason in a slowdown, and none for a slowdown
+        // that repeats the last one's reason within a minute.
+        let same_story = self.told.is_some_and(|(told, at)| {
+            told == cause && seconds_between(at, current.at) < SAME_STORY_SECONDS
+        });
+        if open.reported.is_empty() && same_story {
+            open.reported.push(cause);
+            open.silent = true;
+        }
+        // What was unusual has passed while speed is still down: that is
+        // the tail of the same slowdown, not a new finding.
+        let faded = findings.is_empty() && !open.reported.is_empty();
+        let repeat = faded || open.reported.contains(&cause);
+        if !repeat {
+            open.reported.push(cause);
+            open.silent = false;
+        }
+        if !faded {
+            self.told = Some((cause, current.at));
+        }
+        let insight = CorrelationInsight {
+            direction: ThroughputDirection::Down,
+            cause,
+            summary: if texts.is_empty() {
+                format!("{rate_label} · nothing else unusual")
+            } else {
+                format!(
+                    "{rate_label} · unusual: {}",
+                    texts
+                        .iter()
+                        .take(2)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                )
+            },
+            details: if texts.is_empty() {
+                String::new()
+            } else {
+                format!("{} · {}", cause.label(), texts.join(" · "))
+            },
+            lead: texts
+                .first()
+                .map(|text| (*text).to_owned())
+                .unwrap_or_default(),
+            stall_seconds: None,
+            event_key: Some(CorrelationKey {
+                direction: ThroughputDirection::Down,
+                cause,
+            }),
+            delta_percent: Some(percent),
+            episode: Some(DropEpisode {
+                reference: open.reference,
+                low: open.low,
+                seconds,
+                samples: open.samples,
+            }),
+            ended: None,
+            repeat,
+            slow: low.is_some(),
+            unusual: findings.iter().map(|found| found.signal.cause()).collect(),
+        };
+        self.episode = Some(open);
         insight
     }
 
-    pub(crate) fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-/// The normal speed of earlier requests whose prompts were about this size
-/// (half to double): the middle of them, once there are two.
-fn expected_speed(norms: &[Norm], current: &CorrelationObservation) -> Option<f64> {
-    let prompt = current.largest_prompt?;
-    let similar: Vec<f64> = norms
-        .iter()
-        .filter(|norm| norm.provider == current.provider && norm.model == current.model)
-        .filter(|norm| norm.prompt >= prompt / 2 && norm.prompt <= prompt.saturating_mul(2))
-        .map(|norm| norm.tps)
-        .collect();
-    (similar.len() >= 2).then(|| median(similar))
-}
-
-impl CorrelationObservation {
-    pub(crate) fn from_sample(sample: &Sample) -> Self {
-        // Runtimes report prefill progress only while a prompt is being read.
-        let running: Vec<_> = sample
-            .llm_requests
+    /// The signals that are unusual in this sample, the most telling first.
+    fn findings(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
+        let mut findings: Vec<Finding> = SIGNALS
             .iter()
-            .filter(|r| !r.completed && !r.queued)
-            .collect();
-        let prefilling: Vec<_> = running.iter().filter(|r| r.prefilled.is_some()).collect();
-        let generating: Vec<_> = running.iter().filter(|r| r.prefilled.is_none()).collect();
-        Self {
-            provider: sample.llm_provider.clone(),
-            model: sample.llm_model.clone(),
-            generation_tps: sample
-                .llm_generation_tps_live
-                .then_some(sample.llm_generation_tps)
-                .flatten(),
-            gpu_util: sample.gpu_util,
-            renderer_util: sample.metal.renderer_util,
-            tiler_util: sample.metal.tiler_util,
-            paging_rate: sample.paging_churn(),
-            compression_rate: sample.compress.saturating_add(sample.decompress),
-            pressure: pressure_rank(&sample.pressure),
-            thermal_limited: sample.thermal.starts_with("limited")
-                || sample.thermal == "warning reported",
-            model_memory: sample.llm_model_memory,
-            model_memory_max: sample.llm_model_memory_max,
-            metal_in_use: sample.gpu_in_use,
-            metal_alloc: sample.gpu_alloc,
-            // With several requests the runtime reports no one prompt size;
-            // the longest running context still slows its own decode.
-            context_tokens: llm_context_tokens(sample).or_else(|| {
-                running
-                    .iter()
-                    .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
-                    .max()
-            }),
-            active_requests: sample.llm_active_requests,
-            waiting_requests: sample.llm_waiting_requests,
-            prefilling: prefilling.len() as u64,
-            generating: (running.len() - prefilling.len()) as u64,
-            largest_prompt: running
-                .iter()
-                .map(|r| r.prompt)
-                .max()
-                .or(sample.llm_prompt_tokens),
-            prefill_prompt: prefilling.iter().map(|r| r.prompt).max(),
-            at: sample.llm_observed_at.or_else(|| Some(SystemTime::now())),
-            stalled_for: running
-                .iter()
-                .filter(|r| r.prefilled.is_none())
-                .filter_map(|r| r.idle_for)
-                .map(|idle| idle.as_secs_f64())
-                .reduce(f64::max),
-            request: match generating.as_slice() {
-                [only] => Some(only.id.clone()),
-                _ => None,
-            },
-            output_tokens: match generating.as_slice() {
-                [only] => only.output,
-                _ => None,
-            },
-            disk: sample.disk,
-            ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
-            slow: false,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct CorrelationFactor {
-    pub(crate) cause: CorrelationCause,
-    pub(crate) score: u8,
-    pub(crate) evidence: String,
-    /// A change that began just before the drop, rather than a condition
-    /// that holds during it.
-    pub(crate) onset: bool,
-}
-
-/// Attribute a throughput change to what the host and the workload are doing
-/// now, and above all to what changed just before the slowdown began: a
-/// request joining, a prefill starting beside generation, a longer prompt, a
-/// pressure or paging onset. Conditions that hold through normal work, such
-/// as a busy GPU, rank below a change that lines up with the drop.
-/// `before` is what the host was doing ahead of a slowdown that began before
-/// this history; `slow_start` says the baseline is earlier requests' speed.
-pub(crate) fn correlate(
-    current: &CorrelationObservation,
-    history: &[&CorrelationObservation],
-    baseline: Option<f64>,
-    thresholds: Thresholds,
-    before: Option<Levels>,
-    slow_start: bool,
-) -> (CorrelationInsight, Trace) {
-    let previous = history.last().copied();
-    let current_tps = current.generation_tps.filter(|value| {
-        value.is_finite() && (*value > 0.0 || current.active_requests.unwrap_or_default() > 0)
-    });
-    let baseline = baseline.filter(|value| value.is_finite() && *value > 0.0);
-    let (direction, delta_percent) = match (current_tps, baseline) {
-        (Some(current), Some(baseline)) => {
-            let delta = current - baseline;
-            let percent = delta / baseline * 100.0;
-            let direction = if delta <= -THROUGHPUT_CHANGE_MIN_TPS
-                && percent <= -(THROUGHPUT_CHANGE_RATIO * 100.0)
-            {
-                ThroughputDirection::Down
-            } else if delta >= THROUGHPUT_CHANGE_MIN_TPS
-                && percent >= THROUGHPUT_CHANGE_RATIO * 100.0
-            {
-                ThroughputDirection::Up
-            } else {
-                ThroughputDirection::Flat
-            };
-            (direction, Some(percent))
-        }
-        _ => (ThroughputDirection::Unknown, None),
-    };
-
-    let mut factors = Vec::new();
-
-    // A request that stops producing tokens is observed, not inferred: it
-    // leads, with whatever else the host was doing while it waited.
-    let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
-    let direction = if stalled.is_some() {
-        ThroughputDirection::Down
-    } else {
-        direction
-    };
-    // Where the drop began: the first of the slow samples that run up to
-    // this one. What the host was doing just before is what a condition
-    // during the drop is compared with.
-    let all: Vec<&CorrelationObservation> = history
-        .iter()
-        .copied()
-        .chain(std::iter::once(current))
-        .collect();
-    let mut onset = all.len() - 1;
-    if direction == ThroughputDirection::Down {
-        let baseline = baseline.unwrap_or_default();
-        let slow = |o: &CorrelationObservation| {
-            o.generation_tps.is_some_and(|tps| {
-                tps <= baseline - THROUGHPUT_CHANGE_MIN_TPS
-                    && tps <= baseline * (1.0 - THROUGHPUT_CHANGE_RATIO)
+            .zip(&self.host)
+            .filter_map(|(signal, usual)| {
+                let value = signal.value(current)?;
+                let limits = signal.limits(thresholds);
+                let usual = usual
+                    .above(value, limits.share, limits.least)
+                    .filter(|_| value >= limits.from)?;
+                Some(Finding {
+                    signal: *signal,
+                    text: signal.describe(current, usual),
+                })
             })
-        };
-        while onset > 0 && slow(all[onset - 1]) {
-            onset -= 1;
+            .collect();
+        // A prompt prefilling beside an answer is the request that joined:
+        // it is said once, in the more telling form.
+        if findings.iter().any(|found| found.signal == Signal::Prefill) {
+            findings.retain(|found| found.signal != Signal::Requests);
+        }
+        findings
+    }
+
+    /// A sample at the usual speed: what every signal is doing is usual too.
+    fn learn(&mut self, observation: &CorrelationObservation) {
+        if let Some(speed) = observation.generation_tps {
+            self.speed.learn(speed);
+        }
+        for (signal, usual) in SIGNALS.iter().zip(&mut self.host) {
+            if let Some(value) = signal.value(observation) {
+                usual.learn(value);
+            }
         }
     }
-    let before = (direction == ThroughputDirection::Down)
-        .then(|| before.or_else(|| levels_before(&all, onset)))
-        .flatten();
-    if let Some(idle) = stalled {
+
+    /// Slow samples that did not become a slowdown were ordinary after all.
+    fn keep_pending(&mut self) {
+        for observation in std::mem::take(&mut self.pending) {
+            self.learn(&observation);
+        }
+    }
+
+    /// A request that produced no token for `idle` seconds, with what the
+    /// host was doing while it waited.
+    fn stall(
+        &mut self,
+        current: &CorrelationObservation,
+        idle: f64,
+        thresholds: Thresholds,
+    ) -> CorrelationInsight {
         let mut evidence = match current.output_tokens {
             Some(out) => format!("no new token for {idle:.0}s at {} out", compact_tokens(out)),
             None => format!("no new token for {idle:.0}s"),
@@ -1328,476 +958,97 @@ pub(crate) fn correlate(
         if !with.is_empty() {
             evidence = format!("{evidence} · {}", with.join(" · "));
         }
-        push_correlation_factor(&mut factors, CorrelationCause::Stall, 99, evidence);
-    }
-
-    // Requests sharing the engine. A prefill beside generation stalls decode
-    // while the prompt is read; concurrent answers split the GPU. Neither
-    // explains a drop if speed was normal with just as many running.
-    let score_held = |score: u8, held: bool| if held { 45 } else { score };
-    if current.prefilling > 0 && current.generating > 0 {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::ConcurrentPrefill,
-            score_held(85, before.is_some_and(|before| before.prefill_beside)),
-            match current.prefill_prompt {
-                Some(prompt) => format!("{} prefill beside generation", compact_tokens(prompt)),
-                None => "prefill beside generation".into(),
-            },
-        );
-    } else if running(current) > 1 {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::Concurrency,
-            score_held(
-                70,
-                before.is_some_and(|before| before.running >= running(current)),
-            ),
-            format!("{} requests running", running(current)),
-        );
-    }
-    // A prompt much longer than the recent ones decodes more slowly.
-    let mut recent_prompts: Vec<u64> = history
-        .iter()
-        .filter_map(|o| o.largest_prompt)
-        .filter(|prompt| Some(*prompt) != current.largest_prompt)
-        .collect();
-    recent_prompts.sort_unstable();
-    recent_prompts.dedup();
-    if let (Some(prompt), Some(&reference)) = (
-        current.largest_prompt,
-        recent_prompts.get(recent_prompts.len().saturating_sub(1) / 2),
-    ) {
-        if direction == ThroughputDirection::Down
-            && reference > 0
-            && prompt >= reference.saturating_add(CONTEXT_GROWTH_TOKENS)
-            && prompt >= reference * 3 / 2
-        {
-            push_correlation_factor(
-                &mut factors,
-                CorrelationCause::ContextGrowth,
-                80,
-                format!(
-                    "prompt {} ({:.1}× recent {})",
-                    compact_tokens(prompt),
-                    prompt as f64 / reference as f64,
-                    compact_tokens(reference)
-                ),
-            );
-        }
-    }
-
-    // What changed just before the drop began leads the explanation.
-    if direction == ThroughputDirection::Down {
-        let from = onset.saturating_sub(EVENT_LOOKBACK).max(1);
-        let events: Vec<Event> = (from..all.len())
-            .flat_map(|index| events_between(all[index - 1], all[index], index, thresholds))
-            .collect();
-        for event in events
-            .into_iter()
-            .filter(|event| still_holds(event.cause, all[event.index], current, thresholds))
-        {
-            // Nearest before the onset scores highest; changes during the
-            // drop may deepen it but did not start it.
-            let score = if event.index <= onset {
-                97 - (onset - event.index) as u8 * 4
-            } else {
-                78
-            };
-            let when = if event.index <= onset {
-                gap_label(event.at, all[onset].at)
-            } else {
-                " during the drop".into()
-            };
-            factors.push(CorrelationFactor {
-                cause: event.cause,
-                score,
-                evidence: format!("{}{when}", event.text),
-                onset: event.index <= onset,
-            });
-        }
-    }
-
-    // A condition that holds during the drop explains it only if it was not
-    // there, or was milder, while speed was normal. One that held just the
-    // same is not what changed: a serious one stays a possible reason and
-    // says so, a mild one drops out of the explanation.
-    let mut condition = |cause, score: u8, serious: bool, held: bool, evidence: String| {
-        let (score, evidence) = match (held, serious) {
-            (false, _) => (score, evidence),
-            (true, true) => (64, format!("{evidence} · {SAME_BEFORE}")),
-            (true, false) => (45, format!("{evidence} · {SAME_BEFORE}")),
-        };
-        push_correlation_factor(&mut factors, cause, score, evidence);
-    };
-
-    if current.thermal_limited {
-        condition(
-            CorrelationCause::Thermal,
-            95,
-            true,
-            before.is_some_and(|before| before.thermal),
-            "thermal limit".into(),
-        );
-    }
-
-    // A decoding runtime has no reason to touch its disk; when it does during
-    // a drop, it is loading or saving prompt cache instead of producing tokens.
-    if direction == ThroughputDirection::Down {
-        if let Some(disk) = current.disk_label() {
-            condition(
-                CorrelationCause::DiskIo,
-                76,
-                false,
-                before.is_some_and(|before| before.disk),
-                disk,
-            );
-        }
-    }
-
-    let was_pressure = before.map_or(0, |before| before.pressure);
-    match current.pressure {
-        4 => condition(
-            CorrelationCause::MemoryPressure,
-            100,
-            true,
-            was_pressure >= 4,
-            "memory pressure critical".into(),
-        ),
-        2 => condition(
-            CorrelationCause::MemoryPressure,
-            72,
-            false,
-            was_pressure >= 2,
-            "memory pressure watch".into(),
-        ),
-        _ => {}
-    }
-
-    if current.paging_rate >= thresholds.swap_warn_rate {
-        let critical = current.paging_rate >= thresholds.swap_critical_rate;
-        let was = before.map_or(0, |before| before.paging);
-        let grown = grew(current.paging_rate, was, thresholds.swap_warn_rate);
-        condition(
-            CorrelationCause::Paging,
-            if critical { 100 } else { 88 },
-            critical,
-            grown == Some(false),
-            match grown {
-                Some(true) => format!("paging {} (was {})", rate(current.paging_rate), rate(was)),
-                _ => format!("paging {}", rate(current.paging_rate)),
-            },
-        );
-    }
-
-    if current.compression_rate >= thresholds.compression_warn_rate {
-        let was = before.map_or(0, |before| before.compression);
-        let grown = grew(
-            current.compression_rate,
-            was,
-            thresholds.compression_warn_rate,
-        );
-        condition(
-            CorrelationCause::Compression,
-            68,
-            false,
-            grown == Some(false),
-            match grown {
-                Some(true) => format!(
-                    "compression {} (was {})",
-                    rate(current.compression_rate),
-                    rate(was)
-                ),
-                _ => format!("compression {}", rate(current.compression_rate)),
-            },
-        );
-    }
-
-    if let Some(waiting) = current.waiting_requests.filter(|waiting| *waiting > 0) {
-        condition(
-            CorrelationCause::Queueing,
-            if waiting > 1 { 82 } else { 70 },
-            false,
-            before.is_some_and(|before| before.waiting >= waiting),
-            format!(
-                "queue {waiting} waiting · active {}",
-                count(current.active_requests)
-            ),
-        );
-    }
-
-    let current_gpu = [current.gpu_util, current.renderer_util, current.tiler_util]
-        .into_iter()
-        .flatten()
-        .max();
-    if let Some(gpu) = current_gpu {
-        if u64::from(gpu) >= thresholds.gpu_critical_load {
-            let crossed = previous
-                .and_then(|previous| {
-                    [
-                        previous.gpu_util,
-                        previous.renderer_util,
-                        previous.tiler_util,
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .max()
-                })
-                .is_none_or(|value| u64::from(value) < thresholds.gpu_critical_load);
-            push_correlation_factor(
-                &mut factors,
-                CorrelationCause::GpuSaturation,
-                // Decode keeps a GPU saturated, and returns it there after
-                // any pause: a crossing is supporting evidence at most.
-                if crossed { 62 } else { 50 },
-                format!("GPU {gpu}% busy"),
-            );
-        } else if u64::from(gpu) >= thresholds.gpu_warn_load {
-            push_correlation_factor(
-                &mut factors,
-                CorrelationCause::GpuSaturation,
-                40,
-                format!("GPU {gpu}% busy"),
-            );
-        }
-    }
-
-    let current_metal_ratio = fraction(current.metal_in_use, current.metal_alloc);
-    if let Some(ratio) = current_metal_ratio.filter(|ratio| *ratio >= 0.90) {
-        let crossed = previous
-            .and_then(|previous| fraction(previous.metal_in_use, previous.metal_alloc))
-            .is_none_or(|value| value < 0.90);
-        let evidence = match (current.metal_in_use, current.metal_alloc) {
-            (Some(used), Some(allocated)) => format!(
-                "Metal MEM {:.0}% ({}/{})",
-                ratio * 100.0,
-                bytes(used),
-                bytes(allocated)
-            ),
-            _ => format!("Metal MEM {:.0}%", ratio * 100.0),
-        };
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::MetalMemory,
-            if crossed { 90 } else { 55 },
-            evidence,
-        );
-    }
-
-    let model_memory_delta = previous.and_then(|previous| {
-        current
-            .model_memory
-            .zip(previous.model_memory)
-            .map(|(current, previous)| current.saturating_sub(previous))
-    });
-    let current_model_ratio = fraction(current.model_memory, current.model_memory_max);
-    let mut model_memory_evidence = Vec::new();
-    let mut model_memory_score = 0;
-    if let Some(ratio) = current_model_ratio.filter(|ratio| *ratio >= 0.90) {
-        // At its ceiling while speed was normal too: not what changed.
-        let held = before.is_some_and(|before| before.model >= 0.90);
-        model_memory_score = if held { 45 } else { 84 };
-        model_memory_evidence.push(if held {
-            format!("model MEM {:.0}% of ceiling · {SAME_BEFORE}", ratio * 100.0)
-        } else {
-            format!("model MEM {:.0}% of ceiling", ratio * 100.0)
+        let seconds = self
+            .episode
+            .as_ref()
+            .map_or(0.0, |open| seconds_between(open.began, current.at));
+        let episode = self.episode.as_mut().map(|open| {
+            open.samples += 1;
+            DropEpisode {
+                reference: open.reference,
+                low: open.low,
+                seconds,
+                samples: open.samples,
+            }
         });
-    }
-    if let Some(delta) = model_memory_delta.filter(|delta| *delta >= MODEL_MEMORY_GROWTH) {
-        model_memory_score = model_memory_score.max(72);
-        model_memory_evidence.push(format!("model MEM +{}", bytes(delta)));
-    }
-    if model_memory_score > 0 {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::ModelMemory,
-            model_memory_score,
-            model_memory_evidence.join(" · "),
-        );
+        CorrelationInsight {
+            direction: ThroughputDirection::Down,
+            cause: CorrelationCause::Stall,
+            summary: format!("GEN stalled · {evidence}"),
+            details: format!("{} · {evidence}", CorrelationCause::Stall.label()),
+            lead: evidence,
+            stall_seconds: Some(idle),
+            event_key: Some(CorrelationKey {
+                direction: ThroughputDirection::Down,
+                cause: CorrelationCause::Stall,
+            }),
+            delta_percent: None,
+            episode,
+            ended: None,
+            repeat: false,
+            slow: true,
+            unusual: Vec::new(),
+        }
     }
 
-    let context_delta = previous.and_then(|previous| {
-        current
-            .context_tokens
-            .zip(previous.context_tokens)
-            .map(|(current, previous)| current.saturating_sub(previous))
-    });
-    let mut context_evidence = Vec::new();
-    let mut context_score = 0;
-    if let Some(delta) = context_delta.filter(|delta| *delta >= CONTEXT_GROWTH_TOKENS) {
-        context_score = 82;
-        if let Some(total) = current.context_tokens {
-            context_evidence.push(format!(
-                "context +{} → {}",
-                compact_tokens(delta),
-                compact_tokens(total)
-            ));
-        }
-    } else if direction == ThroughputDirection::Down
-        && current
-            .context_tokens
-            .is_some_and(|tokens| tokens >= 16_384)
-    {
-        context_score = 48;
-        context_evidence.push(format!(
-            "context {}",
-            compact_tokens(current.context_tokens.unwrap_or_default())
-        ));
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
     }
-    if context_score > 0 {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::ContextGrowth,
-            context_score,
-            context_evidence.join(" · "),
-        );
-    }
+}
 
-    if direction == ThroughputDirection::Down && factors.is_empty() {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::Runtime,
-            20,
-            "no matching system signal; workload/runtime changed",
-        );
-    }
-    // When a condition is both present and seen arriving, its arrival is the
-    // evidence: it says when, and carries the condition's own weight.
-    for index in 0..factors.len() {
-        if factors[index].onset {
-            let cause = factors[index].cause;
-            factors[index].score = factors
-                .iter()
-                .filter(|factor| factor.cause == cause && !factor.onset)
-                .map(|factor| factor.score)
-                .fold(factors[index].score, u8::max);
-        }
-    }
-    factors.sort_by_key(|factor| std::cmp::Reverse(factor.score));
-    // One line per cause: the strongest evidence for it, usually its onset.
-    let mut seen = Vec::new();
-    factors.retain(|factor| {
-        let first = !seen.contains(&factor.cause);
-        seen.push(factor.cause);
-        first
-    });
-
-    let cause = factors
-        .first()
-        .map(|factor| factor.cause)
-        .unwrap_or_default();
-    let confidence = factors.first().map(|factor| factor.score).unwrap_or(0);
-    let rate_label = match (current_tps, baseline, direction, delta_percent) {
-        _ if stalled.is_some() => "GEN stalled".to_owned(),
-        // Against earlier requests of this size, not this one's own speed.
-        (Some(current), Some(baseline), ThroughputDirection::Down, Some(percent)) if slow_start => {
-            format!(
-                "GEN ↓{:.1}% vs earlier requests ({baseline:.1}→{current:.1} tok/s)",
-                percent.abs()
-            )
-        }
-        (Some(current), Some(baseline), ThroughputDirection::Down, Some(percent)) => format!(
-            "GEN ↓{:.1}% ({baseline:.1}→{current:.1} tok/s)",
-            percent.abs()
-        ),
-        (Some(current), Some(baseline), ThroughputDirection::Up, Some(percent)) => {
-            format!("GEN ↑{percent:.1}% ({baseline:.1}→{current:.1} tok/s)")
-        }
-        (Some(current), _, _, _) => format!("GEN {current:.1} tok/s"),
-        _ => String::new(),
-    };
-    // A condition that holds through normal decoding (a busy GPU, a full
-    // Metal heap) scores below 60. It stays in the details but is never
-    // offered as the explanation.
-    let evidence = factors
-        .iter()
-        .filter(|factor| factor.score >= 60)
-        .take(2)
-        .map(|factor| factor.evidence.as_str())
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let summary = if rate_label.is_empty() {
-        String::new()
-    } else if evidence.is_empty() {
-        if direction == ThroughputDirection::Down {
-            format!("{rate_label} · no matching system signal")
-        } else {
-            String::new()
-        }
-    } else {
-        format!("{rate_label} · correlated: {evidence}")
-    };
-    let details = if rate_label.is_empty() || factors.is_empty() {
-        String::new()
-    } else {
-        let all_evidence = factors
+impl CorrelationObservation {
+    pub(crate) fn from_sample(sample: &Sample) -> Self {
+        // Runtimes report prefill progress only while a prompt is being read.
+        let running: Vec<_> = sample
+            .llm_requests
             .iter()
-            .map(|factor| factor.evidence.as_str())
-            .collect::<Vec<_>>()
-            .join(" · ");
-        format!("{} · {all_evidence}", cause.label())
-    };
-    let event_key =
-        (direction == ThroughputDirection::Down).then_some(CorrelationKey { direction, cause });
-
-    let insight = CorrelationInsight {
-        direction,
-        cause,
-        confidence,
-        summary,
-        details,
-        lead: factors
-            .first()
-            .filter(|factor| factor.score >= 60)
-            .map(|factor| factor.evidence.clone())
-            .unwrap_or_default(),
-        stall_seconds: stalled,
-        event_key,
-        delta_percent,
-        episode: None,
-        ended: None,
-        repeat: false,
-    };
-    let trace = Trace {
-        onset_ago: all.len() - 1 - onset,
-        onset_at: all[onset].at,
-        before,
-        onset_lead: factors
-            .into_iter()
-            .next()
-            .filter(|factor| factor.onset && factor.score >= 60),
-    };
-    (insight, trace)
-}
-
-pub(crate) fn push_correlation_factor(
-    factors: &mut Vec<CorrelationFactor>,
-    cause: CorrelationCause,
-    score: u8,
-    evidence: impl Into<String>,
-) {
-    factors.push(CorrelationFactor {
-        cause,
-        score,
-        evidence: evidence.into(),
-        onset: false,
-    });
-}
-
-/// A robust standard deviation: the median absolute deviation, scaled to
-/// match a normal spread, so one burst or stall does not inflate it.
-fn spread(values: &[f64]) -> f64 {
-    let middle = median(values.to_vec());
-    median(values.iter().map(|value| (value - middle).abs()).collect()) * 1.4826
-}
-
-fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(f64::total_cmp);
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) / 2.0
-    } else {
-        values[middle]
+            .filter(|r| !r.completed && !r.queued)
+            .collect();
+        let prefilling: Vec<_> = running.iter().filter(|r| r.prefilled.is_some()).collect();
+        let generating: Vec<_> = running.iter().filter(|r| r.prefilled.is_none()).collect();
+        Self {
+            provider: sample.llm_provider.clone(),
+            model: sample.llm_model.clone(),
+            generation_tps: sample
+                .llm_generation_tps_live
+                .then_some(sample.llm_generation_tps)
+                .flatten(),
+            gpu_util: sample.gpu_util,
+            renderer_util: sample.metal.renderer_util,
+            tiler_util: sample.metal.tiler_util,
+            paging_rate: sample.paging_churn(),
+            compression_rate: sample.compress.saturating_add(sample.decompress),
+            pressure: pressure_rank(&sample.pressure),
+            thermal_limited: sample.thermal.starts_with("limited")
+                || sample.thermal == "warning reported",
+            model_memory: sample.llm_model_memory,
+            model_memory_max: sample.llm_model_memory_max,
+            metal_in_use: sample.gpu_in_use,
+            metal_alloc: sample.gpu_alloc,
+            active_requests: sample.llm_active_requests,
+            waiting_requests: sample.llm_waiting_requests,
+            prefilling: prefilling.len() as u64,
+            generating: (running.len() - prefilling.len()) as u64,
+            largest_prompt: running
+                .iter()
+                .map(|r| r.prompt)
+                .max()
+                .or(sample.llm_prompt_tokens),
+            prefill_prompt: prefilling.iter().map(|r| r.prompt).max(),
+            at: sample.llm_observed_at.or_else(|| Some(SystemTime::now())),
+            stalled_for: running
+                .iter()
+                .filter(|r| r.prefilled.is_none())
+                .filter_map(|r| r.idle_for)
+                .map(|idle| idle.as_secs_f64())
+                .reduce(f64::max),
+            output_tokens: match generating.as_slice() {
+                [only] => only.output,
+                _ => None,
+            },
+            disk: sample.disk,
+            ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
+        }
     }
 }
 

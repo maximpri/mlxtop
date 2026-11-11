@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Combine host and provider observations into bounded histories and snapshots.
 use crate::analysis::threshold_with_hysteresis;
-use crate::analysis::{classify, signal_summary, CorrelationEngine};
+use crate::analysis::{classify, signal_summary, CorrelationEngine, SLOW_SAMPLES};
+use crate::chart_navigation::Chart;
 use crate::completion_log::read_llm_stats;
 use crate::config::{Config, JournalConfig, OmxConfig, Thresholds};
 use crate::domain::{
@@ -14,8 +15,8 @@ use crate::formatting::{
     pressure_state_label, rate,
 };
 use crate::history::{
-    baseline_tone, compression_tone, delta, paging_tone, push_history, push_history_with_tone,
-    rate_bytes, signed_rate_bytes,
+    compression_tone, delta, paging_tone, push_history, push_history_with_tone, rate_bytes,
+    signed_rate_bytes,
 };
 use crate::host::{now_clock, Host, Platform};
 use crate::logging::{
@@ -537,15 +538,12 @@ impl Collector {
             self.history_limit,
             self.thresholds,
         );
-        // Prefill has no fixed threshold: grade against its own rolling baseline.
+        // A prefill speed has no threshold and no grade: it is a reading.
         let prefill = chart_rate_value(&sample, ChartMetric::Prefill);
-        let prefill_tone = prefill
-            .map(|value| baseline_tone(value, &self.prefill_history))
-            .unwrap_or(Tone::Muted);
         push_history_with_tone(
             &mut self.prefill_history,
             prefill,
-            prefill_tone,
+            Tone::Green,
             self.history_limit,
         );
         push_history(
@@ -558,30 +556,17 @@ impl Collector {
             self.history_limit,
             self.thresholds,
         );
-        // Disk work is graded by what it coincides with: named as the reason
-        // generation slowed or stalled, it takes that finding's colour.
-        let disk_named = matches!(
-            sample.correlation.cause,
-            CorrelationCause::DiskIo | CorrelationCause::Stall
-        ) && sample.correlation.is_material_drop()
-            && (sample.correlation.lead.contains("disk ")
-                || sample.correlation.lead.contains("SSD cache"));
         push_history_with_tone(
             &mut self.disk_history,
             sample.disk.rate(),
-            if disk_named {
-                sample.correlation.tone()
-            } else {
-                Tone::Cyan
-            },
+            Tone::Cyan,
             self.history_limit,
         );
+        // Generation has no threshold either: a sample is its usual speed
+        // or, marked below, unusually slow.
         if let Some(point) = self.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
                 Tone::Muted
-            } else if sample.correlation.is_material_drop() {
-                // Graded against the rolling baseline, like the assessment.
-                sample.correlation.tone()
             } else {
                 Tone::Green
             };
@@ -633,8 +618,7 @@ impl Collector {
             self.thresholds,
         );
 
-        self.shade_drop(previous.as_ref(), &sample);
-
+        self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
         diagnostics_log(
             "INFO",
@@ -668,30 +652,48 @@ impl Collector {
         sample
     }
 
-    /// Every chart shades the samples of a slowdown or stall, back to the
-    /// first slow one, so what each signal did then lines up by eye.
-    pub(crate) fn shade_drop(&mut self, previous: Option<&Sample>, sample: &Sample) {
-        if !sample.correlation.is_material_drop() {
+    /// Draws a slowdown where it happened, and nowhere else: its samples
+    /// take the anomaly colour on the generation chart and on the chart of
+    /// each signal that was unusual with it. A slowdown is known at its
+    /// third slow sample, so the two before it are marked then.
+    pub(crate) fn mark_unusual(&mut self, sample: &Sample) {
+        let insight = &sample.correlation;
+        if !insight.is_material_drop() {
             return;
         }
-        let tone = sample.correlation.tone();
-        let began = previous.is_none_or(|previous| !previous.correlation.is_material_drop());
-        let samples = match sample.correlation.episode {
-            Some(episode) if began => episode.samples as usize,
-            _ => 1,
-        };
-        for history in [
-            &mut self.generation_history,
-            &mut self.prefill_history,
-            &mut self.cache_history,
-            &mut self.disk_history,
-            &mut self.load_history,
-            &mut self.swap_history,
-            &mut self.compression_history,
-            &mut self.gpu_history,
-        ] {
-            for point in history.iter_mut().rev().take(samples) {
-                point.drop = Some(tone);
+        let began = insight.stall_seconds.is_none()
+            && insight
+                .episode
+                .is_some_and(|episode| episode.samples as usize == SLOW_SAMPLES);
+        let span = if began { SLOW_SAMPLES } else { 1 };
+        let mut charts: Vec<Chart> = insight
+            .unusual
+            .iter()
+            .filter_map(|cause| crate::drop_marks::chart_of(*cause))
+            .chain(crate::drop_marks::linked(insight))
+            .collect();
+        if insight.slow {
+            charts.push(Chart::Generation);
+        }
+        for chart in charts {
+            let history = match chart {
+                Chart::Generation => &mut self.generation_history,
+                Chart::Prefill => &mut self.prefill_history,
+                Chart::Cache => &mut self.disk_history,
+                Chart::Memory => &mut self.load_history,
+                Chart::Paging => &mut self.swap_history,
+                Chart::Compression => &mut self.compression_history,
+                Chart::Gpu => &mut self.gpu_history,
+                // Drawn per request, not per sample: the panel is tagged.
+                Chart::Prompt | Chart::Queue | Chart::Latency => continue,
+            };
+            for point in history
+                .iter_mut()
+                .rev()
+                .take(span)
+                .filter(|point| point.value.is_some())
+            {
+                point.tone = Tone::Unusual;
             }
         }
     }
@@ -893,20 +895,12 @@ impl Collector {
                 } else if insight.lead.is_empty() {
                     (
                         "SLOWDOWN",
-                        format!(
-                            "{} · no change on the host explains it",
-                            insight.rate_label()
-                        ),
+                        format!("{} · nothing else unusual", insight.rate_label()),
                     )
                 } else {
                     (
                         "SLOWDOWN",
-                        format!(
-                            "{} · {} · {} confidence",
-                            insight.rate_label(),
-                            insight.lead,
-                            insight.confidence_label()
-                        ),
+                        format!("{} · {}", insight.rate_label(), insight.lead),
                     )
                 };
                 let next = crate::diagnosis::slowdown_next_step(sample);
@@ -947,7 +941,7 @@ impl Collector {
                     add(
                         "SETTLED",
                         format!(
-                            "holding {:.1} tok/s for {:.0}s, down from {:.1} · no host cause; now its normal speed",
+                            "holding {:.1} tok/s for {:.0}s, down from {:.1} · nothing else unusual; now the usual speed",
                             end.rate, end.seconds, end.reference
                         ),
                         Tone::Muted,

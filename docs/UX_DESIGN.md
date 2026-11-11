@@ -143,7 +143,8 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Resident RAM | Bytes and percentage; the PRESSURE label and the history's ribbon carry OS pressure severity |
 | RAM composition | Wired blue, app cyan, compressed and cache two greys of different lightness, free empty; softened toward the panel in the history |
 | GPU utilization | Green/yellow/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
-| Throughput | Green at or above the rolling baseline; yellow and red for measured drops of 10% and 30% |
+| Throughput | Green; a speed has no threshold and no grade |
+| Unusual samples | Magenta, on every time chart, and used for nothing else: a sample taken during a slowdown on the generation chart, and on the chart of each signal that was unusual with it |
 | Cache reuse | Green from 50%, yellow from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
 | Queue waiting series | Yellow only while requests wait in view; muted at zero |
 | Supporting text, unknown data, historical advice | Muted |
@@ -192,58 +193,53 @@ colors in time-series history instead of recoloring old samples on refresh.
 - Suggestions must follow visible evidence. Prompt history emphasizes actual
   token counts and the recent median. GPU utilization alone establishes
   neither a slowdown nor a compute bottleneck. Diagnostics should pair a
-  measured throughput drop with a supporting signal, label correlation and
-  confidence, and give a short testable next step. Correlate events, not
-  just states: find where the drop began and lead with the change just
-  before it that still holds (a prefill starting beside generation, a request
-  joining, a prompt jump, a pressure, paging, thermal or Metal-memory onset),
-  saying how long before the drop it happened. Conditions that hold through
-  normal work, such as a saturated GPU or a full Metal heap, rank below any
-  such change and stay in the details; they are never offered as the reason.
+  measured throughput drop with what else was unusual, and give a short
+  testable next step.
   Measure decode speed as tokens produced between polls, not a runtime's
   average since the request began, which hides a stall. A generating request
   with no token for 1.5 s has stalled: say so first, with what the host was
-  doing meanwhile, and journal its end with its length. Judge one request
-  against its own earlier speed, smoothed over three polls, and only beyond
-  twice its own jitter: speculative decoding swings a third poll to poll, and
-  a request boundary is not a slowdown. When generation slows, its chart's
-  bottom edge names the reason (`▼ …`) in the drop's colour, and Journal
-  writes one STALL or SLOWDOWN row with the reason and the next step. A
-  decoding runtime has no reason to touch its disk: storage traffic from 16
-  MiB/s or SSD-cache blocks moved during a drop are named (`disk read 850
-  MiB/s · 38 SSD cache blocks loaded · SSD cache full`), as an onset when
-  they began before it, and the next step points at the cache disk.
-- A slowdown is one episode, from its first slow sample until speed returns.
-  The speed it fell from is fixed when it begins: a rolling baseline would
-  absorb the slow samples within seconds and call a slowdown that is still
-  going on normal. The change that began it stays its reason for as long as
-  that change holds, also after it has left the recent history. Journal
-  writes its start once, each further cause once, and its end: `RECOVERED`
-  with how long it lasted and its lowest speed, or `SETTLED` when it held for
-  30 s with nothing on the host to explain it (or only a longer prompt) and
-  is from then on the request's normal speed.
-- Weigh a condition against what it was while speed was normal. Paging,
-  compression, pressure, thermal limiting, a queue, disk work or concurrent
-  requests that held at the same level just before the drop are not what
-  changed: mild ones drop out of the explanation, serious ones (critical
-  pressure or paging, thermal limiting) stay at medium confidence and say
-  `same before the drop`. A rate that grew by half or more says what it was
-  (`paging 96.0 MiB/s (was 48.0 MiB/s)`).
-- A request slow from its first samples has no drop of its own. Hold it to
-  earlier requests whose prompts were half to double its size, once there are
-  two: 40% slower than their middle speed is a slowdown only when the host
-  also shows a reason, and the rate says what it is compared with
-  (`GEN ↓56.5% vs earlier requests`). Content alone differs by a third.
-- Draw a slowdown where it happened. Every time chart shades the columns
-  sampled during a slowdown or stall (a dark tint of the finding's colour,
-  behind the chart's own marks), back to its first slow sample, so what each
-  signal did then lines up by eye; the shading stays in the history after it
-  ends. While it lasts, the generation chart draws the speed it fell from as
-  a dashed line in the slowdown's colour with its value on the axis: the gap
-  under it is the drop. The panel that shows the signal named as the reason
-  takes the slowdown's colour on its border and `▼ GEN` (`▼ STALL`) at the
-  right of its bottom edge, the same mark the generation chart puts before
-  the reason. A bottom summary that would run into the tag gives way to it.
+  doing meanwhile, and journal its end with its length.
+- Find slowdowns by anomaly detection, with one rule for every signal. A
+  signal has a usual value (the middle of its last 300 samples taken while
+  generation ran at its usual speed) and a usual spread (how far it
+  ordinarily strays from that). A sample is unusual when it is at least 3.5
+  spreads from the usual value and far enough to matter. A runtime whose
+  speed swings between 20 and 120 tok/s has a wide spread and those swings
+  are usual; one that holds 50 ± 1 shows a drop to 38. Fixed percentages do
+  not survive speculative decoding: replayed over 76 minutes of one server's
+  generation, the 10% rule this replaced journaled 474 slowdowns; this rule
+  journals 8.
+- Generation is slow when it is unusually far below its usual speed, by at
+  least a fifth and 2 tok/s, for three samples in a row. A slowdown ends
+  after three samples back at the usual speed (`RECOVERED`). The usual
+  values are fixed while it lasts, so a slowdown that is still going on does
+  not become usual by going on. It waits while nothing generates, and is
+  over after 30 idle seconds.
+- A slowdown's reason is whatever else is unusual at the same time, judged
+  by the same rule against its own usual value: thermal limiting, memory
+  pressure, paging, the runtime's disk work, a prompt prefilling beside the
+  answer, requests running, prompt size, compression, the queue, model and
+  Metal memory. The host's limits come first when several are unusual. Each
+  is said beside its usual value (`paging 96.0 MiB/s (usual 2.0 MiB/s)`,
+  `2 requests running (usual 1)`). A signal at its usual level is not the
+  reason, however high that level is. With nothing else unusual, say so
+  (`nothing else unusual`): never guess. Such a slowdown, or one with only a
+  longer prompt, becomes the usual speed after 30 s (`SETTLED`).
+- Journal writes a slowdown's start once, each further reason once, and its
+  end. A slowdown that repeats the last one's reason within a minute is the
+  same story: no new rows.
+- Draw a slowdown with one colour, on the samples it concerns, and nowhere
+  else. Its samples are magenta on the generation chart, and so are the
+  samples of each signal that was unusual with it on that signal's chart:
+  the two line up by eye. No chart is tinted behind its marks, and a chart
+  whose signal was usual is untouched. While a slowdown lasts, the
+  generation chart draws its usual speed as a dashed magenta line with its
+  value on the axis (the gap under it is the drop) and names the reason
+  under its bars (`▼ paging 96.0 MiB/s (usual 2.0 MiB/s)`, or
+  `▼ nothing else unusual`). The panel that shows the reason takes a magenta
+  border and says what it did at the right of its bottom edge:
+  `▲ slowed GEN ↓50%` (`▲ stalled GEN`), shortened to `▼ GEN` on a narrow
+  panel. A bottom summary that would run into the tag gives way to it.
   The assessment says how long a slowdown has lasted from 5 s.
 - Journal gives a request one row as it starts (`PROMPT id · 67.8k prompt ·
   99% cached`) and one as it ends (`DONE id · 1.2k out`). The runtime and

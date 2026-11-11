@@ -357,7 +357,6 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
         correlation: CorrelationInsight {
             summary: "GEN 20.0 tok/s".into(),
             details: "no factor".into(),
-            confidence: 60,
             ..CorrelationInsight::default()
         },
         ..Sample::default()
@@ -378,8 +377,8 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     assert!(text.contains("PROCESS OS   pid 42 · footprint 3.0 GiB · lifetime peak 4.0 GiB"));
     assert!(text.contains("growth +1.0 KiB/s"));
     assert!(text.contains("MLX          version 0.29"));
-    assert!(text.contains("CORRELATION   GEN 20.0 tok/s"));
-    assert!(text.contains("EVIDENCE      no factor · medium confidence"));
+    assert!(text.contains("SLOWDOWN      GEN 20.0 tok/s"));
+    assert!(text.contains("UNUSUAL       no factor"));
     assert!(text.contains("DIAGNOSIS    "));
 
     let linux = report(&sample, Platform::Linux);
@@ -422,7 +421,7 @@ fn static_report_marks_missing_swap_and_unknown_hardware() {
     assert!(empty.contains("METAL        unavailable · — cores · GPU — "));
     assert!(empty.contains("MEMORY       — resident"));
     assert!(empty.contains("MLX          version — · active —"));
-    assert!(!empty.contains("CORRELATION"));
+    assert!(!empty.contains("SLOWDOWN  "));
     assert!(!empty.contains("PROCESS OS"));
     let unallocated = Sample {
         swap_available: true,
@@ -1068,7 +1067,7 @@ fn enum_labels_and_tones_are_stable() {
     assert_eq!(TelemetrySource::Report.label(), "reported usage");
     assert_eq!(TopSort::Name.next(), TopSort::Rss);
     for (cause, label, tone) in [
-        (CorrelationCause::None, "no correlated cause", Tone::Muted),
+        (CorrelationCause::None, "nothing else unusual", Tone::Muted),
         (CorrelationCause::Paging, "paging", Tone::Red),
         (
             CorrelationCause::Compression,
@@ -1086,11 +1085,6 @@ fn enum_labels_and_tones_are_stable() {
             "Metal memory pressure",
             Tone::Yellow,
         ),
-        (
-            CorrelationCause::GpuSaturation,
-            "GPU saturation",
-            Tone::Yellow,
-        ),
         (CorrelationCause::Queueing, "queueing", Tone::Yellow),
         (
             CorrelationCause::ContextGrowth,
@@ -1102,49 +1096,23 @@ fn enum_labels_and_tones_are_stable() {
             "model memory growth",
             Tone::Yellow,
         ),
-        (
-            CorrelationCause::Runtime,
-            "workload/runtime change",
-            Tone::Yellow,
-        ),
     ] {
         assert_eq!(cause.label(), label);
         assert_eq!(cause.tone(), tone);
     }
-    let insight = |direction, cause, confidence| CorrelationInsight {
+    let insight = |direction, cause| CorrelationInsight {
         direction,
         cause,
-        confidence,
         ..CorrelationInsight::default()
     };
     assert_eq!(
-        insight(ThroughputDirection::Up, CorrelationCause::None, 0).tone(),
-        Tone::Green
-    );
-    assert_eq!(
-        insight(ThroughputDirection::Flat, CorrelationCause::Paging, 0).tone(),
+        insight(ThroughputDirection::Flat, CorrelationCause::Paging).tone(),
         Tone::Red
     );
     assert_eq!(
-        insight(ThroughputDirection::Down, CorrelationCause::Queueing, 0).tone(),
+        insight(ThroughputDirection::Down, CorrelationCause::Queueing).tone(),
         Tone::Yellow
     );
-    for (confidence, label) in [
-        (90, "high"),
-        (60, "medium"),
-        (10, "low"),
-        (0, "unavailable"),
-    ] {
-        assert_eq!(
-            insight(
-                ThroughputDirection::Down,
-                CorrelationCause::Runtime,
-                confidence
-            )
-            .confidence_label(),
-            label
-        );
-    }
     for (filter, kind) in [
         (JournalFilter::All, EventKind::Queue),
         (JournalFilter::Llm, EventKind::Queue),
@@ -1290,192 +1258,6 @@ fn gpu_and_llm_summaries_prefer_correlation_and_rates() {
         ..Sample::default()
     };
     assert!(signal_summary(&ready).starts_with("2 process(es) · "));
-}
-
-#[test]
-fn correlation_evidence_labels_name_the_measured_signal() {
-    let with = |cause, sample: Sample| {
-        correlation_evidence_label(&Sample {
-            correlation: CorrelationInsight {
-                cause,
-                ..CorrelationInsight::default()
-            },
-            ..sample
-        })
-    };
-    let base = Sample::default;
-    assert_eq!(
-        with(
-            CorrelationCause::Paging,
-            Sample {
-                swap_in: 1024,
-                ..base()
-            }
-        ),
-        "I/O 1.0 KiB/s"
-    );
-    assert_eq!(with(CorrelationCause::Paging, base()), "");
-    assert_eq!(
-        with(
-            CorrelationCause::Compression,
-            Sample {
-                compress: 2048,
-                ..base()
-            }
-        ),
-        "compress 2.0 KiB/s"
-    );
-    assert_eq!(with(CorrelationCause::Compression, base()), "");
-    assert!(with(CorrelationCause::MemoryPressure, base()).starts_with("pressure "));
-    assert_eq!(with(CorrelationCause::Thermal, base()), "thermal limit");
-    assert_eq!(
-        with(
-            CorrelationCause::MetalMemory,
-            Sample {
-                gpu_in_use: Some(9),
-                gpu_alloc: Some(10),
-                ..base()
-            }
-        ),
-        "Metal mem 90%"
-    );
-    assert_eq!(with(CorrelationCause::MetalMemory, base()), "Metal mem");
-    let mut gpu = base();
-    gpu.metal.tiler_util = Some(97);
-    gpu.gpu_util = Some(50);
-    assert_eq!(with(CorrelationCause::GpuSaturation, gpu), "GPU 97%");
-    assert_eq!(with(CorrelationCause::GpuSaturation, base()), "GPU");
-    assert_eq!(
-        with(
-            CorrelationCause::Queueing,
-            Sample {
-                llm_waiting_requests: Some(3),
-                ..base()
-            }
-        ),
-        "queue 3 waiting"
-    );
-    assert_eq!(with(CorrelationCause::Queueing, base()), "queueing");
-    assert_eq!(
-        with(
-            CorrelationCause::ContextGrowth,
-            Sample {
-                llm_prompt_tokens: Some(2_500_000),
-                ..base()
-            }
-        ),
-        "context 2.5M"
-    );
-    assert_eq!(with(CorrelationCause::ContextGrowth, base()), "context/KV");
-    assert_eq!(
-        with(
-            CorrelationCause::ModelMemory,
-            Sample {
-                llm_model_memory: Some(3),
-                llm_model_memory_max: Some(4),
-                ..base()
-            }
-        ),
-        "model mem 75%"
-    );
-    assert_eq!(with(CorrelationCause::ModelMemory, base()), "model memory");
-    assert_eq!(with(CorrelationCause::Runtime, base()), "workload/runtime");
-    assert_eq!(with(CorrelationCause::None, base()), "");
-}
-
-fn live(tps: f64) -> Sample {
-    Sample {
-        llm_provider: "oMLX".into(),
-        llm_model: "m".into(),
-        llm_generation_tps: Some(tps),
-        llm_generation_tps_live: true,
-        pressure: "GREEN".into(),
-        thermal: "no warning".into(),
-        ..Sample::default()
-    }
-}
-
-#[test]
-fn correlation_engine_explains_throughput_changes_against_a_median_baseline() {
-    let thresholds = Thresholds::default();
-    let mut engine = CorrelationEngine::default();
-    for tps in [50.0, 52.0, 48.0, 50.0] {
-        engine.observe(&live(tps), thresholds);
-    }
-    assert_eq!(
-        engine.baseline("oMLX", "m"),
-        Some(50.0),
-        "even-length median"
-    );
-    let up = engine.observe(&live(70.0), thresholds);
-    assert_eq!(up.direction, ThroughputDirection::Up);
-    assert_eq!(
-        up.summary, "",
-        "a rise without a factor needs no explanation"
-    );
-    let mut busy = live(70.0);
-    busy.gpu_util = Some(85);
-    let up = engine.observe(&busy, thresholds);
-    // A busy GPU is what decoding looks like; it never explains a change.
-    assert_eq!(up.direction, ThroughputDirection::Up);
-    assert_eq!(up.summary, "", "{}", up.summary);
-    assert!(up.details.contains("GPU 85% busy"), "{}", up.details);
-    let flat = engine.observe(&live(50.5), thresholds);
-    assert_eq!(flat.direction, ThroughputDirection::Flat);
-
-    let mut queued = live(30.0);
-    queued.llm_waiting_requests = Some(1);
-    queued.llm_active_requests = Some(1);
-    let insight = engine.observe(&queued, thresholds);
-    assert_eq!(insight.direction, ThroughputDirection::Down);
-    assert_eq!(insight.cause, CorrelationCause::Queueing);
-    assert_eq!(insight.confidence, 70);
-
-    let mut hot = live(30.0);
-    hot.thermal = "limited 60%".into();
-    hot.pressure = "RED".into();
-    let insight = engine.observe(&hot, thresholds);
-    assert_eq!(insight.cause, CorrelationCause::MemoryPressure);
-    assert_eq!(insight.confidence, 100);
-
-    let mut gpu = live(30.0);
-    gpu.gpu_util = Some(85);
-    let insight = engine.observe(&gpu, thresholds);
-    assert_eq!(insight.cause, CorrelationCause::GpuSaturation);
-    // A busy GPU with nothing else to show is weak evidence on its own.
-    assert_eq!(insight.confidence, 40);
-
-    let mut model = live(30.0);
-    model.llm_model_memory = Some(95);
-    model.llm_model_memory_max = Some(100);
-    let insight = engine.observe(&model, thresholds);
-    assert_eq!(insight.cause, CorrelationCause::ModelMemory);
-    assert!(insight.details.contains("model MEM 95% of ceiling"));
-
-    let mut grow = live(30.0);
-    grow.llm_model_memory = Some(1);
-    engine.observe(&grow, thresholds);
-    grow.llm_model_memory = Some(1 + MODEL_MEMORY_GROWTH);
-    let insight = engine.observe(&grow, thresholds);
-    assert_eq!(insight.cause, CorrelationCause::ModelMemory);
-    assert!(insight.details.contains("model MEM +256.0 MiB"));
-
-    let mut long = live(30.0);
-    long.llm_prompt_tokens = Some(20_000);
-    let insight = engine.observe(&long, thresholds);
-    assert_eq!(insight.cause, CorrelationCause::ContextGrowth);
-    assert_eq!(insight.confidence, 48);
-    assert!(insight.details.contains("context 20.0k"));
-
-    let mut slow = live(30.0);
-    slow.metal.renderer_util = None;
-    let insight = engine.observe(&slow, thresholds);
-    assert_eq!(insight.cause, CorrelationCause::Runtime);
-
-    for _ in 0..CORRELATION_HISTORY_LIMIT + 4 {
-        engine.observe(&live(40.0), thresholds);
-    }
-    assert_eq!(engine.observations.len(), CORRELATION_HISTORY_LIMIT);
 }
 
 #[test]

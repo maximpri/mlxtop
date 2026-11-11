@@ -66,16 +66,15 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
     let mut sample = busy_sample();
     sample.correlation = CorrelationInsight {
         direction: ThroughputDirection::Down,
-        cause: CorrelationCause::GpuSaturation,
-        confidence: 72,
-        summary: "GEN ↓20.0% (30.0→24.0 tok/s) · correlated: GPU 99% busy".into(),
+        cause: CorrelationCause::Concurrency,
+        summary: "GEN ↓20.0% (30.0→24.0 tok/s) · unusual: 2 requests running (usual 1)".into(),
+        lead: "2 requests running (usual 1)".into(),
         ..CorrelationInsight::default()
     };
     let finding = assess(&sample);
     assert_eq!(finding.title, "Generation slowed");
     assert!(finding.evidence.contains("30.0→24.0 tok/s"));
-    // A slowdown that has lasted says for how long; a condition too weak to
-    // be its reason is not what the next step acts on.
+    // A slowdown that has lasted says for how long.
     let mut lasting = sample.clone();
     lasting.correlation.episode = Some(crate::domain::DropEpisode {
         reference: 30.0,
@@ -89,12 +88,7 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
     );
     lasting.correlation.episode.as_mut().unwrap().seconds = 3.0;
     assert_eq!(assess(&lasting).evidence, "GEN ↓20.0% (30.0→24.0 tok/s)");
-    lasting.correlation.confidence = 50;
-    assert_eq!(
-        slowdown_next_step(&lasting),
-        "Compare prompt size and runtime settings."
-    );
-    assert!(finding.context.contains("medium confidence"));
+    assert_eq!(finding.context, "WITH 2 requests running (usual 1)");
     assert_eq!(finding.next, "Compare speed with one active request.");
     sample.llm_status = "stale".into();
     assert!(!assess(&sample).actionable);
@@ -102,22 +96,18 @@ fn measured_slowdown_keeps_rate_change_and_conditional_guidance() {
 }
 
 #[test]
-fn a_slowdown_names_the_change_that_began_it_and_when() {
+fn a_slowdown_names_what_else_was_unusual() {
     let mut sample = busy_sample();
     sample.correlation = CorrelationInsight {
         direction: ThroughputDirection::Down,
         cause: CorrelationCause::ConcurrentPrefill,
-        confidence: 89,
-        summary: "GEN ↓34.3% (39.3→25.8 tok/s) · correlated: 35.6k prefill began beside generation 2s before the drop".into(),
-        lead: "35.6k prefill began beside generation 2s before the drop".into(),
+        summary: "GEN ↓34.3% (39.3→25.8 tok/s) · unusual: 35.6k prefill beside generation".into(),
+        lead: "35.6k prefill beside generation".into(),
         ..CorrelationInsight::default()
     };
     let finding = assess(&sample);
     assert_eq!(finding.title, "Generation slowed");
-    assert_eq!(
-        finding.context,
-        "WITH 35.6k prefill began beside generation 2s before the drop · high confidence"
-    );
+    assert_eq!(finding.context, "WITH 35.6k prefill beside generation");
     assert_eq!(
         finding.next,
         "Expected while the prompt prefills; recheck after it finishes."
@@ -177,7 +167,7 @@ fn compression_and_queue_findings_name_their_evidence() {
 }
 
 #[test]
-fn slowdown_findings_recommend_a_check_for_each_correlated_cause() {
+fn slowdown_findings_recommend_a_check_for_each_cause() {
     for (cause, next) in [
         (
             CorrelationCause::Paging,
@@ -208,16 +198,12 @@ fn slowdown_findings_recommend_a_check_for_each_correlated_cause() {
             "Compare speed with one active request.",
         ),
         (
-            CorrelationCause::GpuSaturation,
+            CorrelationCause::Concurrency,
             "Compare speed with one active request.",
         ),
         (
             CorrelationCause::ContextGrowth,
             "Compare a request with a shorter prompt.",
-        ),
-        (
-            CorrelationCause::Runtime,
-            "Compare prompt size and runtime settings.",
         ),
         (
             CorrelationCause::None,
@@ -231,8 +217,12 @@ fn slowdown_findings_recommend_a_check_for_each_correlated_cause() {
         sample.correlation = CorrelationInsight {
             direction: ThroughputDirection::Down,
             cause,
-            confidence: 90,
-            summary: "GEN ↓30.0% (30.0→21.0 tok/s) · correlated: x".into(),
+            summary: "GEN ↓30.0% (30.0→21.0 tok/s) · unusual: x".into(),
+            lead: if cause == CorrelationCause::None {
+                String::new()
+            } else {
+                "x".into()
+            },
             ..CorrelationInsight::default()
         };
         let finding = assess(&sample);
@@ -240,10 +230,10 @@ fn slowdown_findings_recommend_a_check_for_each_correlated_cause() {
         assert_eq!(finding.evidence, "GEN ↓30.0% (30.0→21.0 tok/s)");
         assert_eq!(finding.next, next, "{cause:?}");
         assert!(finding.actionable);
-        if matches!(cause, CorrelationCause::Runtime | CorrelationCause::None) {
-            assert_eq!(finding.context, "No matching system signal");
+        if cause == CorrelationCause::None {
+            assert_eq!(finding.context, "Nothing else unusual");
         } else {
-            assert!(finding.context.ends_with("· high confidence"), "{cause:?}");
+            assert_eq!(finding.context, "WITH x", "{cause:?}");
         }
     }
 }

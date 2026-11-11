@@ -179,13 +179,10 @@ pub(crate) fn write_static(
         )?;
     }
     if !sample.correlation.summary.is_empty() {
-        writeln!(out, "CORRELATION   {}", sample.correlation.summary)?;
-        writeln!(
-            out,
-            "EVIDENCE      {} · {} confidence",
-            sample.correlation.details,
-            sample.correlation.confidence_label()
-        )?;
+        writeln!(out, "SLOWDOWN      {}", sample.correlation.summary)?;
+        if !sample.correlation.details.is_empty() {
+            writeln!(out, "UNUSUAL       {}", sample.correlation.details)?;
+        }
     }
     let finding = diagnosis::assess(sample);
     writeln!(out, "DIAGNOSIS    {}", finding.title)?;

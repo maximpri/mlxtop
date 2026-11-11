@@ -13,6 +13,8 @@ pub(crate) enum Tone {
     Cyan,
     Blue,
     Muted,
+    /// Unusual for the signal it is drawn on: the one colour that means so.
+    Unusual,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -130,9 +132,6 @@ pub(crate) struct ChartPoint {
     pub(crate) value: Option<u64>,
     pub(crate) tone: Tone,
     pub(crate) observed_at: SystemTime,
-    /// Set while generation was slow or stalled, in that finding's colour:
-    /// every chart shades the same samples, so signals line up by eye.
-    pub(crate) drop: Option<Tone>,
 }
 
 #[derive(Default)]
@@ -223,7 +222,6 @@ pub(crate) enum ThroughputDirection {
     #[default]
     Unknown,
     Down,
-    Up,
     Flat,
 }
 
@@ -238,7 +236,6 @@ pub(crate) enum CorrelationCause {
     MemoryPressure,
     Thermal,
     MetalMemory,
-    GpuSaturation,
     Queueing,
     /// A prompt prefilling beside a request that is generating.
     ConcurrentPrefill,
@@ -248,27 +245,24 @@ pub(crate) enum CorrelationCause {
     ModelMemory,
     /// The runtime reading or writing its disk (prompt cache) mid-answer.
     DiskIo,
-    Runtime,
 }
 
 impl CorrelationCause {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::None => "no correlated cause",
+            Self::None => "nothing else unusual",
             Self::Stall => "generation stalled",
             Self::Paging => "paging",
             Self::Compression => "compression churn",
             Self::MemoryPressure => "memory pressure",
             Self::Thermal => "thermal limiting",
             Self::MetalMemory => "Metal memory pressure",
-            Self::GpuSaturation => "GPU saturation",
             Self::Queueing => "queueing",
             Self::ConcurrentPrefill => "prefill beside generation",
             Self::Concurrency => "concurrent requests",
             Self::ContextGrowth => "context/KV growth",
             Self::ModelMemory => "model memory growth",
             Self::DiskIo => "runtime disk I/O",
-            Self::Runtime => "workload/runtime change",
         }
     }
 
@@ -277,14 +271,12 @@ impl CorrelationCause {
             Self::Stall | Self::Paging | Self::MemoryPressure | Self::Thermal => Tone::Red,
             Self::Compression
             | Self::MetalMemory
-            | Self::GpuSaturation
             | Self::Queueing
             | Self::ConcurrentPrefill
             | Self::Concurrency
             | Self::ContextGrowth
             | Self::ModelMemory
-            | Self::DiskIo
-            | Self::Runtime => Tone::Yellow,
+            | Self::DiskIo => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -300,15 +292,14 @@ pub(crate) struct CorrelationKey {
 pub(crate) struct CorrelationInsight {
     pub(crate) direction: ThroughputDirection,
     pub(crate) cause: CorrelationCause,
-    pub(crate) confidence: u8,
     pub(crate) summary: String,
     pub(crate) details: String,
-    /// The strongest factor's evidence, such as the change that began the drop.
+    /// The first unusual signal, in words: the reason a slowdown is given.
     pub(crate) lead: String,
     /// How long a generating request has gone without a token, once stalled.
     pub(crate) stall_seconds: Option<f64>,
     pub(crate) event_key: Option<CorrelationKey>,
-    /// Change from the rolling throughput baseline, in percent.
+    /// Change from the usual generation speed, in percent.
     pub(crate) delta_percent: Option<f64>,
     /// The slowdown this sample belongs to, from its first slow sample.
     pub(crate) episode: Option<DropEpisode>,
@@ -316,6 +307,10 @@ pub(crate) struct CorrelationInsight {
     pub(crate) ended: Option<DropEnd>,
     /// This cause was already journaled for this slowdown.
     pub(crate) repeat: bool,
+    /// This sample's own speed is unusually low (or it is a stall).
+    pub(crate) slow: bool,
+    /// Every signal that is unusual in this sample, the reason first.
+    pub(crate) unusual: Vec<CorrelationCause>,
 }
 
 /// One slowdown, from the sample where speed first fell to now. The speed
@@ -346,7 +341,7 @@ pub(crate) struct DropEnd {
 pub(crate) const CACHE_GOOD_PERCENT: u64 = 50;
 pub(crate) const CACHE_LOW_PERCENT: u64 = 20;
 
-/// A drop this far below the rolling baseline is critical on its own.
+/// A drop this far below the usual speed is critical on its own.
 pub(crate) const THROUGHPUT_CRITICAL_DROP_PERCENT: f64 = 30.0;
 
 impl CorrelationInsight {
@@ -379,17 +374,7 @@ impl CorrelationInsight {
                     Tone::Yellow
                 }
             }
-            ThroughputDirection::Up => Tone::Green,
             ThroughputDirection::Unknown | ThroughputDirection::Flat => self.cause.tone(),
-        }
-    }
-
-    pub(crate) fn confidence_label(&self) -> &'static str {
-        match self.confidence {
-            80..=u8::MAX => "high",
-            55..=79 => "medium",
-            1..=54 => "low",
-            _ => "unavailable",
         }
     }
 }

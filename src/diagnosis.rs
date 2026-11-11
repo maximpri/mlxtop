@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 //! Separate measured problems from high resource use during normal work.
-use crate::analysis::correlation_evidence_label;
 use crate::domain::{CorrelationCause, Sample, TelemetrySource, ThroughputDirection, Tone};
 use crate::formatting::{count, llm_generation_rate_label, percent_u8, pressure_state_label, rate};
 use std::time::{Duration, SystemTime};
@@ -16,10 +15,6 @@ pub(super) struct Finding {
 
 /// What to check for a measured slowdown, by its cause.
 pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
-    // A condition scored too low to be offered as the reason is not acted on.
-    if (1..60).contains(&sample.correlation.confidence) {
-        return "Compare prompt size and runtime settings.";
-    }
     match sample.correlation.cause {
         CorrelationCause::Paging => "Reduce active models; recheck paging.",
         CorrelationCause::Compression => "Check whether paging also rises.",
@@ -52,13 +47,11 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
         CorrelationCause::ConcurrentPrefill => {
             "Expected while the prompt prefills; recheck after it finishes."
         }
-        CorrelationCause::Queueing
-        | CorrelationCause::Concurrency
-        | CorrelationCause::GpuSaturation => "Compare speed with one active request.",
-        CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
-        CorrelationCause::Runtime | CorrelationCause::None => {
-            "Compare prompt size and runtime settings."
+        CorrelationCause::Queueing | CorrelationCause::Concurrency => {
+            "Compare speed with one active request."
         }
+        CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
+        CorrelationCause::None => "Compare prompt size and runtime settings.",
     }
 }
 
@@ -184,21 +177,12 @@ fn assess_observation(sample: &Sample) -> Finding {
         {
             finding.evidence = format!("{} for {:.0}s", finding.evidence, episode.seconds);
         }
-        // The engine's lead names the change that began the drop and when.
-        let evidence = if sample.correlation.lead.is_empty() {
-            correlation_evidence_label(sample)
+        // The reason is whatever else is unusual at the same time.
+        finding.context = if sample.correlation.lead.is_empty() {
+            "Nothing else unusual".into()
         } else {
-            sample.correlation.lead.clone()
+            format!("WITH {}", sample.correlation.lead)
         };
-        finding.context =
-            if sample.correlation.cause == CorrelationCause::Runtime || evidence.is_empty() {
-                "No matching system signal".into()
-            } else {
-                format!(
-                    "WITH {evidence} · {} confidence",
-                    sample.correlation.confidence_label()
-                )
-            };
         finding.next = slowdown_next_step(sample);
         finding.actionable = true;
         finding.tone = sample.correlation.tone();
@@ -225,12 +209,7 @@ fn assess_observation(sample: &Sample) -> Finding {
         finding.title = "Healthy · no bottleneck".into();
         finding.tone = Tone::Green;
     }
-    if live
-        && matches!(
-            sample.correlation.direction,
-            ThroughputDirection::Flat | ThroughputDirection::Up
-        )
-    {
+    if live && matches!(sample.correlation.direction, ThroughputDirection::Flat) {
         // Nothing to say: an empty note keeps the strip quiet.
         finding.next = "";
     } else if sample.llm_status == "untracked" {

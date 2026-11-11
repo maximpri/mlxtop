@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Counter rates and bounded time-series history updates.
-use crate::analysis::{THROUGHPUT_CHANGE_MIN_TPS, THROUGHPUT_CHANGE_RATIO};
 use crate::config::Thresholds;
-use crate::domain::{ChartMetric, ChartPoint, Tone, THROUGHPUT_CRITICAL_DROP_PERCENT};
+use crate::domain::{ChartMetric, ChartPoint, Tone};
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 pub(crate) fn delta(current: u64, previous: u64) -> u64 {
@@ -51,50 +50,13 @@ pub(crate) fn paging_tone(churn: u64, impact: &str, thresholds: Thresholds) -> T
 /// Compression sample tone with the assessment's hysteresis: once active, it
 /// stays yellow until traffic falls below `compression_warn_exit`.
 pub(crate) fn compression_tone(churn: u64, previous: Option<Tone>, thresholds: Thresholds) -> Tone {
-    let exit = if previous == Some(Tone::Yellow) {
+    // A sample marked unusual was active too.
+    let exit = if matches!(previous, Some(Tone::Yellow | Tone::Unusual)) {
         thresholds.compression_warn_exit
     } else {
         thresholds.compression_warn_rate
     };
     if churn >= exit {
-        Tone::Yellow
-    } else {
-        Tone::Green
-    }
-}
-
-/// Live samples forming a throughput chart's rolling baseline.
-pub(crate) const BASELINE_SAMPLES: usize = 30;
-
-/// Grade a throughput sample (tenths of tok/s) against the median of the
-/// chart's recent live samples, using the assessment's slowdown bands: a drop
-/// of at least 10% and 2 tok/s is yellow, 30% or more is red. Without enough
-/// history there is no baseline, so the sample is not graded as a drop.
-pub(crate) fn baseline_tone(value: u64, history: &VecDeque<ChartPoint>) -> Tone {
-    let mut recent: Vec<u64> = history
-        .iter()
-        .rev()
-        .filter_map(|point| point.value)
-        .take(BASELINE_SAMPLES)
-        .collect();
-    if recent.len() < 3 {
-        return Tone::Green;
-    }
-    recent.sort_unstable();
-    let middle = recent.len() / 2;
-    let baseline = if recent.len().is_multiple_of(2) {
-        (recent[middle - 1] + recent[middle]) as f64 / 2.0
-    } else {
-        recent[middle] as f64
-    };
-    let drop = baseline - value as f64;
-    let percent = drop / baseline * 100.0;
-    if baseline > 0.0 && percent >= THROUGHPUT_CRITICAL_DROP_PERCENT {
-        Tone::Red
-    } else if baseline > 0.0
-        && percent >= THROUGHPUT_CHANGE_RATIO * 100.0
-        && drop >= THROUGHPUT_CHANGE_MIN_TPS * 10.0
-    {
         Tone::Yellow
     } else {
         Tone::Green
@@ -128,7 +90,6 @@ pub(crate) fn push_history_with_tone(
         tone: if value.is_some() { tone } else { Tone::Muted },
         value,
         observed_at: SystemTime::now(),
-        drop: None,
     });
     while history.len() > limit {
         history.pop_front();

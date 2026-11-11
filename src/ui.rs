@@ -19,8 +19,7 @@ use crate::formatting::{
 use crate::host::Platform;
 use crate::processes::process_provider;
 use crate::theme::{
-    centered_rect, drop_band, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED,
-    YELLOW,
+    centered_rect, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
 };
 use crate::{
     drop_marks, gpu_dashboard, memory_composition, model_dashboard, operator_charts,
@@ -671,11 +670,6 @@ impl App {
                 .max(1)
         };
         for (column, point) in points.iter().enumerate() {
-            if let Some(band) = point.drop {
-                for row in area.top()..area.bottom() {
-                    frame.buffer_mut()[(area.x + column as u16, row)].set_bg(drop_band(band));
-                }
-            }
             let Some(value) = point.value else {
                 continue;
             };
@@ -885,15 +879,15 @@ impl App {
             ChartMetric::Compression => Some(self.thresholds.compression_warn_rate),
             _ => None,
         };
-        // While generation is slow its chart draws the speed it fell from,
-        // in the slowdown's colour: the gap under that line is the drop.
+        // While generation is slow its chart draws its usual speed, in the
+        // anomaly colour: the gap under that line is the drop.
         let insight = &sample.correlation;
         let normal = insight
             .episode
             .filter(|_| metric == ChartMetric::Generation && insight.is_material_drop())
             .map(|episode| (episode.reference * 10.0).round() as u64);
         let (warning, guide_tone) = match normal {
-            Some(normal) => (Some(normal), insight.tone()),
+            Some(normal) => (Some(normal), Tone::Unusual),
             None => (warning, Tone::Yellow),
         };
         let scale = chart_scale(history, metric, visible_count);
@@ -1096,7 +1090,8 @@ impl App {
             // The panel behind a slowdown carries its tag at the right of
             // this border; a summary that would run into it gives way.
             let tag = if drop_marks::linked(insight) == Some(Chart::from(metric)) {
-                Line::from(drop_marks::tag(insight)).width()
+                let room = drop_marks::tag_room(area.width) / 2;
+                Line::from(drop_marks::tag(insight, room).as_str()).width()
             } else {
                 0
             };
@@ -1108,27 +1103,31 @@ impl App {
                 summary
             };
             // While generation is slow, its chart says why under the bars
-            // that show it, in the drop's colour: ▼ and the change behind it.
+            // that show it, in the anomaly colour: ▼ and what else is unusual.
             let room = usize::from(area.width.saturating_sub(4));
             let reason = (metric == ChartMetric::Generation && insight.is_material_drop())
                 .then(|| {
                     let lead = insight.lead.split(" → ").next().unwrap_or("");
-                    [
-                        format!("▼ {lead}"),
-                        format!("▼ {}", lead.split(" · ").next().unwrap_or("")),
-                        format!("▼ {}", insight.cause.label()),
-                        "▼".to_owned(),
-                    ]
-                    .into_iter()
-                    .filter(|text| text.trim() != "▼" || lead.is_empty())
-                    .find(|text| Line::from(text.as_str()).width() + 2 <= room)
+                    // With nothing else unusual the label says so, rather
+                    // than leave the arrow on its own.
+                    let mut reasons = Vec::new();
+                    if !lead.is_empty() {
+                        reasons.push(format!("▼ {lead}"));
+                        reasons.push(format!("▼ {}", lead.split(" · ").next().unwrap_or("")));
+                        reasons.push(format!("▼ {}", lead.split(" (").next().unwrap_or("")));
+                    }
+                    reasons.push(format!("▼ {}", insight.cause.label()));
+                    reasons.push("▼".to_owned());
+                    reasons
+                        .into_iter()
+                        .find(|text| Line::from(text.as_str()).width() + 2 <= room)
                 })
                 .flatten();
             block = block.title_bottom(match reason {
                 Some(reason) => Line::from(Span::styled(
                     format!(" {reason} "),
                     Style::default()
-                        .fg(insight.tone().color())
+                        .fg(Tone::Unusual.color())
                         .add_modifier(Modifier::BOLD),
                 )),
                 None if summary.is_empty() => Line::default(),
@@ -1679,21 +1678,17 @@ impl App {
             let mut run_tone = None;
             // A full block is drawn as a filled cell: terminals leave a gap
             // between rows of glyphs, but not of backgrounds.
-            // Columns sampled during a slowdown are shaded in its colour, on
-            // every chart alike, behind whatever the chart draws there.
-            let style = |(tone, filled, fill, band): (Tone, bool, bool, Option<Tone>)| {
+            let style = |(tone, filled, fill): (Tone, bool, bool)| {
                 let style = Style::default().fg(tone.color());
-                match (filled, band, fill) {
-                    (true, _, _) => style.bg(tone.color()),
-                    (false, Some(band), _) => style.bg(drop_band(band)),
-                    (false, None, true) => style.bg(AREA_FILL),
-                    (false, None, false) => style,
+                match (filled, fill) {
+                    (true, _) => style.bg(tone.color()),
+                    (false, true) => style.bg(AREA_FILL),
+                    (false, false) => style,
                 }
             };
-            for (column, cell) in row_cells.iter().take(plot_width).copied().enumerate() {
+            for cell in row_cells.iter().take(plot_width).copied() {
                 let filled = cell.glyph == '█';
-                let band = visible_points.get(column).and_then(|point| point.drop);
-                let key = (cell.tone, filled, cell.fill, band);
+                let key = (cell.tone, filled, cell.fill);
                 if run_tone != Some(key) {
                     if let Some(key) = run_tone {
                         spans.push(Span::styled(std::mem::take(&mut run), style(key)));

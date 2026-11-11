@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.3.0-rc.5 — 2026-11-10
+
+### Diagnosis
+
+- **Slowdowns are found by anomaly detection.** One rule for every signal: a
+  sample is unusual when it is further from the signal's usual value than the
+  signal ordinarily strays. Generation is slow when it is unusually low for
+  three samples in a row. This replaces the "10% below baseline" rule and the
+  scoring of a dozen conditions. Replayed over one server's log (speculative
+  decoding, speed swinging 20–120 tok/s, 76 minutes of generation), rc.4 put
+  48% of samples inside a slowdown and journaled 474 of them; this rule puts
+  5% inside one and journals 8.
+- **The reason is what else is unusual at the same time**, said beside its
+  usual value: `paging 96.0 MiB/s (usual 2.0 MiB/s)`, `2 requests running
+  (usual 1)`. With nothing else unusual the finding says so. The confidence
+  label is gone.
+- **Fewer Journal rows.** A slowdown that repeats the last one's reason within
+  a minute is not journaled again.
+
+### Dashboards
+
+- **Magenta means unusual, and nothing else.** A slowdown's samples are
+  magenta on the generation chart; the samples of each signal that was unusual
+  with it are magenta on that signal's chart. No other chart changes.
+- **Charts are no longer shaded during a slowdown.** The brown and red bands
+  behind every chart showed when generation was slow but not why.
+- **The panel behind a slowdown says what it did:** `▲ slowed GEN ↓50%` or
+  `▲ stalled GEN` instead of `▼ GEN`.
+- **A slowdown with nothing else unusual says so.** The generation chart
+  reads `▼ nothing else unusual` instead of a bare `▼`.
+- **Generation and prefill bars are green.** They were graded yellow and red
+  against a rolling baseline, which flickered with every swing in speed.
+
+### Changed
+
+- `--once` prints `SLOWDOWN` and `UNUSUAL` where it printed `CORRELATION` and
+  `EVIDENCE`.
+
 ## 3.3.0-rc.4 — 2026-11-09
 
 ### Diagnosis

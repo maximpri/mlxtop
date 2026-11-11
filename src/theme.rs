@@ -10,6 +10,8 @@ pub(crate) const YELLOW: Color = Color::Rgb(246, 193, 79);
 pub(crate) const RED: Color = Color::Rgb(248, 113, 113);
 pub(crate) const CYAN: Color = Color::Rgb(90, 202, 225);
 pub(crate) const BLUE: Color = Color::Rgb(120, 153, 255);
+/// Reserved for what is unusual: no grade or series uses it.
+pub(crate) const UNUSUAL: Color = Color::Rgb(232, 121, 249);
 pub(crate) const MUTED: Color = Color::Rgb(139, 151, 168);
 pub(crate) const DIM: Color = Color::Rgb(78, 90, 108);
 pub(crate) const PANEL: Color = Color::Rgb(18, 24, 34);
@@ -25,6 +27,7 @@ impl Tone {
             Self::Cyan => CYAN,
             Self::Blue => BLUE,
             Self::Muted => MUTED,
+            Self::Unusual => UNUSUAL,
         }
     }
 }
@@ -51,16 +54,6 @@ pub(crate) fn card_block<'a>(title: Line<'a>, tone: Tone) -> Block<'a> {
 /// The line carries the level and its grade; a graded fill would only repeat
 /// it, and stripe wherever the grade changes from one sample to the next.
 pub(crate) const AREA_FILL: Color = Color::Rgb(33, 42, 56);
-
-/// The background of chart columns sampled while generation was slow or
-/// stalled: a dark tint of that finding's colour, quiet enough to read
-/// bars and lines through.
-pub(crate) fn drop_band(tone: Tone) -> Color {
-    match tone {
-        Tone::Red => Color::Rgb(64, 28, 36),
-        _ => Color::Rgb(58, 46, 22),
-    }
-}
 
 pub(crate) fn llm_status_tone(status: &str) -> Tone {
     match status.to_ascii_lowercase().as_str() {

@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod analysis;
+mod anomaly;
 mod app;
 mod chart_navigation;
 mod chart_render;
