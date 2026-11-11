@@ -1,5 +1,86 @@
 # Changelog
 
+## 3.3.0 — 2026-11-11
+
+### Diagnosis
+
+- **Slowdowns are found by anomaly detection.** One rule for every signal: a
+  sample is unusual when it is further from the signal's usual value than the
+  signal ordinarily strays. Generation is slow when it is unusually low for
+  three samples in a row. This replaces the "10% below baseline" rule and the
+  scoring of a dozen conditions. Replayed over one server's log (speculative
+  decoding, speed swinging 20–120 tok/s), the old rules put 48% of samples inside a
+  slowdown; this one puts 5% inside one.
+- **Speed is judged against similar work.** A sample is compared with
+  earlier samples with as many requests writing at once and a context within
+  a factor of two. On one oMLX server's week of 4,725 requests, speed fell
+  from 83 to 54 tok/s as context grew from under 1k to 64k–128k, and each
+  answer ran at 73, 55, 43 and 31 tok/s with one to four writing at once.
+  Judged against similar requests, 3.5% were slow instead of 10.3%. Work not
+  seen before is learned for eight samples, never judged against different
+  work.
+- **The reason is what else is unusual at the same time**, said beside its
+  usual value: `paging 96.0 MiB/s (usual 2.0 MiB/s)`. Reasons are paging,
+  compression, memory pressure, thermal limiting, disk and SSD-cache work, a
+  prompt prefilling beside the answer, the queue, the runtime's CPU and a GPU
+  left idle. Request count and prompt size are never the reason: the usual
+  speed already allows for them. With nothing else unusual the finding says
+  so and suggests the runtime's log.
+- **Stalls are seen and named.** oMLX reports a request's speed as its
+  average since it began, which barely moves when generation stops. mlxtop
+  now measures tokens produced between polls, so a stall drops to 0 on the
+  chart. After 1.5 s without a token the headline reads `Generation
+  stalled`, with what the host was doing: `no new token for 2s · GPU idle ·
+  disk read 850 MiB/s · 38 SSD cache blocks loaded · SSD cache full`.
+- **Disk-cache stalls are named.** mlxtop reads the runtime's own storage
+  traffic and oMLX's SSD-cache counters (blocks loaded, saved, evicted, and
+  how full the cache is), and points the next step at the cache disk.
+- **A slowdown is remembered until it ends**, keeps the speed it fell from,
+  and keeps its first reason for as long as that reason holds.
+- The diagnostic log records `generating=` and `context=` for each sample,
+  so a session can be replayed against its work.
+
+### Dashboards
+
+- **The generation chart draws its usual speed** as a dashed line, column by
+  column: it steps when a request joins or leaves and runs through bars that
+  pass it. It is grey while speed is usual and magenta during a slowdown. The
+  bottom edge, Diagnostics and `--once` say what it is for: `usual 30.0 for
+  2 requests · 131.2k context`.
+- **Magenta means unusual, and nothing else.** A slow sample is magenta on
+  the generation chart at once; an unusual reading of the host is magenta on
+  its own chart or in the header. A host reading that stays unusual for 30
+  seconds at the usual speed becomes its usual value.
+- **Charts are no longer shaded during a slowdown.** The panel behind it says
+  what it did instead: `▲ slowed GEN ↓50%` or `▲ stalled GEN`.
+- **Generation and prefill bars are green.** They were graded yellow and red
+  against a rolling baseline, which flickered with every swing in speed.
+- **The cache panel shows the disk.** `cache I/O` plots the runtime's disk
+  reads and writes, the session's reuse, and the SSD cache's fill.
+- **Queue shows what each request is doing**: `◐ PREFILL` with a progress
+  bar, `● GEN` with tokens out and tok/s, `○ QUEUED` with its prompt size.
+- **Prefill progress counts new tokens** and never reads 100% before it
+  finishes. oMLX starts a prefill with the cached prefix already counted, so
+  a 72k cached prompt read 96% before any work.
+- **Rate headlines match their charts:** `LAST 71.7 tok/s · 1s old` between
+  prefills, and `total of 2 requests` when generation is a sum.
+- **Each fact once.** The status badge, queue, prefill, prompt load and
+  compression panels no longer repeat what another panel says.
+
+### Journal
+
+- **Rows say what, why and what next:** `STALL`, `SLOWDOWN`, `RESUMED`, and
+  `RECOVERED` or `SETTLED` when a slowdown ends. A slowdown that repeats the
+  last one's reason within a minute is not journaled again.
+- **One row as a request starts, one as it ends:** `PROMPT` with its size
+  and cached share, `DONE` with the tokens produced. GPU busy and idle flips
+  are no longer journaled.
+
+### Changed
+
+- `--once` prints `SLOWDOWN`, `UNUSUAL` and `USUAL SPEED` where it printed
+  `CORRELATION` and `EVIDENCE`.
+
 ## 3.2.1 — 2026-11-03
 
 ### Dashboards

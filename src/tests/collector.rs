@@ -375,14 +375,16 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
         correlation: CorrelationInsight {
             direction: ThroughputDirection::Down,
             cause: CorrelationCause::Thermal,
-            confidence: 85,
             summary: "throughput fell".into(),
             details: "thermal".into(),
+            lead: "thermal limit".into(),
+            stall_seconds: None,
             event_key: Some(CorrelationKey {
                 direction: ThroughputDirection::Down,
                 cause: CorrelationCause::Thermal,
             }),
             delta_percent: Some(-20.0),
+            ..CorrelationInsight::default()
         },
         ..Sample::default()
     };
@@ -399,9 +401,10 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
     assert!(has("LLM", "telemetry source · completion log → live API"));
     assert!(has("LLM", "request started · 2 active"));
     assert!(has("QUEUE", "3 request(s) waiting"));
+    // What happened, what else was unusual, and what to do, in one row.
     assert!(has(
-        "LLM",
-        "throughput diagnosis · throughput fell · high confidence"
+        "SLOWDOWN",
+        "throughput fell · thermal limit → Reduce concurrency; recheck thermals."
     ));
     assert!(has("PAGING", "cleared"));
     assert!(has("THERMAL", "limited 80%"));
@@ -1268,10 +1271,15 @@ fn saturation_survives_gpu_busy_impact_deduplication() {
     c.record_journal_events(None, &before);
     c.record_journal_events(Some(&before), &after);
     c.record_journal_events(Some(&after), &after);
+    // One row carries both: the busy state and that it began saturated.
+    let gpu_rows: Vec<_> = c
+        .signals
+        .iter()
+        .filter(|e| e.state.starts_with("GPU"))
+        .collect();
+    assert_eq!(gpu_rows.len(), 1, "{:?}", journal(&c));
     assert!(
-        c.signals
-            .iter()
-            .any(|e| e.summary.contains("GPU load saturated")),
+        gpu_rows[0].summary.ends_with(" · saturated"),
         "{:?}",
         journal(&c)
     );

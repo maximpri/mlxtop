@@ -15,6 +15,7 @@ fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
         completed: false,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         output_tps: None,
         observed_at: None,
@@ -538,7 +539,6 @@ fn prompt_sizes_and_cache_render_without_growth_warnings() {
         "vs previous",
         "40,000 tokens",
         "CACHED 90%",
-        "4,000 uncached",
         "MEDIAN 20,000 tokens",
         "10.0k",
         "12.0k",
@@ -548,6 +548,8 @@ fn prompt_sizes_and_cache_render_without_growth_warnings() {
     ] {
         assert!(text.contains(label), "missing prompt measurement: {label}");
     }
+    // CACHED 90% already says it; the bar's green segment shows it.
+    assert!(!text.contains("uncached"), "{text}");
     assert!(!text.contains('!'));
     assert!(!text.contains("PROMPT JUMP"));
     assert!(!buffer.content.iter().any(|cell| cell.fg == YELLOW));
@@ -706,6 +708,13 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
     assert_eq!(crate::formatting::duration_label(38.4), "38s");
     assert_eq!(crate::formatting::duration_label(252.0), "4m 12s");
     assert_eq!(crate::formatting::duration_label(3_900.0), "1h 5m");
+    // Work under way never reads finished: 12 tokens left is 99%, not 100%,
+    // and a fraction of a second left is <1s, not 0s.
+    assert_eq!(crate::formatting::progress_percent(35_616, 35_628), 99);
+    assert_eq!(crate::formatting::progress_percent(35_628, 35_628), 100);
+    assert_eq!(crate::formatting::progress_percent(5, 0), 0);
+    assert_eq!(crate::formatting::time_left_label(0.1), "<1s");
+    assert_eq!(crate::formatting::time_left_label(38.4), "38s");
     assert_eq!(crate::formatting::duration_label(f64::NAN), "0s");
 
     let now = SystemTime::now();
@@ -727,10 +736,6 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
         llm_prefill_tps_live: true,
         ..Sample::default()
     };
-    assert_eq!(
-        crate::formatting::prefill_progress(&sample),
-        Some((34_078, 65_536))
-    );
     let render = |sample: &Sample, width| {
         crate::tests::render_view(width, 10, |frame| {
             draw(frame, frame.area(), &history, sample, 0, 1)
@@ -740,14 +745,14 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
     let wide = render(&sample, 100);
     assert!(wide.contains("PREFILL "), "{wide}");
     assert!(
-        wide.contains("52% · 34,078 / 65,536 · 4m 12s left"),
+        wide.contains("51% · 34,078 / 65,536 · 4m 12s left"),
         "{wide}"
     );
     assert!(wide.contains('█'), "a progress bar\n{wide}");
     assert!(!wide.contains("SPEED —"), "{wide}");
     // Narrow: counts drop before the percentage and time left.
     let narrow = render(&sample, 40);
-    assert!(narrow.contains("52% · 4m 12s left"), "{narrow}");
+    assert!(narrow.contains("51% · 4m 12s left"), "{narrow}");
     // Without a live rate there is no time left to promise.
     sample.llm_prefill_tps_live = false;
     assert!(!render(&sample, 100).contains("left"));
@@ -756,5 +761,4 @@ fn a_prefilling_request_shows_its_progress_and_the_time_left() {
         id: "other".into(),
         ..prefilling
     });
-    assert_eq!(crate::formatting::prefill_progress(&sample), None);
 }

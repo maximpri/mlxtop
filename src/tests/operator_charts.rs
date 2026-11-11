@@ -48,6 +48,7 @@ fn latency_requires_explicit_measurement_and_deduplicates_requests() {
         observed_at: Some(SystemTime::now()),
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         output_tps: None,
     });
@@ -254,6 +255,7 @@ fn running(provider: &str, waiting: u64, requests: &[(&str, u64, Option<f64>)]) 
             completed: false,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             observed_at: Some(SystemTime::now()),
         })
@@ -298,34 +300,102 @@ fn overview_queue_lists_each_running_request_with_its_own_rate() {
         );
         let roomy = queue_text(&history, 5, Some(60));
         for label in [
-            "active 2",
-            "waiting 1",
-            "105 1.7k · 41.0 tok/s",
-            "106 918 · 54.7 tok/s",
+            "2 active · 1 waiting",
+            "● GEN     105 1.7k out",
+            "41.0 tok/s│",
+            "● GEN     106 918 out",
+            "54.7 tok/s│",
         ] {
             assert!(
                 roomy.contains(label),
                 "{provider}: missing {label}\n{roomy}"
             );
         }
-        // One row of room: the count says another request is hidden.
-        let tight = queue_text(&history, 4, Some(60));
-        assert!(tight.contains("active 2 · +1 more"), "{tight}");
-        assert!(tight.contains("105 1.7k · 41.0 tok/s"), "{tight}");
-        // A taller panel keeps its size and fits the list in its own rows.
+        // One row of room: the bottom border says another request is hidden.
+        let tight = queue_text(&history, 3, Some(60));
+        assert!(tight.contains("+1 more"), "{tight}");
+        assert!(tight.contains("105 1.7k out"), "{tight}");
         let tall = queue_text(&history, 10, Some(60));
-        assert!(tall.contains("106 918 · 54.7 tok/s"), "{tall}");
         assert!(
-            tall.contains("waiting 1") && !tall.contains("more"),
+            tall.contains("106 918 out") && !tall.contains("more"),
             "{tall}"
         );
-        // Enlarged, the queue shows its history.
-        let enlarged = queue_text(&history, 10, None);
+        // Enlarged, the requests sit above the history, which keeps the counts.
+        let enlarged = queue_text(&history, 16, None);
         assert!(
-            !enlarged.contains("tok/s") && enlarged.contains("active"),
+            enlarged.contains("41.0 tok/s") && enlarged.contains("━ active"),
             "{enlarged}"
         );
+        assert_eq!(enlarged.matches("waiting 1").count(), 1, "{enlarged}");
+        // A short enlarged panel keeps the history.
+        let short = queue_text(&history, 10, None);
+        assert!(!short.contains("tok/s"), "{short}");
     }
+}
+
+#[test]
+fn queue_rows_show_each_phase_with_its_own_indicator() {
+    let mut sample = running(
+        "oMLX",
+        1,
+        &[
+            ("gen-a1", 1400, Some(25.8)),
+            ("pre-b2", 0, None),
+            ("que-c3", 0, None),
+        ],
+    );
+    sample.llm_requests[1].prompt = 35_628;
+    sample.llm_requests[1].prefilled = Some(35_616);
+    sample.llm_requests[2].prompt = 8_200;
+    sample.llm_requests[2].queued = true;
+    sample.llm_active_requests = Some(2);
+    let mut history = History::default();
+    history.observe(&sample, 10);
+    let text = queue_text(&history, 6, Some(60));
+    let rows: Vec<&str> = text.lines().collect();
+    // The prefill leads even though the runtime lists it second, and it
+    // reads 99% while tokens remain: unfinished work never shows 100%.
+    assert!(rows[1].contains("◐ PREFILL pre-b2 35.6k"), "{text}");
+    assert!(
+        rows[1].ends_with(" 99%│") && !text.contains("100%"),
+        "{text}"
+    );
+    assert!(rows[2].contains("● GEN     gen-a1 1.4k out"), "{text}");
+    assert!(rows[3].contains("○ QUEUED  que-c3 8.2k in"), "{text}");
+    // Readings share the right edge.
+    assert!(rows[2].ends_with("25.8 tok/s│"), "{text}");
+
+    // Narrow: the id goes first; the state, bar and reading stay.
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 5)).unwrap();
+    terminal
+        .draw(|frame| {
+            queue(
+                frame,
+                frame.area(),
+                &history,
+                Duration::from_secs(1),
+                1,
+                Some(60),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let line = |y: u16| (0..30).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    assert!(line(0).contains("●2 ○1"), "{}", line(0));
+    assert!(
+        line(1).starts_with("│◐ PREFILL 35.6k") && line(1).ends_with("99%│"),
+        "{}",
+        line(1)
+    );
+    assert!(
+        !line(2).contains("gen-a1") && line(2).ends_with("25.8 tok/s│"),
+        "{}",
+        line(2)
+    );
+    // Marks carry state colour; the words beside them use text colours.
+    assert_eq!(buffer[(1, 1)].fg, CYAN);
+    assert_eq!(buffer[(1, 3)].fg, YELLOW);
+    assert_eq!(buffer[(3, 3)].fg, Color::White);
 }
 
 #[test]
@@ -333,15 +403,17 @@ fn a_request_without_its_own_rate_keeps_its_row() {
     // Splash measures a request's speed only while it runs alone.
     let mut history = History::default();
     history.observe(&running("oMLX", 0, &[("a1", 300, Some(38.2))]), 10);
-    assert!(queue_text(&history, 8, Some(60)).contains("a1 300 · 38.2 tok/s"));
+    // One request is listed in full by prompt load; the queue keeps counts.
+    assert!(!queue_text(&history, 8, Some(60)).contains("38.2 tok/s"));
     history.observe(
         &running("oMLX", 0, &[("a1", 340, None), ("b2", 4, None)]),
         10,
     );
     let both = queue_text(&history, 8, Some(60));
-    for label in ["a1 340 · —", "b2 4 · —"] {
+    for label in ["a1 340 out", "b2 4 out"] {
         assert!(both.contains(label), "missing {label}\n{both}");
     }
+    assert_eq!(both.matches("—│").count(), 2, "{both}");
     // A runtime that never reports one keeps the usual queue.
     let mut vllm = History::default();
     vllm.observe(&running("vLLM", 0, &[("x", 30, None), ("y", 40, None)]), 10);
@@ -685,6 +757,7 @@ fn first_token_bars_are_solid_with_eighth_block_tops() {
             observed_at: Some(SystemTime::now()),
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: Some(ttft),
             output_tps: None,
         });
@@ -702,4 +775,77 @@ fn first_token_bars_are_solid_with_eighth_block_tops() {
         (0..10).all(|y| buffer[(18, y)].symbol() != "▇"),
         "no striped glyph cells"
     );
+}
+
+#[test]
+fn the_queue_colours_samples_that_were_unusual_beside_a_slowdown() {
+    let mut history = History::default();
+    let mut sample = live();
+    sample.llm_active_requests = Some(1);
+    for _ in 0..6 {
+        history.observe(&sample, 60);
+    }
+    // Two requests waiting where none is usual, as generation slows: known
+    // at the slowdown's third sample, so the two before it are marked too.
+    sample.llm_active_requests = Some(2);
+    history.observe(&sample, 60);
+    history.observe(&sample, 60);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Queueing,
+        unusual: vec![CorrelationCause::Queueing],
+        notes: vec!["2 waiting (usual 0)".into()],
+        episode: Some(DropEpisode {
+            reference: 50.0,
+            low: 25.0,
+            seconds: 2.0,
+            samples: 3,
+        }),
+        ..CorrelationInsight::default()
+    };
+    history.observe(&sample, 60);
+    let marked: Vec<bool> = history.points.iter().map(|point| point.unusual).collect();
+    assert_eq!(
+        marked,
+        [false, false, false, false, false, false, true, true, true]
+    );
+    // A slowdown with another reason leaves the queue alone.
+    sample.correlation.unusual = vec![CorrelationCause::Paging];
+    history.observe(&sample, 60);
+    assert!(!history.points.back().unwrap().unusual);
+
+    let buffer_of = |history: &History, width: u16, height: u16| {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                queue(
+                    frame,
+                    frame.area(),
+                    history,
+                    Duration::from_secs(1),
+                    1,
+                    None,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    // The history plot: the stroke over the marked samples, and only there.
+    let plot = buffer_of(&history, 60, 9);
+    let unusual: Vec<u16> = (0..60)
+        .filter(|x| (1..8).any(|y| plot[(*x, y)].fg == Tone::Unusual.color()))
+        .collect();
+    assert!(!unusual.is_empty(), "the marked samples are drawn");
+    let (first, last) = (unusual[0], *unusual.last().unwrap());
+    assert_eq!(unusual.len() as u16, last - first + 1, "one run of columns");
+    assert!(first > 30 && last < 58, "{unusual:?}");
+    assert!((1..8).any(|y| plot[(first - 2, y)].fg == CYAN));
+
+    // The compact panel: its active row, while the latest sample is marked.
+    let compact = buffer_of(&history, 40, 4);
+    assert_ne!(compact[(1, 1)].fg, Tone::Unusual.color());
+    history.points.back_mut().unwrap().unusual = true;
+    let compact = buffer_of(&history, 40, 4);
+    assert_eq!(compact[(1, 1)].fg, Tone::Unusual.color());
 }

@@ -12,6 +12,10 @@ pub(super) struct Reading {
     pub resident: u64,
     pub footprint: u64,
     pub peak: u64,
+    /// Bytes the process has read from and written to storage since it
+    /// started, through the file system (not paging or memory maps).
+    pub disk_read: u64,
+    pub disk_written: u64,
     pub at: Instant,
 }
 
@@ -26,6 +30,8 @@ pub(super) fn read(pid: u32) -> Option<Reading> {
         resident: usage.ri_resident_size,
         footprint: usage.ri_phys_footprint,
         peak: usage.ri_lifetime_max_phys_footprint,
+        disk_read: usage.ri_diskio_bytesread,
+        disk_written: usage.ri_diskio_byteswritten,
         at: Instant::now(),
     })
 }
@@ -48,6 +54,27 @@ pub(super) fn growth(current: &Reading, previous: Option<&Reading>) -> Option<i6
         current.footprint,
         previous.footprint,
         elapsed,
+    ))
+}
+
+/// Storage read and write rates in bytes per second since the previous
+/// reading of the same process.
+pub(super) fn disk_rates(current: &Reading, previous: Option<&Reading>) -> Option<(u64, u64)> {
+    let previous = previous?;
+    if current.pid != previous.pid || current.started != previous.started {
+        return None;
+    }
+    let elapsed = current
+        .at
+        .checked_duration_since(previous.at)?
+        .as_secs_f64();
+    if elapsed <= 0.0 {
+        return None;
+    }
+    let rate = |now: u64, then: u64| (now.saturating_sub(then) as f64 / elapsed).round() as u64;
+    Some((
+        rate(current.disk_read, previous.disk_read),
+        rate(current.disk_written, previous.disk_written),
     ))
 }
 

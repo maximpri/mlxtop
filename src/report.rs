@@ -179,12 +179,22 @@ pub(crate) fn write_static(
         )?;
     }
     if !sample.correlation.summary.is_empty() {
-        writeln!(out, "CORRELATION   {}", sample.correlation.summary)?;
+        writeln!(out, "SLOWDOWN      {}", sample.correlation.summary)?;
+        if !sample.correlation.details.is_empty() {
+            writeln!(out, "UNUSUAL       {}", sample.correlation.details)?;
+        }
+    } else if !sample.correlation.notes.is_empty() {
         writeln!(
             out,
-            "EVIDENCE      {} · {} confidence",
-            sample.correlation.details,
-            sample.correlation.confidence_label()
+            "UNUSUAL       {}",
+            sample.correlation.notes.join(" · ")
+        )?;
+    }
+    if let Some((usual, slow_below)) = sample.correlation.usual_speed {
+        writeln!(
+            out,
+            "USUAL SPEED   {usual:.1} tok/s{} · slow below {slow_below:.1}",
+            usual_for(&sample.correlation)
         )?;
     }
     let finding = diagnosis::assess(sample);
@@ -205,6 +215,15 @@ pub(crate) fn write_static(
     Ok(())
 }
 
+/// The work a usual speed is for, as ` for 1 request · 40k context`.
+fn usual_for(insight: &crate::domain::CorrelationInsight) -> String {
+    if insight.usual_for.is_empty() {
+        String::new()
+    } else {
+        format!(" for {}", insight.usual_for)
+    }
+}
+
 /// The expanded panel and doctor report share facts and wording.
 pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
     let finding = diagnosis::assess(sample);
@@ -221,6 +240,15 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
             finding.next
         ));
     }
+    // What a slowdown is judged against, and everything unusual right now.
+    let insight = &sample.correlation;
+    if let Some((usual, slow_below)) = insight.usual_speed {
+        lines.push(format!(
+            "Usual generation speed {usual:.1} tok/s{} · slow below {slow_below:.1}",
+            usual_for(insight)
+        ));
+    }
+    lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
     lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));
     lines

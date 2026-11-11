@@ -136,18 +136,20 @@ The current configured defaults are:
 | Paging rate (swap, plus file paging while memory is tight) | below 1 MiB/s | 1 MiB/s to below 16 MiB/s | 16 MiB/s or more, or a critical paging finding (swap thrashing, heavy paging, page-in recovery) |
 | Compression traffic | below 64 MiB/s, or below 32 MiB/s once active | 64 MiB/s or more; stays yellow down to 32 MiB/s | none: no critical threshold is defined |
 | Cache reuse (interval and prompt CACHED share) | 50% or more | 20% to below 50% | below 20% |
-| Generation (dynamic) | at or above the rolling baseline | 10% and 2 tok/s or more below it | 30% or more below it, or a drop correlated with paging, memory pressure or thermals |
-| Prefill (dynamic) | at or above the rolling baseline | 10% and 2 tok/s or more below it | 30% or more below it |
 | GPU wired-limit marker | — | wired memory over the limit, with `wired over GPU limit` in the legend | — |
 
-Dynamic bands compare each sample with the median of the chart's previous
-thirty live samples (generation uses the assessment's slowdown baseline for the
-same provider and model). Without three samples there is no baseline and the
-sample is green. Prompt CACHED shares below 4,096 tokens stay neutral cyan.
+Generation and prefill speeds have no threshold and no grade: their samples
+are green. Magenta marks an unusual sample on any time chart and is used for
+nothing else: on the generation chart, a sample whose speed was unusually far
+below its usual value; on another chart, a sample whose reading was unusual
+for the host, or was the reason for a slowdown. The generation chart's
+dashed reference line is each sample's usual speed for the work it was doing
+(requests writing and their context), drawn column by column and cut through
+bars that pass it: grey ordinarily, magenta over slow samples. Prompt CACHED shares below 4,096 tokens stay
+neutral cyan.
 
 Chart colors agree with the assessment where both grade the same signal:
-"Paging active" turns red from the paging chart's critical rate, a generation
-drop of 30% or more is red in both, and compression keeps the finding's
+"Paging active" turns red from the paging chart's critical rate, and compression keeps the finding's
 enter/exit hysteresis. GPU saturation is red on the chart while the assessment
 still reports no bottleneck unless a slowdown is measured. Journal paging events
 use the paging band: traffic below the warning rate is logged as `light`, in

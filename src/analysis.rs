@@ -1,20 +1,38 @@
 // SPDX-License-Identifier: MIT
-//! Health classification and measured throughput correlation; no terminal rendering.
+//! Health classification and generation slowdowns; no terminal rendering.
+//!
+//! A slowdown is found by anomaly detection (`crate::anomaly`): generation
+//! speed unusually far below its usual value, three samples running. Its
+//! reason is whatever else is unusual at the same time.
+use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
-    CorrelationCause, CorrelationInsight, CorrelationKey, Sample, TelemetrySource,
-    ThroughputDirection, Tone, MIB,
+    CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
+    Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
 };
 use crate::formatting::{
-    bytes, compact_tokens, count, llm_generation_rate_label, llm_prefill_rate_label, percent,
-    pressure_state_label, rate, signed_rate,
+    bytes, compact_tokens, llm_generation_rate_label, llm_prefill_rate_label, percent, rate,
+    signed_rate,
 };
 use std::collections::VecDeque;
-pub(crate) const CORRELATION_HISTORY_LIMIT: usize = 16;
-pub(crate) const THROUGHPUT_CHANGE_MIN_TPS: f64 = 2.0;
-pub(crate) const THROUGHPUT_CHANGE_RATIO: f64 = 0.10;
-pub(crate) const CONTEXT_GROWTH_TOKENS: u64 = 1024;
-pub(crate) const MODEL_MEMORY_GROWTH: u64 = 256 * MIB;
+use std::time::SystemTime;
+
+/// A generating request that goes this long without a token has stalled:
+/// at 20–90 tok/s a healthy decode produces one every 50 ms or so.
+pub(crate) const STALL_SECONDS: f64 = 1.5;
+/// Runtime storage traffic worth naming. A decoding runtime touches its disk
+/// only to load or save prompt cache; weights are already in memory.
+pub(crate) const DISK_ACTIVE_RATE: u64 = 16 * MIB;
+/// Generation is slow when it is unusually far below its usual speed, and
+/// by at least this share of it and this many tok/s.
+pub(crate) const SLOW_SHARE: f64 = 0.20;
+pub(crate) const SLOW_MIN_TPS: f64 = 2.0;
+/// A slowdown with nothing else unusual becomes the usual speed after this
+/// long, and one whose request has been idle this long is over.
+pub(crate) const SETTLE_SECONDS: f64 = 30.0;
+/// A slowdown with the same reason as one seen within this long is the same
+/// story: the Journal does not tell it again.
+pub(crate) const SAME_STORY_SECONDS: f64 = 60.0;
 
 #[derive(Clone, Default)]
 pub(crate) struct CorrelationObservation {
@@ -32,14 +50,250 @@ pub(crate) struct CorrelationObservation {
     pub(crate) model_memory_max: Option<u64>,
     pub(crate) metal_in_use: Option<u64>,
     pub(crate) metal_alloc: Option<u64>,
-    pub(crate) context_tokens: Option<u64>,
     pub(crate) active_requests: Option<u64>,
     pub(crate) waiting_requests: Option<u64>,
+    /// Running requests reading their prompt, and writing their answer.
+    pub(crate) prefilling: u64,
+    pub(crate) generating: u64,
+    /// The largest prompt among requests prefilling.
+    pub(crate) prefill_prompt: Option<u64>,
+    pub(crate) at: Option<SystemTime>,
+    /// The longest a generating request has gone without a token, in seconds.
+    pub(crate) stalled_for: Option<f64>,
+    /// Tokens written so far, when one request is generating.
+    pub(crate) output_tokens: Option<u64>,
+    /// The runtime's storage reads and writes per second, and SSD-cache
+    /// blocks it loaded, saved and evicted since the previous sample.
+    pub(crate) disk: DiskActivity,
+    pub(crate) ssd_full: bool,
+    /// CPU the runtime's processes use, in percent of one core.
+    pub(crate) cpu: Option<f64>,
+    /// Tokens held by the requests writing an answer (prompt and output so
+    /// far, together), when the runtime lists its requests.
+    pub(crate) context: Option<u64>,
 }
 
-#[derive(Default)]
-pub(crate) struct CorrelationEngine {
-    pub(crate) observations: VecDeque<CorrelationObservation>,
+impl CorrelationObservation {
+    /// The runtime's disk work in this sample, in words, when it is enough to
+    /// matter: storage traffic above the active rate, or SSD-cache blocks moved.
+    pub(crate) fn disk_label(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        let disk = &self.disk;
+        if let Some(read) = disk.read.filter(|read| *read >= DISK_ACTIVE_RATE) {
+            parts.push(format!("disk read {}", rate(read)));
+        }
+        if let Some(write) = disk.write.filter(|write| *write >= DISK_ACTIVE_RATE) {
+            parts.push(format!("disk write {}", rate(write)));
+        }
+        let blocks = |count: u64, verb: &str| {
+            format!(
+                "{count} SSD cache block{} {verb}",
+                if count == 1 { "" } else { "s" }
+            )
+        };
+        if disk.loads > 0 {
+            parts.push(blocks(disk.loads, "loaded"));
+        }
+        if disk.saves > 0 {
+            parts.push(blocks(disk.saves, "saved"));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        if self.ssd_full && disk.evictions > 0 {
+            parts.push("SSD cache full".into());
+        }
+        Some(parts.join(" · "))
+    }
+}
+
+fn running(observation: &CorrelationObservation) -> u64 {
+    observation.prefilling + observation.generating
+}
+
+/// What a slowdown can be explained by. Each is judged by the one rule in
+/// `crate::anomaly`, against its own usual value while generation ran at its
+/// usual speed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Thermal,
+    Pressure,
+    Paging,
+    Disk,
+    Prefill,
+    Compression,
+    Queue,
+    ModelMemory,
+    MetalMemory,
+    Cpu,
+    GpuIdle,
+}
+
+/// Every signal, the host's limits before the workload: when several are
+/// unusual at once, the first is named as the reason. An idle GPU comes
+/// last: it is what a slowdown looks like, and a reason only by itself.
+pub(crate) const SIGNALS: [Signal; 11] = [
+    Signal::Thermal,
+    Signal::Pressure,
+    Signal::Paging,
+    Signal::Disk,
+    Signal::Prefill,
+    Signal::Compression,
+    Signal::Queue,
+    Signal::ModelMemory,
+    Signal::MetalMemory,
+    Signal::Cpu,
+    Signal::GpuIdle,
+];
+
+/// When a signal's value matters: the level it must reach at all, and how
+/// far above its usual value it must be (a share of that value, and at least
+/// a fixed step).
+struct Limits {
+    from: f64,
+    share: f64,
+    least: f64,
+}
+
+fn usual_rate(usual: f64) -> String {
+    if usual < 1.0 {
+        "usual none".into()
+    } else {
+        format!("usual {}", rate(usual as u64))
+    }
+}
+
+impl Signal {
+    /// A reading of the host or the runtime, which is watched all the time.
+    /// The rest is the workload (requests and their prompts): that changes
+    /// because someone asked, and is only ever the reason for a slowdown.
+    fn host(self) -> bool {
+        !matches!(self, Self::Prefill | Self::Queue)
+    }
+
+    pub(crate) fn cause(self) -> CorrelationCause {
+        match self {
+            Self::Thermal => CorrelationCause::Thermal,
+            Self::Pressure => CorrelationCause::MemoryPressure,
+            Self::Paging => CorrelationCause::Paging,
+            Self::Disk => CorrelationCause::DiskIo,
+            Self::Prefill => CorrelationCause::ConcurrentPrefill,
+            Self::Compression => CorrelationCause::Compression,
+            Self::Queue => CorrelationCause::Queueing,
+            Self::ModelMemory => CorrelationCause::ModelMemory,
+            Self::MetalMemory => CorrelationCause::MetalMemory,
+            Self::Cpu => CorrelationCause::Cpu,
+            Self::GpuIdle => CorrelationCause::GpuIdle,
+        }
+    }
+
+    fn value(self, o: &CorrelationObservation) -> Option<f64> {
+        match self {
+            Self::Thermal => Some(f64::from(u8::from(o.thermal_limited))),
+            Self::Pressure => Some(f64::from(o.pressure)),
+            Self::Paging => Some(o.paging_rate as f64),
+            // Cache blocks moved count as disk work whatever the byte rate.
+            Self::Disk => {
+                let traffic = o.disk.read.unwrap_or(0).max(o.disk.write.unwrap_or(0));
+                Some(if o.disk.loads + o.disk.saves > 0 {
+                    traffic.max(DISK_ACTIVE_RATE) as f64
+                } else {
+                    traffic as f64
+                })
+            }
+            // A prompt being read only slows an answer being written.
+            Self::Prefill => Some(if o.generating > 0 {
+                o.prefilling as f64
+            } else {
+                0.0
+            }),
+            Self::Compression => Some(o.compression_rate as f64),
+            Self::Queue => o.waiting_requests.map(|waiting| waiting as f64),
+            Self::ModelMemory => fraction(o.model_memory, o.model_memory_max),
+            Self::MetalMemory => fraction(o.metal_in_use, o.metal_alloc),
+            Self::Cpu => o.cpu,
+            // Judged as the share of the GPU left idle, so that like every
+            // other signal it is unusual when it rises.
+            Self::GpuIdle => o.gpu_util.map(|gpu| 100.0 - f64::from(gpu.min(100))),
+        }
+    }
+
+    fn limits(self, thresholds: Thresholds) -> Limits {
+        let (from, share, least) = match self {
+            Self::Thermal | Self::Prefill | Self::Queue => (1.0, 0.0, 1.0),
+            Self::Pressure => (2.0, 0.0, 1.0),
+            Self::Paging => (thresholds.swap_warn_rate as f64, 0.5, 0.0),
+            Self::Disk => (DISK_ACTIVE_RATE as f64, 0.5, 0.0),
+            Self::Compression => (thresholds.compression_warn_rate as f64, 0.5, 0.0),
+            Self::ModelMemory | Self::MetalMemory => (0.90, 0.0, 0.02),
+            // Half a core, and half as much again as usual.
+            Self::Cpu => (50.0, 0.5, 50.0),
+            // A GPU under 70% busy, and twenty points idler than usual.
+            Self::GpuIdle => (30.0, 0.0, 20.0),
+        };
+        Limits { from, share, least }
+    }
+
+    /// The signal now, beside its usual value.
+    fn describe(self, o: &CorrelationObservation, usual: f64) -> String {
+        match self {
+            Self::Thermal => "thermal limit".into(),
+            Self::Pressure => format!(
+                "memory pressure {}",
+                if o.pressure >= 4 { "critical" } else { "watch" }
+            ),
+            Self::Paging => format!("paging {} ({})", rate(o.paging_rate), usual_rate(usual)),
+            Self::Disk => format!(
+                "{} ({})",
+                o.disk_label().unwrap_or_else(|| "disk work".into()),
+                usual_rate(usual)
+            ),
+            Self::Prefill => match o.prefill_prompt {
+                Some(prompt) => format!("{} prefill beside generation", compact_tokens(prompt)),
+                None => "prefill beside generation".into(),
+            },
+            Self::Compression => format!(
+                "compression {} ({})",
+                rate(o.compression_rate),
+                usual_rate(usual)
+            ),
+            Self::Queue => format!(
+                "{} waiting (usual {usual:.0})",
+                o.waiting_requests.unwrap_or_default()
+            ),
+            Self::ModelMemory => format!(
+                "model MEM {:.0}% of ceiling (usual {:.0}%)",
+                fraction(o.model_memory, o.model_memory_max).unwrap_or_default() * 100.0,
+                usual * 100.0
+            ),
+            Self::MetalMemory => format!(
+                "Metal MEM {:.0}% (usual {:.0}%)",
+                fraction(o.metal_in_use, o.metal_alloc).unwrap_or_default() * 100.0,
+                usual * 100.0
+            ),
+            Self::Cpu => format!(
+                "runtime CPU {:.0}% (usual {usual:.0}%)",
+                o.cpu.unwrap_or_default()
+            ),
+            Self::GpuIdle => format!(
+                "GPU {}% (usual {:.0}%)",
+                o.gpu_util.unwrap_or_default(),
+                100.0 - usual
+            ),
+        }
+    }
+}
+
+/// A signal that is unusual in this sample, in words.
+struct Finding {
+    signal: Signal,
+    text: String,
+}
+
+fn seconds_between(from: Option<SystemTime>, to: Option<SystemTime>) -> f64 {
+    from.zip(to)
+        .and_then(|(from, to)| to.duration_since(from).ok())
+        .map_or(0.0, |gap| gap.as_secs_f64())
 }
 
 pub(crate) fn threshold_with_hysteresis(
@@ -364,50 +618,164 @@ pub(crate) fn llm_is_observed(sample: &Sample) -> bool {
         || sample.llm_model != "not detected"
 }
 
-pub(crate) fn correlation_evidence_label(sample: &Sample) -> String {
-    match sample.correlation.cause {
-        CorrelationCause::Paging if sample.paging_churn() > 0 => {
-            format!("I/O {}", rate(sample.paging_churn()))
-        }
-        CorrelationCause::Compression if sample.compress.saturating_add(sample.decompress) > 0 => {
-            format!(
-                "compress {}",
-                rate(sample.compress.saturating_add(sample.decompress))
-            )
-        }
-        CorrelationCause::MemoryPressure => {
-            format!("pressure {}", pressure_state_label(sample))
-        }
-        CorrelationCause::Thermal => "thermal limit".into(),
-        CorrelationCause::MetalMemory => fraction(sample.gpu_in_use, sample.gpu_alloc)
-            .map(|ratio| format!("Metal mem {:.0}%", ratio * 100.0))
-            .unwrap_or_else(|| "Metal mem".into()),
-        CorrelationCause::GpuSaturation => [
-            sample.gpu_util,
-            sample.metal.renderer_util,
-            sample.metal.tiler_util,
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .map(|value| format!("GPU {value}%"))
-        .unwrap_or_else(|| "GPU".into()),
-        CorrelationCause::Queueing => sample
-            .llm_waiting_requests
-            .map(|waiting| format!("queue {waiting} waiting"))
-            .unwrap_or_else(|| "queueing".into()),
-        CorrelationCause::ContextGrowth => llm_context_tokens(sample)
-            .map(|tokens| format!("context {}", compact_tokens(tokens)))
-            .unwrap_or_else(|| "context/KV".into()),
-        CorrelationCause::ModelMemory => {
-            fraction(sample.llm_model_memory, sample.llm_model_memory_max)
-                .map(|ratio| format!("model mem {:.0}%", ratio * 100.0))
-                .unwrap_or_else(|| "model memory".into())
-        }
-        CorrelationCause::Runtime => "workload/runtime".into(),
-        CorrelationCause::None => String::new(),
-        CorrelationCause::Paging | CorrelationCause::Compression => String::new(),
+/// The usual generation speed, and the speed below which it is slow.
+fn slow_range(speed: &Usual) -> Option<(f64, f64)> {
+    speed
+        .range(SLOW_SHARE, SLOW_MIN_TPS)
+        .map(|(usual, margin)| (usual, (usual - margin).max(0.0)))
+}
+
+/// Generation speeds kept to compare with: about fifty minutes of
+/// generation, so that each kind of work has enough of its own.
+const SPEED_HISTORY: usize = 3000;
+/// Requests writing at once are grouped from this many up.
+const MANY_REQUESTS: u64 = 4;
+
+/// The work a speed was measured on. Speed depends on it: on one server's
+/// week of requests a lone answer ran at 83 tok/s with under 1k tokens of
+/// context and 54 tok/s with 64k–128k, and each answer ran at 73, 55, 43
+/// and 31 tok/s with one to four requests writing at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Work {
+    pub(crate) requests: u64,
+    pub(crate) context: Option<u64>,
+}
+
+impl Work {
+    pub(crate) fn from_sample(sample: &Sample) -> Self {
+        Self::of(&CorrelationObservation::from_sample(sample))
     }
+
+    fn of(o: &CorrelationObservation) -> Self {
+        let requests = if o.generating > 0 {
+            o.generating
+        } else {
+            o.active_requests.unwrap_or(1)
+        };
+        Self {
+            requests: requests.clamp(1, MANY_REQUESTS),
+            context: o.context,
+        }
+    }
+
+    /// The same number of requests, with a context within a factor of two
+    /// (or no context known for either).
+    fn like(self, other: Self) -> bool {
+        self.requests == other.requests
+            && match (self.context, other.context) {
+                (Some(a), Some(b)) => a.max(1) <= b.max(1) * 2 && b.max(1) <= a.max(1) * 2,
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    /// What it is, in words: `1 request · 40k context`.
+    fn label(self) -> String {
+        let requests = format!(
+            "{}{} request{}",
+            self.requests,
+            if self.requests >= MANY_REQUESTS {
+                "+"
+            } else {
+                ""
+            },
+            if self.requests == 1 { "" } else { "s" }
+        );
+        match self.context {
+            Some(context) => format!("{requests} · {} context", compact_tokens(context)),
+            None => requests,
+        }
+    }
+}
+
+/// Earlier generation speeds, each with the work it was measured on. A
+/// speed is judged against earlier samples of similar work.
+#[derive(Clone, Default)]
+pub(crate) struct Speeds {
+    samples: VecDeque<(f64, Work)>,
+}
+
+impl Speeds {
+    fn learn(&mut self, speed: f64, work: Work) {
+        if !speed.is_finite() {
+            return;
+        }
+        self.samples.push_back((speed, work));
+        while self.samples.len() > SPEED_HISTORY {
+            self.samples.pop_front();
+        }
+    }
+
+    /// The usual speed for `work`: from its latest earlier samples of
+    /// similar work. Work not seen before has no usual speed until it has
+    /// been seen: it is learned, never judged against different work.
+    pub(crate) fn usual(&self, work: Work) -> Usual {
+        let mut usual = Usual::default();
+        usual.relearn(
+            self.samples
+                .iter()
+                .rev()
+                .filter(|(_, earlier)| earlier.like(work))
+                .take(WINDOW)
+                .map(|(speed, _)| *speed)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev(),
+        );
+        usual
+    }
+
+    /// A slower speed for this work has held with nothing else unusual: it
+    /// is how this work now runs. Earlier samples of the same work go.
+    fn settle(&mut self, quiet: &[(f64, Work)]) {
+        self.samples
+            .retain(|(_, earlier)| !quiet.iter().any(|(_, work)| earlier.like(*work)));
+        for (speed, work) in quiet {
+            self.learn(*speed, *work);
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CorrelationEngine {
+    /// The provider and model the usual values belong to.
+    model: Option<(String, String)>,
+    /// Generation speed with the work it was measured on, and every signal
+    /// in `SIGNALS`, while speed was usual.
+    pub(crate) speed: Speeds,
+    /// The work generation was last seen doing.
+    work: Work,
+    host: [Usual; SIGNALS.len()],
+    /// Each signal's unusual values in a row, with when the row began: held
+    /// back from its usual value until it passes or has held long enough.
+    held: [(Option<SystemTime>, Vec<f64>); SIGNALS.len()],
+    /// Slow samples not yet enough in a row to be a slowdown.
+    pending: Vec<CorrelationObservation>,
+    episode: Option<Episode>,
+    /// When generation was last seen running.
+    seen: Option<SystemTime>,
+    /// The reason last journaled, and when it was last seen.
+    told: Option<(CorrelationCause, Option<SystemTime>)>,
+}
+
+/// A slowdown from its first slow sample. The speed it fell from is fixed
+/// here, and nothing is learned while it lasts: a slowdown that is still
+/// going on must not become the usual speed by going on.
+struct Episode {
+    reference: f64,
+    began: Option<SystemTime>,
+    samples: u32,
+    low: f64,
+    /// Its latest slow speeds: their middle is the speed it is reported at.
+    lows: VecDeque<f64>,
+    /// Samples back at the usual speed, in a row.
+    back: Vec<CorrelationObservation>,
+    /// Reasons already journaled for this slowdown.
+    reported: Vec<CorrelationCause>,
+    /// Told as part of an earlier slowdown: its end is not journaled either.
+    silent: bool,
+    /// Its samples since something else was last unusual.
+    quiet: Vec<CorrelationObservation>,
 }
 
 impl CorrelationEngine {
@@ -417,55 +785,423 @@ impl CorrelationEngine {
         thresholds: Thresholds,
     ) -> CorrelationInsight {
         if sample.llm_remote {
-            self.observations.clear();
+            self.reset();
             return CorrelationInsight::default();
         }
         let current = CorrelationObservation::from_sample(sample);
-        let previous = self.observations.back().cloned();
-        let comparable_previous = previous
-            .as_ref()
-            .filter(|previous| {
-                previous.provider == current.provider && previous.model == current.model
-            })
-            .cloned();
-        let baseline = self.baseline(&current.provider, &current.model);
-        let insight =
-            correlate_observations(&current, comparable_previous.as_ref(), baseline, thresholds);
-
-        self.observations.push_back(current);
-        while self.observations.len() > CORRELATION_HISTORY_LIMIT {
-            self.observations.pop_front();
+        // Usual values belong to one model on one runtime.
+        let model = (current.provider.clone(), current.model.clone());
+        if self.model.as_ref() != Some(&model) {
+            self.reset();
+            self.model = Some(model);
         }
+        let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
+        let speed = current.generation_tps.filter(|tps| {
+            tps.is_finite() && (*tps > 0.0 || current.active_requests.unwrap_or_default() > 0)
+        });
+        if stalled.is_none() && speed.is_none() {
+            // Nothing is generating: there is no speed to judge. A slowdown
+            // waits for its next sample.
+            return CorrelationInsight {
+                usual_speed: slow_range(&self.speed.usual(self.work)),
+                usual_for: self.work.label(),
+                ..CorrelationInsight::default()
+            };
+        }
+        // A slowdown whose request went idle long ago is over.
+        if seconds_between(self.seen, current.at) >= SETTLE_SECONDS {
+            self.keep_pending(thresholds);
+            self.episode = None;
+        }
+        self.seen = current.at;
+        // A request that stops producing tokens is observed, not inferred.
+        if let Some(idle) = stalled {
+            return self.stall(&current, idle, thresholds);
+        }
+        let speed = speed.unwrap_or_default();
+        // A request that has just gone quiet may be about to stall: its
+        // near-zero speed is neither slow nor usual until that is known.
+        let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5);
+        // Judged against earlier samples of similar work: a longer context
+        // or another request writing beside it is expected to be slower.
+        let work = Work::of(&current);
+        self.work = work;
+        let expected = self.speed.usual(work);
+        let usual_for = work.label();
+        let usual = slow_range(&expected);
+        let low = expected
+            .below(speed, SLOW_SHARE, SLOW_MIN_TPS)
+            .filter(|_| !quiet);
+        // Outside a slowdown a sample still says what is unusual in it: its
+        // own speed, and any reading of the host.
+        let steady = |usual: Option<(f64, f64)>, watched: Vec<Finding>| CorrelationInsight {
+            direction: if usual.is_some() {
+                ThroughputDirection::Flat
+            } else {
+                ThroughputDirection::Unknown
+            },
+            delta_percent: usual
+                .filter(|(usual, _)| *usual > 0.0)
+                .map(|(usual, _)| (speed - usual) / usual * 100.0),
+            usual_speed: usual,
+            usual_for: usual_for.clone(),
+            slow: low.is_some(),
+            unusual: watched.iter().map(|found| found.signal.cause()).collect(),
+            notes: watched.into_iter().map(|found| found.text).collect(),
+            ..CorrelationInsight::default()
+        };
+        let watched = self.watched(&current, thresholds);
+
+        let mut open = match (self.episode.take(), low) {
+            (Some(mut open), _) => {
+                open.samples += 1;
+                if let Some(level) = low {
+                    // What this work should run at, as the work changes.
+                    open.reference = level;
+                    open.back.clear();
+                    open.low = open.low.min(speed);
+                    open.lows.push_back(speed);
+                } else if !quiet {
+                    open.back.push(current.clone());
+                }
+                open
+            }
+            (None, Some(reference)) => {
+                self.pending.push(current.clone());
+                if self.pending.len() < SLOW_SAMPLES {
+                    return steady(usual, watched);
+                }
+                let speeds: Vec<f64> = self
+                    .pending
+                    .iter()
+                    .filter_map(|o| o.generation_tps)
+                    .collect();
+                let began = self.pending[0].at;
+                let samples = self.pending.len() as u32;
+                self.pending.clear();
+                Episode {
+                    reference,
+                    began,
+                    samples,
+                    low: speeds.iter().copied().fold(speed, f64::min),
+                    lows: speeds.into(),
+                    back: Vec::new(),
+                    reported: Vec::new(),
+                    silent: false,
+                    quiet: Vec::new(),
+                }
+            }
+            (None, None) => {
+                // An ordinary sample; a slow one or two before it were too.
+                if !quiet {
+                    self.keep_pending(thresholds);
+                    self.learn(&current, thresholds);
+                }
+                return steady(usual, watched);
+            }
+        };
+        while open.lows.len() > SLOW_SAMPLES {
+            open.lows.pop_front();
+        }
+        let seconds = seconds_between(open.began, current.at);
+        let ended = |settled: bool, open: &Episode| {
+            (!open.silent).then_some(DropEnd {
+                settled,
+                seconds,
+                low: open.low,
+                rate: speed,
+                reference: open.reference,
+            })
+        };
+
+        // Back at its usual speed for three samples: it recovered.
+        if open.back.len() >= SLOW_SAMPLES {
+            for observation in &open.back {
+                self.learn(observation, thresholds);
+            }
+            return CorrelationInsight {
+                ended: ended(false, &open),
+                ..steady(usual, watched)
+            };
+        }
+
+        // The number of requests and their context are not reasons: the
+        // usual speed is already the one for this work.
+        let findings = self.findings(&current, thresholds);
+        // With no reason at all, a slower speed that holds becomes usual.
+        if !findings.is_empty() {
+            open.quiet.clear();
+        } else {
+            open.quiet.push(current.clone());
+            let extra = open.quiet.len().saturating_sub(WINDOW);
+            open.quiet.drain(..extra);
+        }
+        if seconds_between(open.quiet.first().and_then(|o| o.at), current.at) >= SETTLE_SECONDS {
+            // Nothing else is unusual and it has held: this is how fast
+            // generation now runs.
+            let quiet: Vec<(f64, Work)> = open
+                .quiet
+                .iter()
+                .filter_map(|o| o.generation_tps.map(|speed| (speed, Work::of(o))))
+                .collect();
+            self.speed.settle(&quiet);
+            for usual in &mut self.host {
+                usual.relearn(std::iter::empty());
+            }
+            self.held = Default::default();
+            for observation in &open.quiet {
+                self.learn_host(observation, thresholds);
+            }
+            return CorrelationInsight {
+                ended: ended(true, &open),
+                ..steady(slow_range(&self.speed.usual(work)), Vec::new())
+            };
+        }
+
+        let shown = median(open.lows.iter().copied().collect());
+        let percent = (shown - open.reference) / open.reference * 100.0;
+        let rate_label = format!(
+            "GEN ↓{:.1}% ({:.1}→{shown:.1} tok/s)",
+            percent.abs(),
+            open.reference
+        );
+        let cause = findings
+            .first()
+            .map(|found| found.signal.cause())
+            .unwrap_or_default();
+        let texts: Vec<&str> = findings.iter().map(|found| found.text.as_str()).collect();
+        // One Journal row per reason in a slowdown, and none for a slowdown
+        // that repeats the last one's reason within a minute.
+        let same_story = self.told.is_some_and(|(told, at)| {
+            told == cause && seconds_between(at, current.at) < SAME_STORY_SECONDS
+        });
+        if open.reported.is_empty() && same_story {
+            open.reported.push(cause);
+            open.silent = true;
+        }
+        // What was unusual has passed while speed is still down: that is
+        // the tail of the same slowdown, not a new finding.
+        let faded = findings.is_empty() && !open.reported.is_empty();
+        let repeat = faded || open.reported.contains(&cause);
+        if !repeat {
+            open.reported.push(cause);
+            open.silent = false;
+        }
+        if !faded {
+            self.told = Some((cause, current.at));
+        }
+        let insight = CorrelationInsight {
+            direction: ThroughputDirection::Down,
+            cause,
+            summary: if texts.is_empty() {
+                format!("{rate_label} · nothing else unusual")
+            } else {
+                format!(
+                    "{rate_label} · unusual: {}",
+                    texts
+                        .iter()
+                        .take(2)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                )
+            },
+            details: if texts.is_empty() {
+                String::new()
+            } else {
+                format!("{} · {}", cause.label(), texts.join(" · "))
+            },
+            lead: texts
+                .first()
+                .map(|text| (*text).to_owned())
+                .unwrap_or_default(),
+            stall_seconds: None,
+            event_key: Some(CorrelationKey {
+                direction: ThroughputDirection::Down,
+                cause,
+            }),
+            delta_percent: Some(percent),
+            episode: Some(DropEpisode {
+                reference: open.reference,
+                low: open.low,
+                seconds,
+                samples: open.samples,
+            }),
+            ended: None,
+            repeat,
+            slow: low.is_some(),
+            unusual: findings.iter().map(|found| found.signal.cause()).collect(),
+            notes: texts.iter().map(|text| (*text).to_owned()).collect(),
+            usual_speed: usual,
+            usual_for,
+        };
+        self.episode = Some(open);
         insight
     }
 
-    pub(crate) fn baseline(&self, provider: &str, model: &str) -> Option<f64> {
-        let mut rates = self
-            .observations
+    /// The signals that are unusual in this sample, the most telling first.
+    fn findings(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
+        let findings: Vec<Finding> = SIGNALS
             .iter()
-            .filter(|observation| observation.provider == provider && observation.model == model)
-            .filter_map(|observation| observation.generation_tps)
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .collect::<Vec<_>>();
-        if rates.is_empty() {
-            return None;
+            .zip(&self.host)
+            .filter_map(|(signal, usual)| {
+                let value = signal.value(current)?;
+                let limits = signal.limits(thresholds);
+                let usual = usual
+                    .above(value, limits.share, limits.least)
+                    .filter(|_| value >= limits.from)?;
+                Some(Finding {
+                    signal: *signal,
+                    text: signal.describe(current, usual),
+                })
+            })
+            .collect();
+        findings
+    }
+
+    /// The host readings that are unusual in this sample, slowdown or not.
+    fn watched(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
+        let mut findings = self.findings(current, thresholds);
+        findings.retain(|found| found.signal.host());
+        findings
+    }
+
+    /// A sample at the usual speed teaches what is usual. A signal that is
+    /// unusual in it is held back: if it passes, it was part of the usual
+    /// range after all; if it holds for `SETTLE_SECONDS` with speed still
+    /// usual, it is how the signal now runs.
+    fn learn(&mut self, observation: &CorrelationObservation, thresholds: Thresholds) {
+        if let Some(speed) = observation.generation_tps {
+            self.speed.learn(speed, Work::of(observation));
         }
-        rates.sort_by(f64::total_cmp);
-        let middle = rates.len() / 2;
-        if rates.len().is_multiple_of(2) {
-            Some((rates[middle - 1] + rates[middle]) / 2.0)
-        } else {
-            Some(rates[middle])
+        self.learn_host(observation, thresholds);
+    }
+
+    fn learn_host(&mut self, observation: &CorrelationObservation, thresholds: Thresholds) {
+        for ((signal, usual), (began, held)) in
+            SIGNALS.iter().zip(&mut self.host).zip(&mut self.held)
+        {
+            let Some(value) = signal.value(observation) else {
+                continue;
+            };
+            let limits = signal.limits(thresholds);
+            let unusual =
+                value >= limits.from && usual.above(value, limits.share, limits.least).is_some();
+            if !unusual {
+                for value in held.drain(..) {
+                    usual.learn(value);
+                }
+                usual.learn(value);
+                continue;
+            }
+            if held.is_empty() {
+                *began = observation.at;
+            }
+            held.push(value);
+            if seconds_between(*began, observation.at) >= SETTLE_SECONDS {
+                usual.relearn(held.drain(..));
+            }
+        }
+    }
+
+    /// Slow samples that did not become a slowdown were ordinary after all.
+    fn keep_pending(&mut self, thresholds: Thresholds) {
+        for observation in std::mem::take(&mut self.pending) {
+            self.learn(&observation, thresholds);
+        }
+    }
+
+    /// A request that produced no token for `idle` seconds, with what the
+    /// host was doing while it waited.
+    fn stall(
+        &mut self,
+        current: &CorrelationObservation,
+        idle: f64,
+        thresholds: Thresholds,
+    ) -> CorrelationInsight {
+        let mut evidence = match current.output_tokens {
+            Some(out) => format!("no new token for {idle:.0}s at {} out", compact_tokens(out)),
+            None => format!("no new token for {idle:.0}s"),
+        };
+        let gpu = [current.gpu_util, current.renderer_util, current.tiler_util]
+            .into_iter()
+            .flatten()
+            .max();
+        let mut with = Vec::new();
+        match gpu {
+            Some(gpu) if gpu < 10 => with.push("GPU idle".to_owned()),
+            Some(gpu) => with.push(format!("GPU {gpu}%")),
+            None => {}
+        }
+        if let Some(disk) = current.disk_label() {
+            with.push(disk);
+        }
+        if current.paging_rate >= PAGING_ACTIVE_ENTER_RATE {
+            with.push(format!("paging {}", rate(current.paging_rate)));
+        }
+        if current.compression_rate >= thresholds.compression_warn_rate {
+            with.push(format!("compression {}", rate(current.compression_rate)));
+        }
+        if current.pressure >= 2 {
+            with.push("memory pressure".into());
+        }
+        if running(current) > 1 {
+            with.push(format!("{} requests running", running(current)));
+        }
+        if !with.is_empty() {
+            evidence = format!("{evidence} · {}", with.join(" · "));
+        }
+        let seconds = self
+            .episode
+            .as_ref()
+            .map_or(0.0, |open| seconds_between(open.began, current.at));
+        let episode = self.episode.as_mut().map(|open| {
+            open.samples += 1;
+            DropEpisode {
+                reference: open.reference,
+                low: open.low,
+                seconds,
+                samples: open.samples,
+            }
+        });
+        CorrelationInsight {
+            direction: ThroughputDirection::Down,
+            cause: CorrelationCause::Stall,
+            summary: format!("GEN stalled · {evidence}"),
+            details: format!("{} · {evidence}", CorrelationCause::Stall.label()),
+            lead: evidence,
+            stall_seconds: Some(idle),
+            event_key: Some(CorrelationKey {
+                direction: ThroughputDirection::Down,
+                cause: CorrelationCause::Stall,
+            }),
+            delta_percent: None,
+            episode,
+            ended: None,
+            repeat: false,
+            slow: true,
+            unusual: Vec::new(),
+            notes: Vec::new(),
+            usual_speed: slow_range(&self.speed.usual(self.work)),
+            usual_for: self.work.label(),
         }
     }
 
     pub(crate) fn reset(&mut self) {
-        self.observations.clear();
+        *self = Self::default();
     }
 }
 
 impl CorrelationObservation {
     pub(crate) fn from_sample(sample: &Sample) -> Self {
+        // Runtimes report prefill progress only while a prompt is being read.
+        let running: Vec<_> = sample
+            .llm_requests
+            .iter()
+            .filter(|r| !r.completed && !r.queued)
+            .collect();
+        let prefilling: Vec<_> = running.iter().filter(|r| r.prefilled.is_some()).collect();
+        let generating: Vec<_> = running.iter().filter(|r| r.prefilled.is_none()).collect();
         Self {
             provider: sample.llm_provider.clone(),
             model: sample.llm_model.clone(),
@@ -485,303 +1221,33 @@ impl CorrelationObservation {
             model_memory_max: sample.llm_model_memory_max,
             metal_in_use: sample.gpu_in_use,
             metal_alloc: sample.gpu_alloc,
-            context_tokens: llm_context_tokens(sample),
             active_requests: sample.llm_active_requests,
             waiting_requests: sample.llm_waiting_requests,
+            prefilling: prefilling.len() as u64,
+            generating: (running.len() - prefilling.len()) as u64,
+            prefill_prompt: prefilling.iter().map(|r| r.prompt).max(),
+            at: sample.llm_observed_at.or_else(|| Some(SystemTime::now())),
+            stalled_for: running
+                .iter()
+                .filter(|r| r.prefilled.is_none())
+                .filter_map(|r| r.idle_for)
+                .map(|idle| idle.as_secs_f64())
+                .reduce(f64::max),
+            output_tokens: match generating.as_slice() {
+                [only] => only.output,
+                _ => None,
+            },
+            disk: sample.disk,
+            ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
+            cpu: (sample.llm_count > 0).then_some(sample.llm_cpu),
+            context: (!generating.is_empty()).then(|| {
+                generating
+                    .iter()
+                    .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
+                    .sum()
+            }),
         }
     }
-}
-
-pub(crate) struct CorrelationFactor {
-    pub(crate) cause: CorrelationCause,
-    pub(crate) score: u8,
-    pub(crate) evidence: String,
-}
-
-pub(crate) fn correlate_observations(
-    current: &CorrelationObservation,
-    previous: Option<&CorrelationObservation>,
-    baseline: Option<f64>,
-    thresholds: Thresholds,
-) -> CorrelationInsight {
-    let current_tps = current.generation_tps.filter(|value| {
-        value.is_finite() && (*value > 0.0 || current.active_requests.unwrap_or_default() > 0)
-    });
-    let baseline = baseline.filter(|value| value.is_finite() && *value > 0.0);
-    let (direction, delta_percent) = match (current_tps, baseline) {
-        (Some(current), Some(baseline)) => {
-            let delta = current - baseline;
-            let percent = delta / baseline * 100.0;
-            let direction = if delta <= -THROUGHPUT_CHANGE_MIN_TPS
-                && percent <= -(THROUGHPUT_CHANGE_RATIO * 100.0)
-            {
-                ThroughputDirection::Down
-            } else if delta >= THROUGHPUT_CHANGE_MIN_TPS
-                && percent >= THROUGHPUT_CHANGE_RATIO * 100.0
-            {
-                ThroughputDirection::Up
-            } else {
-                ThroughputDirection::Flat
-            };
-            (direction, Some(percent))
-        }
-        _ => (ThroughputDirection::Unknown, None),
-    };
-
-    let mut factors = Vec::new();
-    if current.thermal_limited {
-        push_correlation_factor(&mut factors, CorrelationCause::Thermal, 95, "thermal limit");
-    }
-
-    match current.pressure {
-        4 => push_correlation_factor(
-            &mut factors,
-            CorrelationCause::MemoryPressure,
-            100,
-            "memory pressure critical",
-        ),
-        2 => push_correlation_factor(
-            &mut factors,
-            CorrelationCause::MemoryPressure,
-            72,
-            "memory pressure watch",
-        ),
-        _ => {}
-    }
-
-    if current.paging_rate >= thresholds.swap_warn_rate {
-        let score = if current.paging_rate >= thresholds.swap_critical_rate {
-            100
-        } else {
-            88
-        };
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::Paging,
-            score,
-            format!("paging {}", rate(current.paging_rate)),
-        );
-    }
-
-    if current.compression_rate >= thresholds.compression_warn_rate {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::Compression,
-            68,
-            format!("compression {}", rate(current.compression_rate)),
-        );
-    }
-
-    if let Some(waiting) = current.waiting_requests.filter(|waiting| *waiting > 0) {
-        let score = if waiting > 1 { 82 } else { 70 };
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::Queueing,
-            score,
-            format!(
-                "queue {waiting} waiting · active {}",
-                count(current.active_requests)
-            ),
-        );
-    }
-
-    let current_gpu = [current.gpu_util, current.renderer_util, current.tiler_util]
-        .into_iter()
-        .flatten()
-        .max();
-    if let Some(gpu) = current_gpu {
-        if u64::from(gpu) >= thresholds.gpu_critical_load {
-            let crossed = previous
-                .and_then(|previous| {
-                    [
-                        previous.gpu_util,
-                        previous.renderer_util,
-                        previous.tiler_util,
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .max()
-                })
-                .is_none_or(|value| u64::from(value) < thresholds.gpu_critical_load);
-            push_correlation_factor(
-                &mut factors,
-                CorrelationCause::GpuSaturation,
-                if crossed { 95 } else { 72 },
-                format!("GPU {gpu}% busy"),
-            );
-        } else if u64::from(gpu) >= thresholds.gpu_warn_load {
-            push_correlation_factor(
-                &mut factors,
-                CorrelationCause::GpuSaturation,
-                58,
-                format!("GPU {gpu}% busy"),
-            );
-        }
-    }
-
-    let current_metal_ratio = fraction(current.metal_in_use, current.metal_alloc);
-    if let Some(ratio) = current_metal_ratio.filter(|ratio| *ratio >= 0.90) {
-        let crossed = previous
-            .and_then(|previous| fraction(previous.metal_in_use, previous.metal_alloc))
-            .is_none_or(|value| value < 0.90);
-        let evidence = match (current.metal_in_use, current.metal_alloc) {
-            (Some(used), Some(allocated)) => format!(
-                "Metal MEM {:.0}% ({}/{})",
-                ratio * 100.0,
-                bytes(used),
-                bytes(allocated)
-            ),
-            _ => format!("Metal MEM {:.0}%", ratio * 100.0),
-        };
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::MetalMemory,
-            if crossed { 90 } else { 68 },
-            evidence,
-        );
-    }
-
-    let model_memory_delta = previous.and_then(|previous| {
-        current
-            .model_memory
-            .zip(previous.model_memory)
-            .map(|(current, previous)| current.saturating_sub(previous))
-    });
-    let current_model_ratio = fraction(current.model_memory, current.model_memory_max);
-    let mut model_memory_evidence = Vec::new();
-    let mut model_memory_score = 0;
-    if let Some(ratio) = current_model_ratio.filter(|ratio| *ratio >= 0.90) {
-        model_memory_score = 84;
-        model_memory_evidence.push(format!("model MEM {:.0}% of ceiling", ratio * 100.0));
-    }
-    if let Some(delta) = model_memory_delta.filter(|delta| *delta >= MODEL_MEMORY_GROWTH) {
-        model_memory_score = model_memory_score.max(72);
-        model_memory_evidence.push(format!("model MEM +{}", bytes(delta)));
-    }
-    if model_memory_score > 0 {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::ModelMemory,
-            model_memory_score,
-            model_memory_evidence.join(" · "),
-        );
-    }
-
-    let context_delta = previous.and_then(|previous| {
-        current
-            .context_tokens
-            .zip(previous.context_tokens)
-            .map(|(current, previous)| current.saturating_sub(previous))
-    });
-    let mut context_evidence = Vec::new();
-    let mut context_score = 0;
-    if let Some(delta) = context_delta.filter(|delta| *delta >= CONTEXT_GROWTH_TOKENS) {
-        context_score = 82;
-        if let Some(total) = current.context_tokens {
-            context_evidence.push(format!(
-                "context +{} → {}",
-                compact_tokens(delta),
-                compact_tokens(total)
-            ));
-        }
-    } else if direction == ThroughputDirection::Down
-        && current
-            .context_tokens
-            .is_some_and(|tokens| tokens >= 16_384)
-    {
-        context_score = 48;
-        context_evidence.push(format!(
-            "context {}",
-            compact_tokens(current.context_tokens.unwrap_or_default())
-        ));
-    }
-    if context_score > 0 {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::ContextGrowth,
-            context_score,
-            context_evidence.join(" · "),
-        );
-    }
-
-    if direction == ThroughputDirection::Down && factors.is_empty() {
-        push_correlation_factor(
-            &mut factors,
-            CorrelationCause::Runtime,
-            20,
-            "no matching system signal; workload/runtime changed",
-        );
-    }
-    factors.sort_by_key(|factor| std::cmp::Reverse(factor.score));
-
-    let cause = factors
-        .first()
-        .map(|factor| factor.cause)
-        .unwrap_or_default();
-    let confidence = factors.first().map(|factor| factor.score).unwrap_or(0);
-    let rate_label = match (current_tps, baseline, direction, delta_percent) {
-        (Some(current), Some(baseline), ThroughputDirection::Down, Some(percent)) => format!(
-            "GEN ↓{:.1}% ({baseline:.1}→{current:.1} tok/s)",
-            percent.abs()
-        ),
-        (Some(current), Some(baseline), ThroughputDirection::Up, Some(percent)) => {
-            format!("GEN ↑{percent:.1}% ({baseline:.1}→{current:.1} tok/s)")
-        }
-        (Some(current), _, _, _) => format!("GEN {current:.1} tok/s"),
-        _ => String::new(),
-    };
-    let evidence = factors
-        .iter()
-        .take(2)
-        .map(|factor| factor.evidence.as_str())
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let summary = if rate_label.is_empty() {
-        String::new()
-    } else if evidence.is_empty() {
-        if direction == ThroughputDirection::Down {
-            format!("{rate_label} · no matching system signal")
-        } else {
-            String::new()
-        }
-    } else {
-        format!("{rate_label} · correlated: {evidence}")
-    };
-    let details = if rate_label.is_empty() || factors.is_empty() {
-        String::new()
-    } else {
-        let all_evidence = factors
-            .iter()
-            .map(|factor| factor.evidence.as_str())
-            .collect::<Vec<_>>()
-            .join(" · ");
-        format!("{} · {all_evidence}", cause.label())
-    };
-    let event_key =
-        (direction == ThroughputDirection::Down).then_some(CorrelationKey { direction, cause });
-
-    CorrelationInsight {
-        direction,
-        cause,
-        confidence,
-        summary,
-        details,
-        event_key,
-        delta_percent,
-    }
-}
-
-pub(crate) fn push_correlation_factor(
-    factors: &mut Vec<CorrelationFactor>,
-    cause: CorrelationCause,
-    score: u8,
-    evidence: impl Into<String>,
-) {
-    factors.push(CorrelationFactor {
-        cause,
-        score,
-        evidence: evidence.into(),
-    });
 }
 
 pub(crate) fn pressure_rank(pressure: &str) -> u8 {

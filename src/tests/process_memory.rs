@@ -10,6 +10,8 @@ fn growth_tracks_same_process_and_preserves_decreases() {
         resident: 100,
         footprint: 100,
         peak: 200,
+        disk_read: 0,
+        disk_written: 0,
         at: Instant::now(),
     };
     let mut next = first.clone();

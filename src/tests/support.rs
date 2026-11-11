@@ -503,6 +503,7 @@ pub(crate) fn empty_view() -> CollectorView {
         generation_history: VecDeque::new(),
         prefill_history: VecDeque::new(),
         cache_history: VecDeque::new(),
+        disk_history: VecDeque::new(),
         load_history: VecDeque::new(),
         composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),

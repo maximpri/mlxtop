@@ -2,7 +2,7 @@
 //! Shared observation and event types. Values remain independent of terminal widgets.
 use crate::config::{load_tone, Thresholds, TIGHT_FREE_PERCENT};
 use crate::{gpu, process_memory};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 pub(crate) const MIB: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +13,8 @@ pub(crate) enum Tone {
     Cyan,
     Blue,
     Muted,
+    /// Unusual for the signal it is drawn on: the one colour that means so.
+    Unusual,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,7 +51,8 @@ pub(crate) enum EventKind {
 impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
-            "LLM" | "PROMPT" => Self::Llm,
+            "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED"
+            | "SETTLED" => Self::Llm,
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -70,18 +73,20 @@ pub(crate) enum ChartMetric {
     Swap,
     Compression,
     Gpu,
+    /// The runtime's own storage reads and writes: its prompt cache on disk.
+    Disk,
 }
 
 impl ChartMetric {
     /// Byte-rate series share automatic zero-based ceilings and rate labels.
     pub(crate) fn is_byte_rate(self) -> bool {
-        matches!(self, Self::Swap | Self::Compression)
+        matches!(self, Self::Swap | Self::Compression | Self::Disk)
     }
 
     pub(crate) fn chart_tone(self) -> Tone {
         match self {
             Self::Generation | Self::Prefill | Self::Cache => Tone::Cyan,
-            Self::Memory | Self::Swap | Self::Compression => Tone::Cyan,
+            Self::Memory | Self::Swap | Self::Compression | Self::Disk => Tone::Cyan,
             Self::Gpu => Tone::Blue,
         }
     }
@@ -116,6 +121,8 @@ impl ChartMetric {
             // Compression trades CPU for RAM; alone it is a warning, never critical.
             Self::Compression if value >= thresholds.compression_warn_rate => Tone::Yellow,
             Self::Compression => Tone::Green,
+            // Disk work is graded by what it coincides with, in the collector.
+            Self::Disk => Tone::Cyan,
         }
     }
 }
@@ -125,6 +132,10 @@ pub(crate) struct ChartPoint {
     pub(crate) value: Option<u64>,
     pub(crate) tone: Tone,
     pub(crate) observed_at: SystemTime,
+    /// What the value usually is for the work at the time, in the same
+    /// units: drawn as a dashed line, so that a change explained by the
+    /// work shows the line moving with it.
+    pub(crate) usual: Option<u64>,
 }
 
 #[derive(Default)]
@@ -215,7 +226,6 @@ pub(crate) enum ThroughputDirection {
     #[default]
     Unknown,
     Down,
-    Up,
     Flat,
 }
 
@@ -223,45 +233,55 @@ pub(crate) enum ThroughputDirection {
 pub(crate) enum CorrelationCause {
     #[default]
     None,
+    /// A generating request stopped producing tokens.
+    Stall,
     Paging,
     Compression,
     MemoryPressure,
     Thermal,
     MetalMemory,
-    GpuSaturation,
     Queueing,
-    ContextGrowth,
+    /// A prompt prefilling beside a request that is generating.
+    ConcurrentPrefill,
     ModelMemory,
-    Runtime,
+    /// The runtime reading or writing its disk (prompt cache) mid-answer.
+    DiskIo,
+    /// The runtime's processes unusually busy on the CPU.
+    Cpu,
+    /// The GPU unusually idle while an answer is written: it is waiting.
+    GpuIdle,
 }
 
 impl CorrelationCause {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::None => "no correlated cause",
+            Self::None => "nothing else unusual",
+            Self::Stall => "generation stalled",
             Self::Paging => "paging",
             Self::Compression => "compression churn",
             Self::MemoryPressure => "memory pressure",
             Self::Thermal => "thermal limiting",
             Self::MetalMemory => "Metal memory pressure",
-            Self::GpuSaturation => "GPU saturation",
             Self::Queueing => "queueing",
-            Self::ContextGrowth => "context/KV growth",
+            Self::ConcurrentPrefill => "prefill beside generation",
             Self::ModelMemory => "model memory growth",
-            Self::Runtime => "workload/runtime change",
+            Self::DiskIo => "runtime disk I/O",
+            Self::Cpu => "runtime CPU",
+            Self::GpuIdle => "GPU underused",
         }
     }
 
     pub(crate) fn tone(self) -> Tone {
         match self {
-            Self::Paging | Self::MemoryPressure | Self::Thermal => Tone::Red,
+            Self::Stall | Self::Paging | Self::MemoryPressure | Self::Thermal => Tone::Red,
             Self::Compression
             | Self::MetalMemory
-            | Self::GpuSaturation
             | Self::Queueing
-            | Self::ContextGrowth
+            | Self::ConcurrentPrefill
             | Self::ModelMemory
-            | Self::Runtime => Tone::Yellow,
+            | Self::DiskIo
+            | Self::Cpu
+            | Self::GpuIdle => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -277,24 +297,100 @@ pub(crate) struct CorrelationKey {
 pub(crate) struct CorrelationInsight {
     pub(crate) direction: ThroughputDirection,
     pub(crate) cause: CorrelationCause,
-    pub(crate) confidence: u8,
     pub(crate) summary: String,
     pub(crate) details: String,
+    /// The first unusual signal, in words: the reason a slowdown is given.
+    pub(crate) lead: String,
+    /// How long a generating request has gone without a token, once stalled.
+    pub(crate) stall_seconds: Option<f64>,
     pub(crate) event_key: Option<CorrelationKey>,
-    /// Change from the rolling throughput baseline, in percent.
+    /// Change from the usual generation speed, in percent.
     pub(crate) delta_percent: Option<f64>,
+    /// The slowdown this sample belongs to, from its first slow sample.
+    pub(crate) episode: Option<DropEpisode>,
+    /// Set on the sample where a slowdown ended.
+    pub(crate) ended: Option<DropEnd>,
+    /// This cause was already journaled for this slowdown.
+    pub(crate) repeat: bool,
+    /// This sample's own speed is unusually low (or it is a stall), whether
+    /// or not it is part of a slowdown.
+    pub(crate) slow: bool,
+    /// Every signal that is unusual in this sample, and each in words beside
+    /// its usual value. In a slowdown the reason comes first and the
+    /// workload counts; outside one only the host's readings are watched.
+    pub(crate) unusual: Vec<CorrelationCause>,
+    pub(crate) notes: Vec<String>,
+    /// The usual generation speed for the work being done, and the speed
+    /// below which it is slow.
+    pub(crate) usual_speed: Option<(f64, f64)>,
+    /// The work that usual speed is for (`1 request · 40k context`), or
+    /// empty when it is taken over every kind of work.
+    pub(crate) usual_for: String,
+}
+
+/// One slowdown, from the sample where speed first fell to now. The speed
+/// it fell from stays fixed, so a long slowdown is not mistaken for normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DropEpisode {
+    /// Normal speed before the drop, in tok/s.
+    pub(crate) reference: f64,
+    /// The slowest speed seen so far.
+    pub(crate) low: f64,
+    pub(crate) seconds: f64,
+    /// Samples in the slowdown, this one included.
+    pub(crate) samples: u32,
+}
+
+/// How a slowdown ended: speed came back, or it held with nothing on the
+/// host to explain it and became the request's normal speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DropEnd {
+    pub(crate) settled: bool,
+    pub(crate) seconds: f64,
+    pub(crate) low: f64,
+    pub(crate) rate: f64,
+    pub(crate) reference: f64,
 }
 
 /// Cache reuse bands, shared by the cache chart and the prompt's CACHED share.
 pub(crate) const CACHE_GOOD_PERCENT: u64 = 50;
 pub(crate) const CACHE_LOW_PERCENT: u64 = 20;
 
-/// A drop this far below the rolling baseline is critical on its own.
+/// Slow samples in a row that begin a slowdown, and samples back at the
+/// usual speed that end one: a single jumpy poll does neither.
+pub(crate) const SLOW_SAMPLES: usize = 3;
+
+/// A drop this far below the usual speed is critical on its own.
 pub(crate) const THROUGHPUT_CRITICAL_DROP_PERCENT: f64 = 30.0;
 
 impl CorrelationInsight {
+    /// The rate change alone, such as `GEN ↓43.9% (32.0→18.0 tok/s)`.
+    pub(crate) fn rate_label(&self) -> &str {
+        self.summary.split(" · ").next().unwrap_or("")
+    }
+
     pub(crate) fn is_material_drop(&self) -> bool {
         self.direction == ThroughputDirection::Down
+    }
+
+    /// What `cause`'s signal is doing, when it is unusual in this sample.
+    pub(crate) fn note(&self, cause: CorrelationCause) -> Option<&str> {
+        let index = self.unusual.iter().position(|found| *found == cause)?;
+        self.notes.get(index).map(String::as_str)
+    }
+
+    /// Samples this finding colours, newest last. A slowdown is known at
+    /// its third slow sample, so the two before it are coloured then.
+    pub(crate) fn marked_samples(&self) -> usize {
+        let began = self.stall_seconds.is_none()
+            && self
+                .episode
+                .is_some_and(|episode| episode.samples as usize == SLOW_SAMPLES);
+        if began {
+            SLOW_SAMPLES
+        } else {
+            1
+        }
     }
 
     pub(crate) fn tone(&self) -> Tone {
@@ -306,7 +402,8 @@ impl CorrelationInsight {
                 if severe
                     || matches!(
                         self.cause,
-                        CorrelationCause::Paging
+                        CorrelationCause::Stall
+                            | CorrelationCause::Paging
                             | CorrelationCause::MemoryPressure
                             | CorrelationCause::Thermal
                     )
@@ -316,23 +413,53 @@ impl CorrelationInsight {
                     Tone::Yellow
                 }
             }
-            ThroughputDirection::Up => Tone::Green,
             ThroughputDirection::Unknown | ThroughputDirection::Flat => self.cause.tone(),
         }
     }
+}
 
-    pub(crate) fn confidence_label(&self) -> &'static str {
-        match self.confidence {
-            80..=u8::MAX => "high",
-            55..=79 => "medium",
-            1..=54 => "low",
-            _ => "unavailable",
+/// A runtime's on-disk prompt cache (oMLX keeps KV blocks on an SSD): its
+/// fill and its lifetime counters, which the collector turns into activity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SsdCache {
+    pub(crate) used: u64,
+    pub(crate) capacity: u64,
+    /// KV blocks read back from disk, written to it, and evicted from it.
+    pub(crate) loads: u64,
+    pub(crate) saves: u64,
+    pub(crate) evictions: u64,
+}
+
+impl SsdCache {
+    /// Within one block-file of capacity: new saves now evict old prefixes.
+    pub(crate) fn full(&self) -> bool {
+        self.capacity > 0 && self.used.saturating_mul(100) >= self.capacity.saturating_mul(99)
+    }
+}
+
+/// What the runtime did with its disk between two samples: storage bytes per
+/// second from the OS, and SSD-cache block counts from the runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiskActivity {
+    pub(crate) read: Option<u64>,
+    pub(crate) write: Option<u64>,
+    pub(crate) loads: u64,
+    pub(crate) saves: u64,
+    pub(crate) evictions: u64,
+}
+
+impl DiskActivity {
+    pub(crate) fn rate(&self) -> Option<u64> {
+        match (self.read, self.write) {
+            (None, None) => None,
+            (read, write) => Some(read.unwrap_or(0).saturating_add(write.unwrap_or(0))),
         }
     }
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct LlmTelemetry {
+    pub(crate) ssd_cache: Option<SsdCache>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -415,6 +542,9 @@ pub(crate) struct Sample {
     pub(crate) llm_rss: u64,
     pub(crate) process_memory: Option<process_memory::Reading>,
     pub(crate) process_memory_growth: Option<i64>,
+    /// The runtime's storage traffic and SSD-cache use since the last sample.
+    pub(crate) disk: DiskActivity,
+    pub(crate) ssd_cache: Option<SsdCache>,
     pub(crate) llm_cpu: f64,
     pub(crate) llm_processes: Vec<LlmProcess>,
     pub(crate) largest_consumer: Option<String>,
@@ -552,6 +682,8 @@ impl Default for Sample {
             llm_rss: 0,
             process_memory: None,
             process_memory_growth: None,
+            disk: DiskActivity::default(),
+            ssd_cache: None,
             llm_cpu: 0.0,
             llm_processes: Vec::new(),
             largest_consumer: None,
@@ -634,5 +766,8 @@ pub(crate) struct RequestUsage {
     /// Prompt tokens prefilled so far while the prompt is being processed.
     pub prefilled: Option<u64>,
     pub ttft_ms: Option<u64>,
+    /// How long the request has gone without producing a token, when the
+    /// runtime reports it. A generating request that stops is stalled.
+    pub idle_for: Option<Duration>,
     pub observed_at: Option<SystemTime>,
 }

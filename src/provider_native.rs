@@ -900,6 +900,7 @@ pub(super) fn apply_mlx_serve_sessions(
                 completed: false,
                 queued: false,
                 prefilled: None,
+                idle_for: None,
                 ttft_ms: None,
                 observed_at: Some(now),
             })

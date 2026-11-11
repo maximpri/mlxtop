@@ -5,7 +5,9 @@ use crate::domain::{ChartMetric, Sample, TelemetrySource};
 /// Prompts smaller than this keep a neutral CACHED color.
 const CACHE_GRADED_PROMPT: u64 = 4096;
 use crate::chart_render::meter_cells;
-use crate::formatting::{compact_label, compact_tokens, duration_label, telemetry_age};
+use crate::formatting::{
+    compact_label, compact_tokens, progress_percent, telemetry_age, time_left_label,
+};
 use crate::request_history::{same_request, Entry, History};
 use crate::theme::{BLUE, CYAN, DIM, EDGE, GREEN, MUTED, PANEL};
 use crate::{chart_scale, domain};
@@ -188,14 +190,18 @@ fn progress_or_output(entry: &Entry, live: bool, sample: &Sample, width: u16) ->
     else {
         return output_summary(entry, live, sample, width);
     };
-    let prompt = usage.prompt.max(1);
-    let percent = done as f64 * 100.0 / prompt as f64;
+    // A prefill reads only what the prefix cache does not hold: progress and
+    // time left are over the new tokens, or a 67.8k cached prefix would read
+    // 98% before any work is done.
+    let cached = usage.cached.unwrap_or(0).min(done);
+    let (done, prompt) = (done - cached, (usage.prompt - cached).max(1));
+    let percent = progress_percent(done, prompt);
     let left = sample
         .llm_prefill_tps_live
         .then_some(sample.llm_prefill_tps)
         .flatten()
         .filter(|rate| *rate > 0.0)
-        .map(|rate| duration_label((prompt - done) as f64 / rate));
+        .map(|rate| time_left_label((prompt - done) as f64 / rate));
     let left = left
         .map(|left| format!(" · {left} left"))
         .unwrap_or_default();
@@ -204,20 +210,20 @@ fn progress_or_output(entry: &Entry, live: bool, sample: &Sample, width: u16) ->
     let width = usize::from(width);
     let counts = format!(" · {} / {}", exact(done), exact(prompt));
     let tail = [
-        format!(" {percent:.0}%{counts}{left}"),
-        format!(" {percent:.0}%{left}"),
-        format!(" {percent:.0}%"),
+        format!(" {percent}%{counts}{left}"),
+        format!(" {percent}%{left}"),
+        format!(" {percent}%"),
     ]
     .into_iter()
     .find(|tail| label.len() + 6 + Line::from(tail.as_str()).width() <= width)
-    .unwrap_or_else(|| format!(" {percent:.0}%"));
+    .unwrap_or_else(|| format!(" {percent}%"));
     let bar = width
         .saturating_sub(label.len() + Line::from(tail.as_str()).width())
         .min(30);
     let mut line = Line::from(Span::styled(label, Style::default().fg(CYAN)));
     if bar >= 6 {
         line.spans.push(Span::styled(
-            meter_cells(percent, bar),
+            meter_cells(percent as f64, bar),
             Style::default().fg(CYAN).bg(EDGE),
         ));
     }
@@ -526,14 +532,6 @@ pub(super) fn draw(
     }
     if other_runtime {
         append_detail(&mut details, comparison, MUTED, inner.width);
-    }
-    if let Some(cached) = cached {
-        append_detail(
-            &mut details,
-            format!("{} uncached", exact(entry.usage.prompt - cached)),
-            color,
-            inner.width,
-        );
     }
     // Position in the history only matters while browsing older requests.
     if index + 1 < history.len() {

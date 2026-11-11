@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 //! Separate measured problems from high resource use during normal work.
-use crate::analysis::correlation_evidence_label;
 use crate::domain::{CorrelationCause, Sample, TelemetrySource, ThroughputDirection, Tone};
 use crate::formatting::{count, llm_generation_rate_label, percent_u8, pressure_state_label, rate};
 use std::time::{Duration, SystemTime};
@@ -12,6 +11,47 @@ pub(super) struct Finding {
     pub next: &'static str,
     pub actionable: bool,
     pub tone: Tone,
+}
+
+/// What to check for a measured slowdown, by its cause.
+pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
+    match sample.correlation.cause {
+        CorrelationCause::Paging => "Reduce active models; recheck paging.",
+        CorrelationCause::Compression => "Check whether paging also rises.",
+        CorrelationCause::MemoryPressure
+        | CorrelationCause::ModelMemory
+        | CorrelationCause::MetalMemory => "Free memory; recheck generation speed.",
+        CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
+        // The engine stopped with nothing on the host to show for it:
+        // the reason is inside the runtime, in its log at this time.
+        // Any disk work beside a stall is the runtime's own prompt cache.
+        CorrelationCause::Stall | CorrelationCause::DiskIo
+            if sample.correlation.lead.contains("SSD cache full") =>
+        {
+            "SSD cache is full and evicting; enlarge it or free the disk."
+        }
+        CorrelationCause::Stall | CorrelationCause::DiskIo
+            if sample.correlation.lead.contains("disk ")
+                || sample.correlation.lead.contains("SSD cache") =>
+        {
+            "Runtime waited on its disk cache; check that disk's speed."
+        }
+        CorrelationCause::DiskIo => "Runtime used its disk mid-answer; check its cache disk.",
+        CorrelationCause::Stall
+            if sample.correlation.lead.contains("GPU idle")
+                && !sample.correlation.lead.contains("paging") =>
+        {
+            "Runtime idle mid-answer; check its log at this time."
+        }
+        CorrelationCause::Stall => "Check the signals beside the stall; recheck after it resumes.",
+        CorrelationCause::ConcurrentPrefill => {
+            "Expected while the prompt prefills; recheck after it finishes."
+        }
+        CorrelationCause::Queueing => "Compare speed with one active request.",
+        CorrelationCause::Cpu => "Runtime is busy on the CPU; check what it is doing there.",
+        CorrelationCause::GpuIdle => "GPU is waiting on the runtime; check its CPU and disk work.",
+        CorrelationCause::None => "Check the runtime's log at this time.",
+    }
 }
 
 pub(super) fn assess(sample: &Sample) -> Finding {
@@ -116,7 +156,11 @@ fn assess_observation(sample: &Sample) -> Finding {
         });
     let live = fresh && sample.llm_generation_tps_live;
     if live && !sample.llm_remote && sample.correlation.is_material_drop() {
-        finding.title = "Generation slowed".into();
+        finding.title = if sample.correlation.cause == CorrelationCause::Stall {
+            "Generation stalled".into()
+        } else {
+            "Generation slowed".into()
+        };
         finding.evidence = sample
             .correlation
             .summary
@@ -124,31 +168,21 @@ fn assess_observation(sample: &Sample) -> Finding {
             .next()
             .unwrap_or("")
             .to_owned();
-        let evidence = correlation_evidence_label(sample);
-        finding.context =
-            if sample.correlation.cause == CorrelationCause::Runtime || evidence.is_empty() {
-                "No matching system signal".into()
-            } else {
-                format!(
-                    "WITH {evidence} · {} confidence",
-                    sample.correlation.confidence_label()
-                )
-            };
-        finding.next = match sample.correlation.cause {
-            CorrelationCause::Paging => "Reduce active models; recheck paging.",
-            CorrelationCause::Compression => "Check whether paging also rises.",
-            CorrelationCause::MemoryPressure
-            | CorrelationCause::ModelMemory
-            | CorrelationCause::MetalMemory => "Free memory; recheck generation speed.",
-            CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
-            CorrelationCause::Queueing | CorrelationCause::GpuSaturation => {
-                "Compare speed with one active request."
-            }
-            CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
-            CorrelationCause::Runtime | CorrelationCause::None => {
-                "Compare prompt size and runtime settings."
-            }
+        // A slowdown that has lasted says for how long.
+        if let Some(episode) = sample
+            .correlation
+            .episode
+            .filter(|episode| episode.seconds >= 5.0)
+        {
+            finding.evidence = format!("{} for {:.0}s", finding.evidence, episode.seconds);
+        }
+        // The reason is whatever else is unusual at the same time.
+        finding.context = if sample.correlation.lead.is_empty() {
+            "Nothing else unusual".into()
+        } else {
+            format!("WITH {}", sample.correlation.lead)
         };
+        finding.next = slowdown_next_step(sample);
         finding.actionable = true;
         finding.tone = sample.correlation.tone();
         return finding;
@@ -174,12 +208,7 @@ fn assess_observation(sample: &Sample) -> Finding {
         finding.title = "Healthy · no bottleneck".into();
         finding.tone = Tone::Green;
     }
-    if live
-        && matches!(
-            sample.correlation.direction,
-            ThroughputDirection::Flat | ThroughputDirection::Up
-        )
-    {
+    if live && matches!(sample.correlation.direction, ThroughputDirection::Flat) {
         // Nothing to say: an empty note keeps the strip quiet.
         finding.next = "";
     } else if sample.llm_status == "untracked" {

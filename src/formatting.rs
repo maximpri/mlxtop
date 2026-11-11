@@ -83,11 +83,30 @@ pub(crate) fn llm_prefill_progress_label(sample: &Sample) -> Option<String> {
     let expected = sample.llm_prefill_tokens_expected.filter(|n| *n > 0)?;
     let done = sample.llm_prefill_tokens_done.unwrap_or(0).min(expected);
     Some(format!(
-        "{} / {} · {:.0}%",
+        "{} / {} · {}%",
         compact_tokens(done),
         compact_tokens(expected),
-        done as f64 / expected as f64 * 100.0
+        progress_percent(done, expected)
     ))
+}
+
+/// Work done as a whole percentage, rounded down: unfinished work never
+/// reads 100%, so a prompt with tokens left is not shown as complete.
+pub(crate) fn progress_percent(done: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    (u128::from(done.min(total)) * 100 / u128::from(total)) as u64
+}
+
+/// Time left for work under way. Under a second reads `<1s`, never `0s`,
+/// which would say the work has finished.
+pub(crate) fn time_left_label(seconds: f64) -> String {
+    if seconds.is_finite() && seconds < 1.0 {
+        "<1s".into()
+    } else {
+        duration_label(seconds)
+    }
 }
 
 pub(crate) fn percent(value: Option<f64>) -> String {
@@ -172,19 +191,6 @@ pub(crate) fn duration_label(seconds: f64) -> String {
         60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
         _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
     }
-}
-
-/// The one prompt being prefilled right now, as (done, total), when there is
-/// exactly one: concurrent prefills have no single progress.
-pub(crate) fn prefill_progress(sample: &Sample) -> Option<(u64, u64)> {
-    let mut prefilling = sample.llm_requests.iter().filter_map(|request| {
-        request
-            .prefilled
-            .filter(|done| !request.queued && !request.completed && *done < request.prompt)
-            .map(|done| (done, request.prompt))
-    });
-    let only = prefilling.next()?;
-    prefilling.next().is_none().then_some(only)
 }
 
 /// A spinner frame that advances with every sample, from the sample's clock.
@@ -292,6 +298,34 @@ pub(crate) fn signed_rate(value: i64) -> String {
 }
 
 impl RequestUsage {
+    /// One Journal row: the request and what it brings, without the runtime
+    /// and model the header already names or readings not yet measured.
+    pub fn journal_line(&self) -> String {
+        let mut parts = vec![
+            self.id.clone(),
+            format!("{} prompt", compact_tokens(self.prompt)),
+        ];
+        if let Some(cached) = self.cached.filter(|_| self.prompt > 0) {
+            parts.push(format!(
+                "{}% cached",
+                progress_percent(cached.min(self.prompt), self.prompt)
+            ));
+        }
+        if self.queued {
+            parts.push("queued".into());
+        }
+        if let Some(out) = self.output.filter(|out| *out > 0) {
+            parts.push(format!("{} out", compact_tokens(out)));
+        }
+        if let Some(speed) = self.output_tps.filter(|_| self.completed) {
+            parts.push(format!("{speed:.1} tok/s"));
+        }
+        if let Some(ttft) = self.ttft_ms {
+            parts.push(format!("first token {ttft} ms"));
+        }
+        parts.join(" · ")
+    }
+
     pub fn summary(&self) -> String {
         let mut text = format!(
             "{} prompt {} · out {} · {} · {} · {}",

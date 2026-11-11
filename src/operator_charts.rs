@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-use crate::chart_render::{bar_cells, chart_window_label};
+use crate::chart_render::{bar_cells, chart_window_label, meter_cells};
 use crate::chart_scale;
 use crate::domain::Tone;
-use crate::formatting::{compact_tokens, count, telemetry_age};
-use crate::operator_history::{History, Running};
-use crate::theme::{panel, BLUE, CYAN, DIM, MUTED, PANEL, YELLOW};
+use crate::formatting::{compact_tokens, count, progress_percent, telemetry_age};
+use crate::operator_history::{History, Phase, Running};
+use crate::theme::{panel, BLUE, CYAN, DIM, EDGE, MUTED, PANEL, YELLOW};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -202,26 +202,158 @@ fn queue_junction(active: char, waiting: char) -> char {
     }
 }
 
-/// One running request: a short id, tokens out, and its own rate, or `—`
-/// while it has none, so the row stays put when the rate comes and goes.
-fn running_label(request: &Running, width: usize) -> String {
-    let tps = request
-        .tps
-        .filter(|tps| tps.is_finite() && *tps >= 0.0)
-        .map_or_else(|| "—".to_owned(), |tps| format!("{tps:.1} tok/s"));
-    let id: String = {
-        let chars: Vec<char> = request.id.chars().collect();
-        chars[chars.len().saturating_sub(6)..].iter().collect()
+/// The tail of a request id: enough to match the request in Journal, which
+/// prints the whole id.
+fn short_id(id: &str) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    chars[chars.len().saturating_sub(6)..].iter().collect()
+}
+
+/// One request as a row of fixed columns, so states line up down the panel:
+/// a state mark, its label, the id's tail, then the phase's own progress.
+///
+/// ```text
+/// ◐ PREFILL 9ce7ef 35.6k ▕███████████▏ 99%
+/// ● GEN     5381d8 1.4k out      25.8 tok/s
+/// ○ QUEUED  a1b2c3 8.2k in
+/// ```
+fn request_row(request: &Running, width: usize) -> Line<'static> {
+    let (mark, mark_color, label) = match request.phase {
+        Phase::Prefill(_) => ('◐', CYAN, "PREFILL"),
+        Phase::Generate => ('●', CYAN, "GEN"),
+        Phase::Queued => ('○', YELLOW, "QUEUED"),
     };
-    let output = request.output.map(compact_tokens);
-    [
-        output.map(|output| format!("{id} {output} · {tps}")),
-        Some(format!("{id} · {tps}")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|text| text.chars().count() <= width)
-    .unwrap_or(tps)
+    let mut spans = vec![
+        Span::styled(format!("{mark} "), Style::default().fg(mark_color)),
+        Span::styled(format!("{label:<7} "), Style::default().fg(Color::White)),
+    ];
+    // The id goes first when room is short: state and progress outrank it.
+    let id = short_id(&request.id);
+    let with_id = 2 + 8 + id.chars().count() + 1 + 12;
+    if width >= with_id {
+        spans.push(Span::styled(format!("{id} "), Style::default().fg(MUTED)));
+    }
+    let used: usize = spans.iter().map(Span::width).sum();
+    let room = width.saturating_sub(used);
+    let reading = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    match request.phase {
+        Phase::Prefill(done) => {
+            let cached = request.cached.min(done);
+            let percent = progress_percent(done - cached, request.prompt - cached);
+            let tail = format!(" {percent:>2}%");
+            let size = format!("{} ", compact_tokens(request.prompt));
+            let bar_room = room.saturating_sub(tail.len());
+            let size = if bar_room >= size.len() + 4 {
+                size
+            } else {
+                String::new()
+            };
+            let bar = bar_room.saturating_sub(size.len());
+            if !size.is_empty() {
+                spans.push(Span::styled(size, Style::default().fg(MUTED)));
+            }
+            if bar >= 3 {
+                spans.push(Span::styled(
+                    meter_cells(percent as f64, bar),
+                    Style::default().fg(CYAN).bg(EDGE),
+                ));
+            }
+            spans.push(Span::styled(tail, reading));
+        }
+        Phase::Generate => {
+            let rate = request
+                .tps
+                .filter(|tps| tps.is_finite() && *tps >= 0.0)
+                .map(|tps| format!("{tps:.1} tok/s"));
+            let output = request.output.map(compact_tokens);
+            let rate_width = rate.as_ref().map_or(1, String::len);
+            let detail = [
+                output.as_ref().map(|output| format!("{output} out")),
+                output.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|detail| detail.len() + 1 + rate_width <= room)
+            .unwrap_or_default();
+            let gap = room.saturating_sub(detail.len() + rate_width);
+            spans.push(Span::styled(detail, Style::default().fg(MUTED)));
+            spans.push(Span::raw(" ".repeat(gap)));
+            spans.push(match rate {
+                // Without its own rate the row keeps its place and says so.
+                Some(rate) => Span::styled(rate, reading),
+                None => Span::styled("—", Style::default().fg(MUTED)),
+            });
+        }
+        Phase::Queued => {
+            let prompt = format!("{} in", compact_tokens(request.prompt));
+            if prompt.len() <= room {
+                spans.push(Span::styled(prompt, Style::default().fg(MUTED)));
+            }
+        }
+    }
+    Line::from(spans)
+}
+
+/// The requests in the server, a row each, with the runtime's counts in the
+/// top border and what did not fit in the bottom one.
+fn request_list(frame: &mut Frame, area: Rect, history: &History, counts: bool) {
+    let last = history.points.back();
+    let active = last.and_then(|p| p.active);
+    let waiting = last.and_then(|p| p.waiting);
+    let waiting_color = if waiting.is_some_and(|n| n > 0) {
+        YELLOW
+    } else {
+        MUTED
+    };
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let rows = usize::from(area.height.saturating_sub(2));
+    let words = format!("{} active · {} waiting", count(active), count(waiting));
+    // Marks stand in for words when the border is short.
+    let counts_line = if words.chars().count() + 10 <= inner_width {
+        vec![
+            Span::styled(
+                format!(" {} active", count(active)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(" · ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("{} waiting ", count(waiting)),
+                Style::default().fg(waiting_color),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled(format!(" ●{}", count(active)), Style::default().fg(CYAN)),
+            Span::styled(
+                format!(" ○{} ", count(waiting)),
+                Style::default().fg(waiting_color),
+            ),
+        ]
+    };
+    let mut block = panel("queue", Tone::Cyan);
+    // Enlarged, the history below names the counts.
+    if counts {
+        block = block.title(Line::from(counts_line).right_aligned());
+    }
+    let hidden = history.running.len().saturating_sub(rows);
+    if hidden > 0 {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" +{hidden} more "),
+                Style::default().fg(MUTED),
+            ))
+            .right_aligned(),
+        );
+    }
+    let lines: Vec<Line> = history
+        .running
+        .iter()
+        .take(rows)
+        .map(|request| request_row(request, inner_width))
+        .collect();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 pub(super) fn queue_plot_width(history: &History, width: u16) -> u16 {
@@ -238,25 +370,52 @@ pub(super) fn queue(
     zoom: u16,
     window: Option<usize>,
 ) {
+    // When the runtime reports each request, the panel lists them: on
+    // Overview in place of the history, enlarged above it.
+    // One request is the one prompt load already shows in full.
+    if history.running.len() > 1 && area.height >= 3 {
+        if window.is_some() {
+            request_list(frame, area, history, true);
+            return;
+        }
+        if area.height >= 12 {
+            let rows = (history.running.len() as u16 + 2).min(area.height / 2);
+            request_list(
+                frame,
+                Rect::new(area.x, area.y, area.width, rows),
+                history,
+                false,
+            );
+            queue_history(
+                frame,
+                Rect::new(area.x, area.y + rows, area.width, area.height - rows),
+                history,
+                interval,
+                zoom,
+                window,
+            );
+            return;
+        }
+    }
+    queue_history(frame, area, history, interval, zoom, window);
+}
+
+fn queue_history(
+    frame: &mut Frame,
+    area: Rect,
+    history: &History,
+    interval: Duration,
+    zoom: u16,
+    window: Option<usize>,
+) {
     let last = history.points.back();
     let active = last.and_then(|p| p.active);
     let waiting = last.and_then(|p| p.waiting);
     // Yellow means "worth inspecting": an empty wait queue stays neutral.
     let waiting_color = |queued: bool| if queued { YELLOW } else { MUTED };
-    // Each running request's own rate, when the runtime reports them. On
-    // Overview the list takes the panel's rows while requests run, because
-    // that is what the panel is read for then; the history returns when
-    // nothing runs, and an enlarged queue always shows it.
-    let rates: Vec<String> = history
-        .running
-        .iter()
-        // A row for the counts and at least one for a request.
-        .filter(|_| window.is_some() && area.height >= 4)
-        .map(|request| running_label(request, usize::from(area.width.saturating_sub(4))))
-        .collect();
     // A short terminal still gets a separate, selectable queue panel with
     // both exact counts. Expanding it reveals the full history.
-    if area.height <= 5 || !rates.is_empty() {
+    if area.height <= 5 {
         let queued_color = waiting_color(waiting.is_some_and(|n| n > 0));
         let active_label = format!("active {}", count(active));
         let waiting_label = format!("waiting {}", count(waiting));
@@ -282,37 +441,15 @@ pub(super) fn queue(
                 Span::styled(request_icons(value, icon, room), Style::default().fg(color)),
             ])
         };
-        // The counts say how many are running; these say what each one is doing.
-        if !rates.is_empty() {
-            let room = usize::from(area.height.saturating_sub(2)).saturating_sub(1);
-            let label = if rates.len() > room {
-                format!("{active_label} · +{} more", rates.len() - room)
-            } else {
-                active_label.clone()
-            };
-            lines.push(Line::from(Span::styled(label, Style::default().fg(CYAN))));
-            for text in rates.iter().take(room) {
-                lines.push(Line::from(Span::styled(
-                    format!("  {text}"),
-                    Style::default().fg(CYAN),
-                )));
-            }
-            if lines.len() < usize::from(area.height.saturating_sub(2)) {
-                lines.push(Line::from(Span::styled(
-                    waiting_label.clone(),
-                    Style::default().fg(queued_color),
-                )));
-            } else {
-                block = block.title_bottom(Line::from(Span::styled(
-                    format!(" {waiting_label} "),
-                    Style::default().fg(queued_color),
-                )));
-            }
-            frame.render_widget(Paragraph::new(lines).block(block), area);
-            return;
-        }
         if area.height >= 3 {
-            lines.push(row("active", active, '●', CYAN));
+            // Unusually many beside a slowdown: the anomaly colour.
+            let unusual = last.is_some_and(|point| point.unusual);
+            lines.push(row(
+                "active",
+                active,
+                '●',
+                if unusual { Tone::Unusual.color() } else { CYAN },
+            ));
         }
         if area.height >= 4 {
             lines.push(row("waiting", waiting, '○', queued_color));
@@ -504,6 +641,18 @@ pub(super) fn queue(
             frame.buffer_mut()[(x, y)]
                 .set_symbol(&glyph.to_string())
                 .set_fg(if equal { Color::White } else { MUTED });
+        }
+    }
+    // Samples whose counts were unusual beside a slowdown take the anomaly
+    // colour, as on every other chart.
+    for (column, index) in indices.iter().enumerate() {
+        if index.is_some_and(|index| history.points[index].unusual) {
+            for y in graph.y..graph.bottom() {
+                let cell = &mut frame.buffer_mut()[(graph.x + column as u16, y)];
+                if cell.symbol() != " " && cell.fg != DIM {
+                    cell.set_fg(Tone::Unusual.color());
+                }
+            }
         }
     }
     if active_values

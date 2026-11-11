@@ -117,26 +117,74 @@ narrower terminals, panels keep numeric readings when a secondary trace
 cannot fit. Journal records transitions rather than duplicating the live
 process table.
 
-## Throughput correlation
+## Slowdowns
 
-When live provider telemetry reports a material generation-rate change,
-mlxtop compares it with a short baseline for the same provider and model. It
-then ranks signals observed in the same sample: paging, macOS memory pressure,
-compression churn, thermal limiting, GPU saturation, Metal memory occupancy,
-queue depth, model-memory growth and context/KV growth.
+mlxtop finds slowdowns by anomaly detection, with one rule for every signal:
+a sample is **unusual** when it is further from the signal's usual value than
+the signal ordinarily strays. The usual value is the middle of the signal's
+recent samples (about five minutes of generation, for one model on one
+runtime). A runtime whose speed jumps about is rarely unusual; a steady one
+shows a small change.
 
-The Journal records the strongest evidence with the affected throughput,
-for example:
+Generation speed depends on the work: a longer context and more requests
+writing at once are slower. So a sample's speed is compared with earlier
+samples of **similar work**: as many requests writing at once (1, 2, 3, or 4
+and more), with a context (prompt and output so far) within a factor of two.
+Work mlxtop has not seen before is learned for eight samples before it is
+judged; it is never compared with different work.
+
+Generation is **slow** when its speed is unusually low for its work (and at
+least a fifth below usual) for three samples in a row. The reason given is
+whatever else is unusual at the same time: thermal limiting, memory pressure,
+paging, the runtime's disk work, a prompt prefilling beside the answer,
+compression, the queue, model or Metal memory, the runtime's CPU, or a GPU
+left idle. Request count and prompt size are never the reason: the usual
+speed already allows for them. A signal at its usual level is never the
+reason, however high that level is.
+
+The generation chart always shows what it judges against: a dashed line at
+each sample's usual speed, for the work it was doing. The line steps up or
+down as requests join and leave and contexts grow, and runs through bars
+that pass it. The bottom edge says what the latest is for, for example
+`┄ usual 30.0 for 2 requests · 131.2k context`. The line is grey while all is
+well.
+
+Magenta means unusual and nothing else. It appears as it happens, slowdown or
+not:
+
+- a sample on the generation chart that is unusually slow, even a single one;
+- a sample on another chart whose reading is unusual for the host: paging,
+  compression, memory, disk, or a GPU left idle;
+- readings without a chart, in place: the header's `CPU 380% (usual 95%)` and
+  `THERMAL` note.
+
+A reading that stays unusual for 30 seconds while generation keeps its usual
+speed becomes the usual value. Requests, prompts and the queue are not marked
+on their own; they are what you asked the runtime to do.
+
+During a slowdown the same colour ties the panels together:
+
+- the usual-speed line turns magenta and the reason is named under the bars;
+- the border of the panel that shows the reason is tagged `▲ slowed GEN ↓50%`;
+- the queue's active count and history are marked when the reason is how many
+  requests waited.
+
+An expanded generation chart (`Enter`) and Diagnostics (`d`) show what a
+slowdown is judged against, for example `usual 50.0 · slow below 40.0`;
+Diagnostics also lists everything unusual right now.
+
+The Journal writes one row when a slowdown begins and one when it ends:
 
 ```text
-GEN ↓16.7% (30.0→25.0 tok/s) · correlated: GPU 99% busy + context +11.7k → 32.2k
+SLOWDOWN   GEN ↓50.0% (50.0→25.0 tok/s) · paging 96.0 MiB/s (usual 2.0 MiB/s) → Reduce active models; recheck paging.
+RECOVERED  generation back to 50.0 tok/s after 42s · low 25.0 tok/s
 ```
 
-This is correlation, not a claim that one counter proves causation. If no
-tracked system signal moved with the rate, the Journal finding says so and identifies workload or runtime scheduling
-as a possible explanation. Diagnostics cards have been removed. A throughput
-diagnosis is recorded once per change in the Journal, rather than once per
-refresh.
+When nothing else is unusual the row says `nothing else unusual`, and if the
+lower speed holds for 30 seconds it becomes the usual speed for that work
+(`SETTLED`). This
+is what happens together, not proof of cause. mlxtop needs eight samples of
+generation before it has a usual speed to compare with.
 
 ## oMLX telemetry
 
@@ -302,8 +350,7 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 
 Press `d` from any main view to open **Diagnostics**. During process-filter entry,
 `d` remains a filter character; finish the filter first. The panel shows the full
-assessment, supporting evidence, and confidence when a measured slowdown has a
-correlated signal. Local hardware findings are explicitly labeled when the selected
+assessment and what else was unusual when generation slowed. Local hardware findings are explicitly labeled when the selected
 API is remote; they do not establish a remote inference bottleneck.
 
 The connection section shows selection provenance, the resolved endpoint, hidden
@@ -379,7 +426,7 @@ Diagnostics distinguish measured throughput drops from resource usage. When
 nothing needs action and memory pressure is normal, the assessment reads
 **Healthy · no bottleneck**; GPU utilization appears as evidence beside it, and
 a busy GPU alone never becomes the finding. A measured drop shows the rate
-change, an associated signal with confidence, and a short suggested check.
+change, what else was unusual, and a short suggested check.
 Linux temperature readings are shown as measurements, not inferred throttling.
 
 ### GPU findings
@@ -519,7 +566,7 @@ you leave out keeps its built-in default.
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in yellow |
-| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; considered in slowdown correlation; never an alarm by itself |
+| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
 | `swap_critical_rate` | integer | 16 MiB/s | Swap rate that counts as thrashing (in and out); critical paging findings turn the paging chart red |

@@ -141,6 +141,7 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
         completed: true,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         output_tps: None,
         observed_at: Some(SystemTime::now() - Duration::from_secs(120)),
@@ -181,6 +182,7 @@ fn strip_keeps_runtime_counters_only_when_they_differ_from_the_latest_request() 
         completed: false,
         queued: false,
         prefilled: None,
+        idle_for: None,
         ttft_ms: None,
         output_tps: None,
         observed_at: Some(SystemTime::now()),
@@ -194,5 +196,65 @@ fn strip_keeps_runtime_counters_only_when_they_differ_from_the_latest_request() 
     assert!(
         !strip.contains("PROMPT"),
         "prompt load already shows it\n{strip}"
+    );
+}
+
+#[test]
+fn the_header_colours_a_reading_that_is_unusual() {
+    let line_text = |line: &Line| -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+    let colour_of = |line: &Line, text: &str| {
+        line.spans
+            .iter()
+            .find(|span| span.content.contains(text))
+            .and_then(|span| span.style.fg)
+    };
+    let mut sample = live_sample();
+    sample.llm_cpu = 380.0;
+    sample.thermal = "limited 60%".into();
+    // Ordinarily: a quiet CPU figure, and thermal in its warning colour.
+    let footer = host_footer(&sample, 160);
+    assert!(line_text(&footer).contains("CPU 380%"));
+    assert_eq!(colour_of(&footer, "CPU 380%"), Some(MUTED));
+    assert_eq!(colour_of(&footer, "THERMAL limited 60%"), Some(YELLOW));
+
+    // Beside a slowdown they were unusual for: the anomaly colour, and the
+    // CPU says what is usual.
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Thermal,
+        unusual: vec![CorrelationCause::Thermal, CorrelationCause::Cpu],
+        notes: vec![
+            "thermal limit".into(),
+            "runtime CPU 380% (usual 95%)".into(),
+        ],
+        ..CorrelationInsight::default()
+    };
+    let footer = host_footer(&sample, 160);
+    assert!(
+        line_text(&footer).contains("· CPU 380% (usual 95%)"),
+        "{}",
+        line_text(&footer)
+    );
+    assert_eq!(
+        colour_of(&footer, "CPU 380% (usual 95%)"),
+        Some(Tone::Unusual.color())
+    );
+    assert_eq!(
+        colour_of(&footer, "THERMAL limited 60%"),
+        Some(Tone::Unusual.color())
+    );
+
+    // The same holds with no slowdown: a reading that is unusual on its
+    // own is coloured where it is shown.
+    sample.correlation.direction = ThroughputDirection::Flat;
+    let footer = host_footer(&sample, 160);
+    assert_eq!(
+        colour_of(&footer, "CPU 380% (usual 95%)"),
+        Some(Tone::Unusual.color())
     );
 }

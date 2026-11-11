@@ -22,8 +22,8 @@ use crate::theme::{
     centered_rect, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
 };
 use crate::{
-    gpu_dashboard, memory_composition, model_dashboard, operator_charts, process_memory,
-    request_dashboard, swap_usage,
+    drop_marks, gpu_dashboard, memory_composition, model_dashboard, operator_charts,
+    process_memory, request_dashboard, swap_usage,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -54,6 +54,10 @@ const OVERVIEW_SUMMARY_HEIGHT: u16 = 2;
 fn overview_grid(area: Rect) -> [Rect; 3] {
     Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(area)
 }
+
+/// A bar cell the usual-speed line runs through: drawn as `┄` cut into the
+/// bar's colour.
+const USUAL_THROUGH_BAR: char = '╍';
 
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
@@ -352,6 +356,15 @@ impl App {
             self.request_scroll,
             self.charts.zoom(Chart::Prompt),
         );
+        self.mark_if_linked(frame, area, Chart::Prompt);
+    }
+
+    /// Tags the panel a slowdown is attributed to, in the slowdown's colour.
+    pub(crate) fn mark_if_linked(&self, frame: &mut Frame, area: Rect, chart: Chart) {
+        let insight = &self.collector.current.correlation;
+        if drop_marks::linked(insight) == Some(chart) {
+            drop_marks::mark(frame, area, insight);
+        }
     }
 
     pub(crate) fn draw_operator_chart(&self, frame: &mut Frame, area: Rect, chart: Chart) {
@@ -371,6 +384,7 @@ impl App {
             }
             _ => unreachable!("operator chart expected"),
         }
+        self.mark_if_linked(frame, area, chart);
     }
 
     pub(crate) fn draw_selected_chart(&self, frame: &mut Frame, area: Rect) {
@@ -389,7 +403,7 @@ impl App {
                         &self.collector.prefill_history,
                         ChartMetric::Prefill,
                     ),
-                    Chart::Cache => ("cache", &self.collector.cache_history, ChartMetric::Cache),
+                    Chart::Cache => self.cache_panel(),
                     Chart::Gpu => (
                         self.gpu_chart_title(),
                         &self.collector.gpu_history,
@@ -589,14 +603,21 @@ impl App {
         self.draw_request_chart(frame, first.union(second));
         let [cache, queue] =
             Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third);
-        self.render_indicator_chart(
-            frame,
-            cache,
-            "cache",
-            &self.collector.cache_history,
-            ChartMetric::Cache,
-        );
+        let (name, history, metric) = self.cache_panel();
+        self.render_indicator_chart(frame, cache, name, history, metric);
         self.draw_operator_chart(frame, queue, Chart::Queue);
+    }
+
+    /// The cache panel plots the runtime's own disk traffic where the OS
+    /// reports it: per-request reuse is in prompt load, and disk is where a
+    /// cache stalls an answer. Without it, the reuse of each interval.
+    pub(crate) fn cache_panel(&self) -> (&'static str, &VecDeque<ChartPoint>, ChartMetric) {
+        let disk = &self.collector.disk_history;
+        if disk.iter().any(|point| point.value.is_some()) {
+            ("cache I/O", disk, ChartMetric::Disk)
+        } else {
+            ("cache", &self.collector.cache_history, ChartMetric::Cache)
+        }
     }
 
     pub(crate) fn draw_workload_charts(&self, frame: &mut Frame, area: Rect) {
@@ -744,6 +765,31 @@ impl App {
                     }
                 })
                 .unwrap_or_else(|| {
+                    // The title reads what the chart's last bar shows. A
+                    // server average beside a different plotted sample
+                    // contradicts it; the average goes to the bottom border.
+                    if let Some(point) = history
+                        .iter()
+                        .filter(|_| area.width >= 38)
+                        .rev()
+                        .take(self.charts.visible_samples(
+                            Chart::from(metric),
+                            usize::from(area.width.saturating_sub(8)),
+                        ))
+                        .find(|point| point.value.is_some())
+                    {
+                        let rate =
+                            format!("{:.1} tok/s", point.value.unwrap_or_default() as f64 / 10.0);
+                        let with_age =
+                            format!("LAST {rate} · {}", telemetry_age(Some(point.observed_at)));
+                        // Narrow panels keep the state word (decoding), which
+                        // says why there is no current rate.
+                        if area.width >= 44 {
+                            return with_age;
+                        } else if area.width >= 38 {
+                            return format!("LAST {rate}");
+                        }
+                    }
                     if metric == ChartMetric::Prefill
                         && sample.llm_prefill_tps.is_some()
                         && area.width >= 38
@@ -762,8 +808,25 @@ impl App {
                     }
                 }),
             ChartMetric::Cache => {
-                let value = current.map_or_else(|| "—".into(), |value| format!("{value}%"));
-                if area.width < 28 {
+                // Hit rate is measured only over intervals that read new
+                // prompt tokens; between prompts, keep the last one, marked.
+                let last = history
+                    .iter()
+                    .rev()
+                    .take(self.charts.visible_samples(
+                        Chart::from(metric),
+                        usize::from(area.width.saturating_sub(8)),
+                    ))
+                    .find_map(|point| point.value.map(|value| (value, point.observed_at)));
+                let value = match (current, last) {
+                    (Some(value), _) => format!("{value}%"),
+                    (None, Some((value, at))) if area.width >= 44 => {
+                        format!("LAST {value}% · {}", telemetry_age(Some(at)))
+                    }
+                    (None, Some((value, _))) if area.width >= 28 => format!("LAST {value}%"),
+                    _ => "—".into(),
+                };
+                if value.starts_with("LAST") || area.width < 28 {
                     value
                 } else {
                     format!("hit {value}")
@@ -782,7 +845,7 @@ impl App {
                     state.into()
                 }
             }
-            ChartMetric::Swap | ChartMetric::Compression => {
+            ChartMetric::Swap | ChartMetric::Compression | ChartMetric::Disk => {
                 current.map(rate).unwrap_or_else(|| "—".into())
             }
         };
@@ -820,9 +883,44 @@ impl App {
             ChartMetric::Compression => Some(self.thresholds.compression_warn_rate),
             _ => None,
         };
+        // The generation chart's dashed line is its usual speed, once that
+        // is known. It is quiet until generation is slow, and then takes the
+        // anomaly colour: the gap under it is the drop.
+        let insight = &sample.correlation;
+        let slowed = metric == ChartMetric::Generation && insight.is_material_drop();
+        let normal = insight
+            .episode
+            .filter(|_| slowed)
+            .map(|episode| episode.reference)
+            .or(insight.usual_speed.map(|(usual, _)| usual))
+            .filter(|usual| metric == ChartMetric::Generation && *usual > 0.0)
+            .map(|usual| (usual * 10.0).round() as u64);
+        let (warning, guide_tone) = match normal {
+            Some(normal) if slowed => (Some(normal), Tone::Unusual),
+            Some(normal) => (Some(normal), Tone::Muted),
+            None => (warning, Tone::Yellow),
+        };
+        // The usual speed each sample was judged against, where known: the
+        // line follows the work, so the axis must reach its highest point.
+        let usual_peak = history
+            .iter()
+            .rev()
+            .take(visible_count)
+            .filter_map(|point| point.usual)
+            .max();
         let scale = chart_scale(history, metric, visible_count);
+        let scale = match usual_peak {
+            Some(peak) => (scale.0, scale.1.max(crate::chart_scale::ceiling(peak, 10))),
+            None => scale,
+        };
         let scale = match warning {
-            Some(rate) => (0, scale.1.max(crate::chart_scale::ceiling(rate, 1))),
+            Some(rate) => (
+                0,
+                scale.1.max(crate::chart_scale::ceiling(
+                    rate,
+                    if normal.is_some() { 10 } else { 1 },
+                )),
+            ),
             None => scale,
         };
         let top_axis = chart_axis_label(metric, scale.1);
@@ -859,6 +957,19 @@ impl App {
                 format!("avg {}", chart_stat_label(metric, average)),
                 format!("peak {}", chart_stat_label(metric, peak)),
             ]);
+        }
+        // What this chart's slowdowns are judged against.
+        if let Some((usual, slow_below)) = insight
+            .usual_speed
+            .filter(|_| metric == ChartMetric::Generation)
+        {
+            details.push(format!("usual {usual:.1} · slow below {slow_below:.1}"));
+        }
+        if let Some(episode) = insight.episode.filter(|_| slowed) {
+            details.push(format!(
+                "slow {:.0}s · low {:.1}",
+                episode.seconds, episode.low
+            ));
         }
         // The Overview shares one window, shown once in the top bar; only an
         // expanded chart, which zooms on its own, names its window here.
@@ -898,7 +1009,32 @@ impl App {
             ChartMetric::Prefill => {
                 Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
             }
-            ChartMetric::Generation => Some("tok/s".into()),
+            // oMLX and Splash report generation summed over running requests;
+            // say so when there are several, since each gets only its share.
+            ChartMetric::Generation => {
+                let unit = match generating_requests(sample) {
+                    n if n > 1 && area.width >= 38 => format!("tok/s · total of {n} requests"),
+                    n if n > 1 => format!("tok/s · {n} req"),
+                    _ => "tok/s".into(),
+                };
+                // What the dashed line is: the speed slowdowns are judged
+                // against. It gives way before the unit does.
+                // With the work it is for, when it is for one kind of work.
+                let usual = insight.usual_speed.and_then(|(usual, _)| {
+                    let mut texts = Vec::new();
+                    if !insight.usual_for.is_empty() {
+                        texts.push(format!(
+                            "{unit} · ┄ usual {usual:.1} for {}",
+                            insight.usual_for
+                        ));
+                    }
+                    texts.push(format!("{unit} · ┄ usual {usual:.1}"));
+                    texts.into_iter().find(|text| {
+                        Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
+                    })
+                });
+                Some(usual.unwrap_or(unit))
+            }
             ChartMetric::Memory => None,
             ChartMetric::Gpu => Some(if current == Some(0) {
                 "idle".into()
@@ -961,6 +1097,22 @@ impl App {
                     },
                 )
             }
+            ChartMetric::Disk => {
+                let (read, write) = match (sample.disk.read, sample.disk.write) {
+                    (Some(read), Some(write)) => (rate(read), rate(write)),
+                    _ => ("—".into(), "—".into()),
+                };
+                let spaced = format!("read {read} · write {write}");
+                Some(
+                    if Line::from(spaced.as_str()).width() + 2
+                        <= usize::from(area.width.saturating_sub(2))
+                    {
+                        spaced
+                    } else {
+                        format!("r {read} · w {write}")
+                    },
+                )
+            }
             // The title has the latest interval's hit rate; these are the
             // session-wide figures it is measured against.
             ChartMetric::Cache => Some(if area.width < 38 {
@@ -983,17 +1135,63 @@ impl App {
             } else {
                 summary
             };
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {summary} "),
-                Style::default().fg(if metric == ChartMetric::Memory {
-                    MUTED
-                } else {
-                    chart_tone.color()
-                }),
-            )));
+            // The panel behind a slowdown carries its tag at the right of
+            // this border; a summary that would run into it gives way.
+            let tag = if drop_marks::linked(insight) == Some(Chart::from(metric)) {
+                let room = drop_marks::tag_room(area.width) / 2;
+                Line::from(drop_marks::tag(insight, room).as_str()).width()
+            } else {
+                0
+            };
+            let summary = if tag > 0
+                && Line::from(summary.as_str()).width() + tag + 6 > usize::from(area.width)
+            {
+                String::new()
+            } else {
+                summary
+            };
+            // While generation is slow, its chart says why under the bars
+            // that show it, in the anomaly colour: ▼ and what else is unusual.
+            let room = usize::from(area.width.saturating_sub(4));
+            let reason = (metric == ChartMetric::Generation && insight.is_material_drop())
+                .then(|| {
+                    let lead = insight.lead.split(" → ").next().unwrap_or("");
+                    // With nothing else unusual the label says so, rather
+                    // than leave the arrow on its own.
+                    let mut reasons = Vec::new();
+                    if !lead.is_empty() {
+                        reasons.push(format!("▼ {lead}"));
+                        reasons.push(format!("▼ {}", lead.split(" · ").next().unwrap_or("")));
+                        reasons.push(format!("▼ {}", lead.split(" (").next().unwrap_or("")));
+                    }
+                    reasons.push(format!("▼ {}", insight.cause.label()));
+                    reasons.push("▼".to_owned());
+                    reasons
+                        .into_iter()
+                        .find(|text| Line::from(text.as_str()).width() + 2 <= room)
+                })
+                .flatten();
+            block = block.title_bottom(match reason {
+                Some(reason) => Line::from(Span::styled(
+                    format!(" {reason} "),
+                    Style::default()
+                        .fg(Tone::Unusual.color())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                None if summary.is_empty() => Line::default(),
+                None => Line::from(Span::styled(
+                    format!(" {summary} "),
+                    Style::default().fg(if metric == ChartMetric::Memory {
+                        MUTED
+                    } else {
+                        chart_tone.color()
+                    }),
+                )),
+            });
         }
         let mut inner = block.inner(area);
         frame.render_widget(block, area);
+        self.mark_if_linked(frame, area, Chart::from(metric));
         if inner.is_empty() {
             return;
         }
@@ -1087,12 +1285,6 @@ impl App {
                 inner.y += 1;
                 inner.height -= 1;
             }
-            swap_usage::draw_compressor(
-                frame,
-                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-                sample,
-            );
-            inner.height = inner.height.saturating_sub(1);
             if inner.is_empty() {
                 return;
             }
@@ -1105,6 +1297,44 @@ impl App {
                         }
                         Some(_) => "Light compression · below warning",
                         None => "Compression unavailable",
+                    })
+                    .style(Style::default().fg(current_tone.color())),
+                    inner,
+                );
+                return;
+            }
+        }
+        if metric == ChartMetric::Disk {
+            // Reuse over the session; each request's share is in prompt load.
+            if inner.height >= 5 {
+                if let Some(reuse) = sample.llm_cache_efficiency {
+                    frame.render_widget(
+                        Paragraph::new(format!("{reuse:.0}% of prompt tokens reused"))
+                            .style(Style::default().fg(MUTED)),
+                        Rect::new(inner.x, inner.y, inner.width, 1),
+                    );
+                    inner.y += 1;
+                    inner.height -= 1;
+                }
+            }
+            if sample.ssd_cache.is_some() {
+                swap_usage::draw_ssd_cache(
+                    frame,
+                    Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+                    sample,
+                );
+                inner.height = inner.height.saturating_sub(1);
+            }
+            if inner.is_empty() {
+                return;
+            }
+            if inner.height < 3 {
+                frame.render_widget(
+                    Paragraph::new(match current {
+                        Some(0) => "No disk traffic",
+                        Some(rate) if rate >= crate::analysis::DISK_ACTIVE_RATE => "Disk active",
+                        Some(_) => "Light disk traffic",
+                        None => "Disk reading unavailable",
                     })
                     .style(Style::default().fg(current_tone.color())),
                     inner,
@@ -1201,6 +1431,12 @@ impl App {
             // samples exist, "yet" when none have been captured.
             let idle = sample.llm_status == "idle";
             let message = match metric {
+                // Hit rate needs prompt tokens read in the window.
+                ChartMetric::Cache
+                    if history.iter().any(|point| point.value.is_some()) && inner.width >= 30 =>
+                {
+                    "No prompts read in this window"
+                }
                 _ if history.iter().any(|point| point.value.is_some()) => {
                     if idle && inner.width >= 32 {
                         "Idle · no samples in this window"
@@ -1248,7 +1484,7 @@ impl App {
 
         // Historical observations end where sampling stopped. Explain the
         // trailing gap without drawing a zero or holding the old rate live.
-        if current.is_none() && inner.height >= 4 {
+        if current.is_none() && inner.height >= 4 && !rate_chart && metric != ChartMetric::Cache {
             if let Some((observed_at, value)) = history
                 .iter()
                 .rev()
@@ -1325,14 +1561,18 @@ impl App {
                 .filter(|row| row + 1 < plot_height),
             None => (!paging_idle).then_some(axis_rows.saturating_sub(1) / 2),
         };
+        // Samples that carry their own usual value draw it column by column:
+        // a line that steps down when the work gets heavier, and a bar
+        // falling short of its own column's line is the anomaly.
+        let own_usual = visible_points.iter().any(|point| point.usual.is_some());
         for (row, row_cells) in cells.iter_mut().enumerate() {
             let guide = if row + 1 == axis_rows {
                 Some(('─', Tone::Muted))
-            } else if Some(row) == guide_row {
+            } else if Some(row) == guide_row && !own_usual {
                 Some((
                     '┄',
                     if warning.is_some() {
-                        Tone::Yellow
+                        guide_tone
                     } else {
                         Tone::Muted
                     },
@@ -1346,6 +1586,34 @@ impl App {
                     tone,
                     fill: false,
                 });
+            }
+        }
+
+        let usual_rows: Vec<Option<usize>> = visible_points
+            .iter()
+            .map(|point| {
+                point.usual.and_then(|usual| {
+                    trace_point(chart_display_value(metric, usual, scale), plot_height)
+                        .map(|(row, _)| row)
+                        .filter(|row| row + 1 < axis_rows)
+                })
+            })
+            .collect();
+        if own_usual {
+            for (column, point) in visible_points.iter().enumerate() {
+                let Some(row) = usual_rows[column] else {
+                    continue;
+                };
+                cells[row][column] = TraceCell {
+                    glyph: '┄',
+                    // Over a slow sample, the gap under it is the drop.
+                    tone: if point.tone == Tone::Unusual {
+                        Tone::Unusual
+                    } else {
+                        guide_tone
+                    },
+                    fill: false,
+                };
             }
         }
 
@@ -1377,6 +1645,16 @@ impl App {
                         tone: point.tone,
                         fill: false,
                     };
+                }
+            }
+        }
+        // Where a bar reaches past its usual speed the line runs through
+        // it, cut into the bar, so the line reads across the whole chart.
+        for (column, row) in usual_rows.iter().enumerate() {
+            if let Some(row) = row {
+                let cell = &mut cells[*row][column];
+                if cell.glyph == '█' {
+                    cell.glyph = USUAL_THROUGH_BAR;
                 }
             }
         }
@@ -1490,24 +1768,30 @@ impl App {
             let mut run_tone = None;
             // A full block is drawn as a filled cell: terminals leave a gap
             // between rows of glyphs, but not of backgrounds.
-            let style = |(tone, filled, fill): (Tone, bool, bool)| {
+            let style = |(tone, filled, fill, through): (Tone, bool, bool, bool)| {
                 let style = Style::default().fg(tone.color());
                 match (filled, fill) {
+                    _ if through => Style::default().fg(PANEL).bg(tone.color()),
                     (true, _) => style.bg(tone.color()),
                     (false, true) => style.bg(AREA_FILL),
                     (false, false) => style,
                 }
             };
             for cell in row_cells.iter().take(plot_width).copied() {
+                let through = cell.glyph == USUAL_THROUGH_BAR;
                 let filled = cell.glyph == '█';
-                let key = (cell.tone, filled, cell.fill);
+                let key = (cell.tone, filled, cell.fill, through);
                 if run_tone != Some(key) {
                     if let Some(key) = run_tone {
                         spans.push(Span::styled(std::mem::take(&mut run), style(key)));
                     }
                     run_tone = Some(key);
                 }
-                run.push(if filled { ' ' } else { cell.glyph });
+                run.push(match cell.glyph {
+                    '█' => ' ',
+                    USUAL_THROUGH_BAR => '┄',
+                    glyph => glyph,
+                });
             }
             if let Some(key) = run_tone {
                 spans.push(Span::styled(run, style(key)));
@@ -2206,4 +2490,13 @@ impl App {
             area,
         );
     }
+}
+
+/// Requests generating now, from the runtime's request list.
+fn generating_requests(sample: &crate::domain::Sample) -> usize {
+    sample
+        .llm_requests
+        .iter()
+        .filter(|r| !r.completed && !r.queued && r.prefilled.is_none())
+        .count()
 }

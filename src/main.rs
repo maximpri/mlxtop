@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod analysis;
+mod anomaly;
 mod app;
 mod chart_navigation;
 mod chart_render;
@@ -10,9 +11,11 @@ mod cli;
 mod collector;
 mod completion_log;
 mod config;
+mod decode_tracker;
 mod diagnosis;
 mod diagnostics_view;
 mod domain;
+mod drop_marks;
 mod formatting;
 mod gpu;
 mod gpu_amd;

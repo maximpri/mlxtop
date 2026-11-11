@@ -9,7 +9,20 @@ impl ChartPoint {
             value,
             tone,
             observed_at: SystemTime::now(),
+            usual: None,
         }
+    }
+}
+
+impl crate::analysis::Speeds {
+    /// The usual speed over every earlier sample.
+    fn level(&self) -> Option<f64> {
+        // A lone request with the context the test samples hold.
+        let lone = crate::analysis::Work {
+            requests: 1,
+            context: Some(70_000),
+        };
+        self.usual(lone).level()
     }
 }
 
@@ -73,6 +86,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             generation_history: VecDeque::new(),
             prefill_history: VecDeque::new(),
             cache_history: VecDeque::new(),
+            disk_history: VecDeque::new(),
             load_history: VecDeque::new(),
             composition_history: VecDeque::new(),
             swap_history: VecDeque::new(),
@@ -131,6 +145,7 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         generation_history: VecDeque::new(),
         prefill_history: VecDeque::new(),
         cache_history: VecDeque::new(),
+        disk_history: VecDeque::new(),
         load_history: VecDeque::new(),
         composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),
@@ -234,6 +249,8 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             resident: 16 * 1024 * MIB,
             footprint: 19 * 1024 * MIB,
             peak: 30 * 1024 * MIB,
+            disk_read: 0,
+            disk_written: 0,
             at: Instant::now(),
         }),
         process_memory_growth: Some(0),
@@ -282,12 +299,11 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
                 (index % 6 + 1) * 768 * 1024,
             ),
         ] {
-            // Grade exactly as the collector does, including rolling baselines.
+            // Grade exactly as the collector does.
             let tone = match metric {
                 ChartMetric::Memory => app.collector.current.pressure_tone,
-                // Generation follows the slowdown finding (flat here).
-                ChartMetric::Generation => Tone::Green,
-                ChartMetric::Prefill => crate::history::baseline_tone(value, history),
+                // Speeds have no grade: usual here, so green.
+                ChartMetric::Generation | ChartMetric::Prefill => Tone::Green,
                 _ => metric.tone(value, defaults()),
             };
             let mut point = ChartPoint::new(Some(value), tone);
@@ -318,6 +334,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             completed: index < 5,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             output_tps: Some(35.5 + (5 - index) as f64),
             observed_at: Some(now - Duration::from_secs((5 - index) as u64 * 10)),
@@ -366,6 +383,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             completed: false,
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
@@ -720,18 +738,13 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Generation,
             "generation",
             Some(400),
-            vec!["LAST SAMPLE 40.0 tok/s · 25s old", "tok/s"],
+            vec!["LAST 40.0 tok/s · 25s old", "tok/s"],
         ),
         (
             ChartMetric::Cache,
             "cache",
             Some(0),
-            vec![
-                "hit —",
-                "LAST INTERVAL 0% · 25s old",
-                "since start 62.8%",
-                "prefix 39.7%",
-            ],
+            vec!["LAST 0% · 25s old", "since start 62.8%", "prefix 39.7%"],
         ),
         (
             ChartMetric::Prefill,
@@ -787,7 +800,7 @@ fn the_prefill_chart_shows_how_far_the_prefill_has_got() {
             ChartMetric::Prefill,
         )
     });
-    assert!(screen.contains("41.0k / 61.5k · 67%"), "{screen}");
+    assert!(screen.contains("41.0k / 61.5k · 66%"), "{screen}");
     assert!(screen.contains("LIVE 4100.0 tok/s"), "{screen}");
 }
 
@@ -1884,6 +1897,8 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             resident: 16 * 1024 * 1024 * 1024,
             footprint: (12 + i / 10) * 1024 * 1024 * 1024,
             peak: 29 * 1024 * 1024 * 1024,
+            disk_read: 0,
+            disk_written: 0,
             at: Instant::now(),
         });
         app.collector
@@ -1923,6 +1938,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             observed_at: Some(SystemTime::now()),
             queued: false,
             prefilled: None,
+            idle_for: None,
             ttft_ms: None,
             output_tps: None,
         }];
@@ -1970,6 +1986,8 @@ fn overview_omits_process_memory_chart_even_when_available() {
         resident: 16 * 1024 * MIB,
         footprint: 17 * 1024 * MIB,
         peak: 29 * 1024 * MIB,
+        disk_read: 0,
+        disk_written: 0,
         at: Instant::now(),
     });
     let screen = render_app(&app, 180, 50);
@@ -2010,6 +2028,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
                 completed: true,
                 queued: false,
                 prefilled: None,
+                idle_for: None,
                 ttft_ms: None,
                 output_tps: None,
                 observed_at: Some(SystemTime::now()),
@@ -3312,84 +3331,6 @@ fn cache_counter_resets_and_stale_intervals_leave_gaps() {
 }
 
 #[test]
-fn correlation_explains_a_generation_drop_with_contemporaneous_signals() {
-    let mut engine = CorrelationEngine::default();
-    let baseline = Sample {
-        llm_provider: "oMLX".into(),
-        llm_model: "model".into(),
-        llm_generation_tps: Some(30.0),
-        llm_generation_tps_live: true,
-        llm_prompt_tokens: Some(20_000),
-        llm_output_tokens: Some(1_000),
-        llm_active_requests: Some(1),
-        gpu_util: Some(99),
-        gpu_in_use: Some(96),
-        gpu_alloc: Some(100),
-        ..Sample::default()
-    };
-    engine.observe(&baseline, defaults());
-
-    let current = Sample {
-        llm_provider: "oMLX".into(),
-        llm_model: "model".into(),
-        llm_generation_tps: Some(25.0),
-        llm_generation_tps_live: true,
-        llm_prompt_tokens: Some(30_000),
-        llm_output_tokens: Some(3_000),
-        llm_active_requests: Some(1),
-        gpu_util: Some(99),
-        gpu_in_use: Some(96),
-        gpu_alloc: Some(100),
-        ..Sample::default()
-    };
-    let insight = engine.observe(&current, defaults());
-
-    assert_eq!(insight.direction, ThroughputDirection::Down);
-    assert_eq!(insight.cause, CorrelationCause::ContextGrowth);
-    assert!(insight.summary.contains("GEN ↓16.7%"));
-    assert!(insight.summary.contains("GPU 99% busy"));
-    assert!(insight.summary.contains("context"));
-    assert!(insight.details.contains("Metal MEM 96%"));
-    assert_eq!(
-        insight.event_key,
-        Some(CorrelationKey {
-            direction: ThroughputDirection::Down,
-            cause: CorrelationCause::ContextGrowth,
-        })
-    );
-}
-
-#[test]
-fn correlation_is_honest_when_no_system_signal_moved_with_rate() {
-    let mut engine = CorrelationEngine::default();
-    engine.observe(
-        &Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(30.0),
-            llm_generation_tps_live: true,
-            ..Sample::default()
-        },
-        defaults(),
-    );
-    let insight = engine.observe(
-        &Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(25.0),
-            llm_generation_tps_live: true,
-            ..Sample::default()
-        },
-        defaults(),
-    );
-
-    assert_eq!(insight.cause, CorrelationCause::Runtime);
-    assert_eq!(insight.confidence_label(), "low");
-    assert!(insight.summary.contains("no matching system signal"));
-    assert!(insight.details.contains("workload/runtime change"));
-}
-
-#[test]
 fn provider_telemetry_counts_as_an_observed_llm_without_a_matching_process() {
     let sample = Sample {
         llm_provider: "oMLX".into(),
@@ -3853,38 +3794,6 @@ fn configured_compression_rate_changes_the_classified_impact() {
     let mut sample = template;
     classify(&mut sample, None, Thresholds::from_config(&config));
     assert_eq!(sample.impact, "LLM READY");
-}
-
-#[test]
-fn configured_gpu_threshold_changes_correlation_attribution() {
-    let current = CorrelationObservation {
-        provider: "oMLX".into(),
-        model: "model".into(),
-        generation_tps: Some(20.0),
-        gpu_util: Some(72),
-        ..CorrelationObservation::default()
-    };
-    let previous = CorrelationObservation {
-        provider: "oMLX".into(),
-        model: "model".into(),
-        generation_tps: Some(30.0),
-        gpu_util: Some(10),
-        ..CorrelationObservation::default()
-    };
-
-    let with_defaults = correlate_observations(&current, Some(&previous), Some(30.0), defaults());
-    assert_ne!(with_defaults.cause, CorrelationCause::GpuSaturation);
-
-    let config: Config = serde_json::from_str(r#"{"gpu_warn_load":60,"gpu_critical_load":70}"#)
-        .expect("valid json should parse");
-    let with_lower_ceiling = correlate_observations(
-        &current,
-        Some(&previous),
-        Some(30.0),
-        Thresholds::from_config(&config),
-    );
-    assert_eq!(with_lower_ceiling.cause, CorrelationCause::GpuSaturation);
-    assert!(with_lower_ceiling.details.contains("GPU 72% busy"));
 }
 
 #[test]
@@ -4364,9 +4273,16 @@ fn cache_never_replaces_missing_interval_samples_with_cumulative_gauge() {
             !text.contains('█'),
             "aggregate must never become a gauge: {text}"
         );
-        assert!(text.contains(if missing == 0 { "hit 0%" } else { "hit —" }));
+        // The last measured interval stays marked LAST while it is in view;
+        // past the window the reading is unknown and the panel says why.
+        let reading = match missing {
+            0 => "hit 0%",
+            4 => "LAST 0%",
+            _ => "hit —",
+        };
+        assert!(text.contains(reading), "{text}");
         if missing == 80 {
-            assert!(text.contains("No samples in this window"));
+            assert!(text.contains("No prompts read in this window"), "{text}");
         }
     }
 }
@@ -4392,7 +4308,7 @@ fn server_rate_averages_are_secondary_details_in_expanded_charts() {
                 ChartMetric::Generation,
             )
         });
-        assert!(text.contains("LAST SAMPLE 24.7 tok/s"));
+        assert!(text.contains("LAST 24.7 tok/s"), "{text}");
         assert_eq!(
             text.contains("SERVER AVG GEN 35.7 tok/s"),
             expanded,
@@ -4504,8 +4420,9 @@ fn remote_api_rates_are_not_correlated_with_local_gpu_or_memory() {
         gpu_util: Some(100),
         ..Sample::default()
     };
-    assert_eq!(engine.observe(&sample, defaults()).confidence, 0);
-    assert!(engine.observations.is_empty());
+    let insight = engine.observe(&sample, defaults());
+    assert_eq!(insight.direction, ThroughputDirection::Unknown);
+    assert!(engine.speed.level().is_none());
 }
 
 #[test]
@@ -4612,10 +4529,12 @@ fn host_row_leads_with_memory_compression_and_paging_on_macos_only() {
         "wired 3.2 GiB",
         "4.6 GiB stored in 1.6 GiB · 2.9× ratio",
         "comp 3.0 · decomp 1.5 MiB/s",
-        "4% of RAM",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
+    // The compressor's size is in the memory legend and the line above; a
+    // third reading as a share of RAM says nothing new.
+    assert!(!screen.contains("of RAM"), "{screen}");
     let regions = app.charts.regions.borrow().clone();
     let region = |chart| regions.iter().find(|(id, _)| *id == chart).map(|r| r.1);
     let memory = region(Chart::Memory).unwrap();
@@ -4728,34 +4647,10 @@ fn chart_colors_agree_with_the_assessment_at_every_threshold() {
 
 #[test]
 fn throughput_and_cache_charts_grade_against_their_thresholds() {
-    use crate::history::baseline_tone;
-    // Throughput (tenths of tok/s) is graded against the rolling median.
-    let mut history = VecDeque::new();
-    assert_eq!(baseline_tone(100, &history), Tone::Green, "no baseline yet");
-    for _ in 0..10 {
-        history.push_back(ChartPoint::new(Some(500), Tone::Green));
-    }
-    history.push_back(ChartPoint::new(None, Tone::Muted));
-    for (value, tone) in [
-        (520, Tone::Green),
-        (460, Tone::Green),  // −8%: within the slowdown band
-        (450, Tone::Yellow), // −10% and −5 tok/s
-        (351, Tone::Yellow),
-        (350, Tone::Red), // −30%
-        (0, Tone::Red),
-    ] {
-        assert_eq!(baseline_tone(value, &history), tone, "{value}");
-    }
-    // A 10% drop smaller than 2 tok/s is noise, not a slowdown.
-    let slow: VecDeque<_> = (0..5)
-        .map(|_| ChartPoint::new(Some(100), Tone::Green))
-        .collect();
-    assert_eq!(baseline_tone(85, &slow), Tone::Green);
-
     // Generation follows the assessment: a 30% drop is red whatever its cause.
     let mut insight = CorrelationInsight {
         direction: ThroughputDirection::Down,
-        cause: CorrelationCause::GpuSaturation,
+        cause: CorrelationCause::Queueing,
         delta_percent: Some(-15.0),
         ..CorrelationInsight::default()
     };
@@ -5071,4 +4966,2039 @@ fn reported_prefill_keeps_its_last_result_label() {
         ..Sample::default()
     };
     assert_eq!(llm_prefill_rate_label(&sample), "LAST PREFILL 133.2 tok/s");
+}
+
+#[test]
+fn rate_headlines_match_their_charts_and_name_a_summed_rate() {
+    // Two requests decode while the prefill that came before them is over:
+    // the screenshot that read "AVG PREFILL 209.0" above a 71.7 bar.
+    let mut app = test_app(0);
+    let request = |id: &str| domain::RequestUsage {
+        provider: "oMLX".into(),
+        model: "m".into(),
+        id: id.into(),
+        prompt: 50_705,
+        cached: None,
+        output: Some(15),
+        output_tps: Some(21.8),
+        completed: false,
+        queued: false,
+        prefilled: None,
+        idle_for: None,
+        ttft_ms: None,
+        observed_at: Some(SystemTime::now()),
+    };
+    app.collector.current = Sample {
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_generation_tps: Some(43.6),
+        llm_generation_tps_live: true,
+        llm_prefill_tps: Some(209.0),
+        llm_requests: vec![request("a"), request("b")],
+        ..Sample::default()
+    };
+    let generation = VecDeque::from([ChartPoint::new(Some(436), Tone::Green)]);
+    let text = render_view(60, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "generation",
+            &generation,
+            ChartMetric::Generation,
+        )
+    });
+    assert!(text.contains("LIVE 43.6 tok/s"), "{text}");
+    assert!(text.contains("tok/s · total of 2 requests"), "{text}");
+
+    let mut last = ChartPoint::new(Some(717), Tone::Green);
+    last.observed_at = SystemTime::now() - Duration::from_secs(1);
+    let prefill = VecDeque::from([last, ChartPoint::new(None, Tone::Muted)]);
+    let text = render_view(60, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &prefill,
+            ChartMetric::Prefill,
+        )
+    });
+    // The headline is the plotted sample. The server's lifetime average is
+    // a different figure; it lives in diagnostics, not beside the chart.
+    assert!(text.contains("LAST 71.7 tok/s · 1s old"), "{text}");
+    assert!(!text.contains("server avg"), "{text}");
+    assert!(!text.contains("AVG PREFILL"), "{text}");
+}
+
+/// One poll of a lone oMLX request, as the decode tracker leaves it: its
+/// speed since the last poll and how long since it produced a token.
+fn decoding(second: u64, tps: f64, out: u64, idle: f64, gpu: u8) -> Sample {
+    Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "Qwen3.8-27B-oQ4e-mtp".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_generation_tps: Some(tps),
+        llm_generation_tps_live: true,
+        llm_active_requests: Some(1),
+        llm_observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(second)),
+        gpu_util: Some(gpu),
+        gpu_in_use: Some(97),
+        gpu_alloc: Some(100),
+        llm_requests: vec![domain::RequestUsage {
+            provider: "oMLX".into(),
+            model: "Qwen3.8-27B-oQ4e-mtp".into(),
+            id: "e28cde".into(),
+            prompt: 67_793,
+            cached: Some(67_776),
+            output: Some(out),
+            output_tps: Some(tps),
+            completed: false,
+            queued: false,
+            prefilled: None,
+            idle_for: Some(Duration::from_secs_f64(idle)),
+            ttft_ms: None,
+            observed_at: None,
+        }],
+        ..Sample::default()
+    }
+}
+
+/// Per-second speeds of one captured oMLX request (speculative decoding):
+/// normal for this model, and never a slowdown on their own.
+const CAPTURED_SPEEDS: [f64; 17] = [
+    65.1, 37.5, 38.4, 46.3, 52.2, 40.7, 49.5, 49.3, 37.5, 40.8, 32.5, 44.6, 58.4, 29.6, 42.4, 44.4,
+    27.6,
+];
+
+#[test]
+fn speculative_decoding_jitter_within_a_request_is_not_a_slowdown() {
+    let mut engine = CorrelationEngine::default();
+    for (second, tps) in CAPTURED_SPEEDS.iter().enumerate() {
+        let insight = engine.observe(
+            &decoding(second as u64, *tps, 1_000 + second as u64 * 45, 0.05, 99),
+            defaults(),
+        );
+        assert!(
+            !insight.is_material_drop(),
+            "second {second} at {tps} tok/s: {}",
+            insight.summary
+        );
+    }
+}
+
+#[test]
+fn a_stall_is_named_with_what_the_host_was_doing_and_journaled_with_its_end() {
+    // The captured stall: 1,693 tokens out, then none for four polls while
+    // the GPU sat idle and Metal memory stayed at 97%, then 31 tok/s again.
+    let mut engine = CorrelationEngine::default();
+    let mut samples = Vec::new();
+    for (second, tps) in CAPTURED_SPEEDS.iter().enumerate() {
+        samples.push(decoding(
+            second as u64,
+            *tps,
+            1_000 + second as u64 * 40,
+            0.05,
+            99,
+        ));
+    }
+    for (offset, idle) in [1.38, 2.39, 3.41, 4.41].iter().enumerate() {
+        samples.push(decoding(17 + offset as u64, 0.0, 1_693, *idle, 0));
+    }
+    samples.push(decoding(21, 31.0, 1_724, 0.01, 99));
+    for sample in &mut samples {
+        sample.correlation = engine.observe(sample, defaults());
+    }
+    // Before 1.5 s without a token there is no verdict.
+    assert!(!samples[17].correlation.is_material_drop());
+    let stall = &samples[18].correlation;
+    assert_eq!(stall.cause, CorrelationCause::Stall);
+    assert_eq!(stall.lead, "no new token for 2s at 1.7k out · GPU idle");
+    // A busy GPU and a full Metal heap hold all along; neither is the reason.
+    assert!(!stall.summary.contains("Metal"), "{}", stall.summary);
+    assert_eq!(stall.tone(), Tone::Red);
+    assert!(samples[21].correlation.stall_seconds.is_none());
+
+    // The Journal: one STALL row with the next step, one RESUMED row.
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let rows: Vec<(String, String)> = collector
+        .signals
+        .iter()
+        .map(|event| (event.state.clone(), event.summary.clone()))
+        .filter(|(state, _)| matches!(state.as_str(), "STALL" | "RESUMED" | "SLOWDOWN"))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "STALL".to_owned(),
+                "no new token for 2s at 1.7k out · GPU idle → Runtime idle mid-answer; check its log at this time.".to_owned()
+            ),
+            (
+                "RESUMED".to_owned(),
+                "generation resumed at 31.0 tok/s after 4s".to_owned()
+            ),
+        ]
+    );
+
+    // The chart says why under the bars that show it, in the anomaly colour.
+    let mut app = test_app(0);
+    app.collector.current = samples[20].clone();
+    let history = VecDeque::from([
+        ChartPoint::new(Some(420), Tone::Green),
+        ChartPoint::new(Some(0), Tone::Red),
+    ]);
+    let buffer = {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.render_indicator_chart(
+                    frame,
+                    frame.area(),
+                    "generation",
+                    &history,
+                    ChartMetric::Generation,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    let bottom: String = (0..60).map(|x| buffer[(x, 7)].symbol()).collect();
+    assert!(
+        bottom.contains("▼ no new token for 4s at 1.7k out · GPU idle"),
+        "{bottom}"
+    );
+    let x = bottom
+        .find('▼')
+        .map(|byte| bottom[..byte].chars().count())
+        .unwrap() as u16;
+    assert_eq!(buffer[(x, 7)].fg, UNUSUAL);
+}
+
+#[test]
+fn parses_captured_live_omlx_generating_and_cached_prefill_rows() {
+    // Captured from a live oMLX server on 2026-11-09, one request generating
+    // and the next one prefilling. These pin the fields the decode tracker
+    // and the stall verdict rely on.
+    let health = json!({"status": "healthy", "default_model": "Qwen3.8-27B-oQ4e-mtp"});
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_generating_live.json")).unwrap();
+    let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+    assert_eq!(telemetry.status.as_deref(), Some("generating"));
+    let [request] = telemetry.requests.as_slice() else {
+        panic!("one generating request: {:?}", telemetry.requests);
+    };
+    assert_eq!(request.id, "e28cdebf-4a73-4147-9528-f18806e700f9");
+    assert_eq!(request.prompt, 72_031);
+    assert_eq!(request.output, Some(947));
+    assert!(request.prefilled.is_none());
+    // `last_activity_age_seconds` is how a stall is seen at all.
+    let idle = request.idle_for.expect("idle age parsed").as_secs_f64();
+    assert!((idle - 0.047).abs() < 0.001, "{idle}");
+    assert!(stats.get("api_key").and_then(Value::as_str) == Some("REDACTED"));
+
+    // The prefill's first poll reports the cached prefix as processed: 72,000
+    // of 74,666, so 96% before any new token is read. The tracker turns it
+    // into the request's cache reuse, and progress counts only new tokens.
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_prefilling_live.json")).unwrap();
+    let mut telemetry = parse_omlx_telemetry(&health, Some(&stats));
+    assert_eq!(telemetry.status.as_deref(), Some("prefilling"));
+    let mut tracker = crate::decode_tracker::DecodeTracker::default();
+    tracker.apply(&mut telemetry.requests, Instant::now());
+    let [request] = telemetry.requests.as_slice() else {
+        panic!("one prefilling request: {:?}", telemetry.requests);
+    };
+    assert_eq!((request.prompt, request.prefilled), (74_666, Some(72_000)));
+    assert_eq!(request.cached, Some(72_000));
+    assert!(
+        request.idle_for.is_none(),
+        "a prefill is not a stalled decode"
+    );
+    let mut history = request_history::History::default();
+    history.observe(&telemetry.requests);
+    let sample = Sample {
+        llm_source: TelemetrySource::Live,
+        llm_status: "prefilling".into(),
+        llm_observed_at: Some(SystemTime::now()),
+        llm_requests: telemetry.requests.clone(),
+        ..Sample::default()
+    };
+    let screen = render_view(100, 10, |frame| {
+        crate::request_dashboard::draw(frame, frame.area(), &history, &sample, 0, 1)
+    });
+    // Reuse shows as reuse; progress is over the 2,666 new tokens.
+    assert!(screen.contains("CACHED 96%"), "{screen}");
+    assert!(screen.contains("PREFILL"), "{screen}");
+    assert!(screen.contains("0% · 0 / 2,666"), "{screen}");
+}
+
+// --- runtime disk and SSD cache ------------------------------------------------
+
+#[test]
+fn captured_omlx_stats_report_a_full_ssd_cache_and_its_block_counters() {
+    let stats: Value =
+        serde_json::from_str(include_str!("fixtures/omlx_stats_generating_live.json")).unwrap();
+    let cache = crate::omlx::parse_ssd_cache(&stats).expect("SSD cache reported");
+    assert_eq!(
+        cache,
+        domain::SsdCache {
+            used: 128_780_156_928,
+            capacity: 128_849_018_880,
+            loads: 1520,
+            saves: 1314,
+            evictions: 327,
+        }
+    );
+    // 99.95% of capacity: new saves evict old prefixes.
+    assert!(cache.full());
+    let telemetry = parse_omlx_telemetry(&json!({"status": "healthy"}), Some(&stats));
+    assert_eq!(telemetry.ssd_cache, Some(cache));
+
+    let mut off = stats.clone();
+    off["runtime_cache"]["ssd_cache_unavailable"] = json!(true);
+    assert_eq!(crate::omlx::parse_ssd_cache(&off), None);
+    let mut no_dir = stats.clone();
+    no_dir["runtime_cache"]["ssd_cache_dir"] = Value::Null;
+    assert_eq!(crate::omlx::parse_ssd_cache(&no_dir), None);
+    assert_eq!(crate::omlx::parse_ssd_cache(&json!({})), None);
+    assert!(!domain::SsdCache::default().full());
+}
+
+#[test]
+fn disk_activity_is_storage_rates_and_cache_blocks_since_the_last_sample() {
+    let at = Instant::now();
+    let reading = |read: u64, written: u64, seconds: u64, started: u64| process_memory::Reading {
+        pid: 7,
+        started,
+        resident: 1,
+        footprint: 1,
+        peak: 1,
+        disk_read: read,
+        disk_written: written,
+        at: at + Duration::from_secs(seconds),
+    };
+    let cache = |loads, saves, evictions| domain::SsdCache {
+        used: 1,
+        capacity: 2,
+        loads,
+        saves,
+        evictions,
+    };
+    let first = reading(0, 0, 0, 1);
+    let next = reading(800 * MIB, 4 * MIB, 2, 1);
+    let activity = crate::collector::disk_activity(
+        Some(&next),
+        Some(&first),
+        Some(cache(12, 3, 1)),
+        Some(cache(2, 3, 0)),
+    );
+    assert_eq!(
+        activity,
+        domain::DiskActivity {
+            read: Some(400 * MIB),
+            write: Some(2 * MIB),
+            loads: 10,
+            saves: 0,
+            evictions: 1,
+        }
+    );
+    assert_eq!(activity.rate(), Some(402 * MIB));
+    // A restarted runtime (new start time, counters reset) reads as nothing.
+    let restarted = crate::collector::disk_activity(
+        Some(&reading(0, 0, 3, 2)),
+        Some(&next),
+        Some(cache(0, 0, 0)),
+        Some(cache(12, 3, 1)),
+    );
+    assert_eq!(restarted, domain::DiskActivity::default());
+    assert_eq!(restarted.rate(), None);
+    assert_eq!(process_memory::disk_rates(&first, Some(&first)), None);
+    assert_eq!(process_memory::disk_rates(&first, None), None);
+}
+
+fn with_disk(mut sample: Sample, read: u64, loads: u64) -> Sample {
+    sample.disk = domain::DiskActivity {
+        read: Some(read),
+        write: Some(0),
+        loads,
+        ..Default::default()
+    };
+    sample
+}
+
+#[test]
+fn a_stall_beside_cache_reads_names_the_disk_and_points_at_it() {
+    let mut engine = CorrelationEngine::default();
+    let mut samples: Vec<Sample> = CAPTURED_SPEEDS
+        .iter()
+        .enumerate()
+        .map(|(second, tps)| decoding(second as u64, *tps, 1_000 + second as u64 * 40, 0.05, 99))
+        .collect();
+    samples.push(with_disk(decoding(17, 0.0, 1_693, 1.2, 0), 900 * MIB, 40));
+    samples.push(with_disk(decoding(18, 0.0, 1_693, 2.3, 0), 850 * MIB, 38));
+    samples.last_mut().unwrap().ssd_cache = Some(domain::SsdCache {
+        used: 100,
+        capacity: 100,
+        ..Default::default()
+    });
+    samples.last_mut().unwrap().disk.evictions = 5;
+    for sample in &mut samples {
+        sample.correlation = engine.observe(sample, defaults());
+    }
+    let stall = &samples[18].correlation;
+    assert_eq!(stall.cause, CorrelationCause::Stall);
+    assert_eq!(
+        stall.lead,
+        "no new token for 2s at 1.7k out · GPU idle · disk read 850.0 MiB/s · 38 SSD cache blocks loaded · SSD cache full"
+    );
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&samples[18]),
+        "SSD cache is full and evicting; enlarge it or free the disk."
+    );
+    let mut not_full = samples[18].clone();
+    not_full.correlation.lead = "no new token for 2s · disk read 850.0 MiB/s".into();
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&not_full),
+        "Runtime waited on its disk cache; check that disk's speed."
+    );
+    not_full.correlation.cause = CorrelationCause::DiskIo;
+    not_full.correlation.lead = "1 SSD cache block saved".into();
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&not_full),
+        "Runtime waited on its disk cache; check that disk's speed."
+    );
+    not_full.correlation.lead = "x".into();
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&not_full),
+        "Runtime used its disk mid-answer; check its cache disk."
+    );
+}
+
+#[test]
+fn the_cache_panel_plots_runtime_disk_traffic_over_the_ssd_cache_fill() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    // Without disk readings the panel keeps each interval's reuse.
+    assert_eq!(app.cache_panel().0, "cache");
+    app.collector.current.ssd_cache = Some(domain::SsdCache {
+        used: 120 * 1024 * MIB,
+        capacity: 120 * 1024 * MIB,
+        ..Default::default()
+    });
+    app.collector.current.disk = domain::DiskActivity {
+        read: Some(850 * MIB),
+        write: Some(2 * MIB),
+        ..Default::default()
+    };
+    for second in 0..30 {
+        push_history_with_tone(
+            &mut app.collector.disk_history,
+            Some(if second % 10 == 0 { 850 * MIB } else { 0 }),
+            Tone::Cyan,
+            60,
+        );
+    }
+    assert!(app.cache_panel().2 == ChartMetric::Disk);
+    let (name, history, metric) = app.cache_panel();
+    let disk_history = history.clone();
+    let history = &disk_history;
+    let tall = render_view(60, 10, |frame| {
+        app.render_indicator_chart(frame, frame.area(), name, history, metric)
+    });
+    for label in [
+        "cache I/O",
+        "read 850.0 MiB/s · write 2.0 MiB/s",
+        "62% of prompt tokens reused",
+        "SSD",
+        "120.0/120.0 GiB full",
+    ] {
+        assert!(tall.contains(label), "missing {label}\n{tall}");
+    }
+    let narrow = render_view(30, 5, |frame| {
+        app.render_indicator_chart(frame, frame.area(), name, history, metric)
+    });
+    assert!(narrow.contains("r 850.0 MiB/s · w 2.0 MiB/s"), "{narrow}");
+    assert!(narrow.contains("No disk traffic"), "{narrow}");
+    // The Overview and the enlarged view both use it.
+    let screen = render_app(&app, 180, 50);
+    assert!(screen.contains("cache I/O"), "{screen}");
+    app.charts.focused = Chart::Cache;
+    app.charts.expanded = true;
+    assert!(render_app(&app, 120, 40).contains("cache I/O"));
+
+    // Short panels say what the disk is doing in words.
+    for (rate, text) in [
+        (Some(0), "No disk traffic"),
+        (Some(400 * MIB), "Disk active"),
+        (Some(MIB), "Light disk traffic"),
+        (None, "Disk reading unavailable"),
+    ] {
+        let mut history = VecDeque::new();
+        push_history_with_tone(&mut history, rate, Tone::Cyan, 10);
+        push_history_with_tone(&mut history, Some(1), Tone::Cyan, 10);
+        history.pop_back();
+        app.collector.current.ssd_cache = None;
+        let screen = render_view(40, 4, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "cache I/O",
+                &history,
+                ChartMetric::Disk,
+            )
+        });
+        assert!(screen.contains(text), "missing {text}\n{screen}");
+    }
+    app.collector.current.disk = domain::DiskActivity::default();
+    let unknown = render_view(60, 6, |frame| {
+        app.render_indicator_chart(frame, frame.area(), "cache I/O", history, metric)
+    });
+    assert!(unknown.contains("read — · write —"), "{unknown}");
+}
+
+#[test]
+fn the_ssd_row_shows_fill_or_says_the_cache_is_off() {
+    let mut sample = Sample::default();
+    let row = |sample: &Sample| {
+        render_view(40, 1, |frame| {
+            crate::swap_usage::draw_ssd_cache(frame, frame.area(), sample)
+        })
+    };
+    assert!(row(&sample).contains("SSD cache off"));
+    sample.ssd_cache = Some(domain::SsdCache {
+        used: 30 * 1024 * MIB,
+        capacity: 120 * 1024 * MIB,
+        ..Default::default()
+    });
+    assert!(
+        row(&sample).contains("30.0/120.0 GiB 25%"),
+        "{}",
+        row(&sample)
+    );
+    render_view(0, 0, |frame| {
+        crate::swap_usage::draw_ssd_cache(frame, Rect::new(0, 0, 0, 0), &sample)
+    });
+}
+
+#[test]
+fn the_journal_has_one_row_as_a_request_starts_and_one_as_it_ends() {
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    let idle = Sample {
+        impact: "LLM READY".into(),
+        llm_status: "idle".into(),
+        llm_generation_tps: Some(55.1),
+        llm_provider: "oMLX".into(),
+        llm_model: "Qwen3.8-27B-oQ4e-mtp".into(),
+        llm_source: TelemetrySource::Live,
+        gpu_util: Some(2),
+        llm_active_requests: Some(0),
+        ..Sample::default()
+    };
+    let mut prefill = decoding(1, 0.0, 0, 0.0, 99);
+    prefill.impact = "GPU BUSY".into();
+    prefill.llm_requests[0].output = None;
+    prefill.llm_requests[0].prefilled = Some(67_776);
+    let mut generating = decoding(2, 45.0, 1_200, 0.05, 99);
+    generating.impact = "GPU BUSY".into();
+    let mut second = generating.clone();
+    second.llm_requests[0].id = "f00baa".into();
+    second.llm_requests[0].output = None;
+    second.llm_requests[0].prefilled = Some(0);
+    let mut queued = second.clone();
+    queued.llm_requests[0].id = "c0ffee".into();
+    queued.llm_requests[0].queued = true;
+    let samples = [
+        idle.clone(),
+        prefill,
+        generating,
+        second,
+        idle.clone(),
+        queued,
+        idle,
+    ];
+    collector.gpu_band = None;
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let rows: Vec<String> = collector
+        .signals
+        .iter()
+        .map(|event| format!("{} {}", event.state, event.summary))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "PROMPT e28cde · 67.8k prompt · 99% cached",
+            "PROMPT f00baa · 67.8k prompt · 99% cached",
+            "DONE e28cde · 1.2k out",
+            "DONE f00baa · ended while prefilling",
+            "PROMPT c0ffee · 67.8k prompt · 99% cached · queued",
+        ],
+        "{rows:#?}"
+    );
+    assert_eq!(EventKind::from_state("DONE"), EventKind::Llm);
+
+    // Output already reported, a rate and a first-token time end the row.
+    let finished = domain::RequestUsage {
+        provider: "llama.cpp".into(),
+        model: "m".into(),
+        id: "r1".into(),
+        prompt: 800,
+        cached: Some(200),
+        output: Some(64),
+        completed: true,
+        queued: false,
+        prefilled: None,
+        idle_for: None,
+        ttft_ms: Some(310),
+        output_tps: Some(41.2),
+        observed_at: None,
+    };
+    assert_eq!(
+        finished.journal_line(),
+        "r1 · 800 prompt · 25% cached · 64 out · 41.2 tok/s · first token 310 ms"
+    );
+}
+
+/// A lone request decoding steadily, with swap traffic at `swap` bytes/s.
+fn paging(second: u64, tps: f64, swap: u64) -> Sample {
+    let mut sample = decoding(second, tps, 500 + second * 40, 0.05, 99);
+    sample.swap_in = swap;
+    sample.rate_ready = true;
+    sample
+}
+
+fn observe_all(engine: &mut CorrelationEngine, samples: &mut [Sample]) {
+    for sample in samples.iter_mut() {
+        sample.correlation = engine.observe(sample, defaults());
+    }
+}
+
+fn journal_rows(samples: &[Sample], states: &[&str]) -> Vec<(String, String)> {
+    let mut collector = Collector::with_host(
+        200,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    collector
+        .signals
+        .iter()
+        .map(|event| (event.state.clone(), event.summary.clone()))
+        .filter(|(state, _)| states.contains(&state.as_str()))
+        .collect()
+}
+
+/// A sample halfway through a slowdown attributed to swap traffic.
+fn slowed_by_paging() -> Sample {
+    let mut sample = paging(30, 25.0, defaults().swap_warn_rate * 2);
+    sample.vm_available = true;
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Paging,
+        summary: "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: paging 2.0 MiB/s (usual none)".into(),
+        lead: "paging 2.0 MiB/s (usual none)".into(),
+        delta_percent: Some(-50.0),
+        slow: true,
+        unusual: vec![CorrelationCause::Paging],
+        episode: Some(DropEpisode {
+            reference: 50.0,
+            low: 25.0,
+            seconds: 12.0,
+            samples: 6,
+        }),
+        ..CorrelationInsight::default()
+    };
+    sample
+}
+
+/// Ten samples at `normal`, then six at `slow` taken during a slowdown.
+fn history_with_drop(normal: u64, slow: u64, tone: Tone) -> VecDeque<ChartPoint> {
+    let mut history: VecDeque<ChartPoint> = (0..10)
+        .map(|_| ChartPoint::new(Some(normal), Tone::Green))
+        .collect();
+    history.extend((0..6).map(|_| ChartPoint::new(Some(slow), tone)));
+    history
+}
+
+fn chart_buffer(
+    app: &App,
+    width: u16,
+    height: u16,
+    name: &'static str,
+    history: &VecDeque<ChartPoint>,
+    metric: ChartMetric,
+) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| app.render_indicator_chart(frame, frame.area(), name, history, metric))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn a_slowdown_draws_its_usual_speed_and_its_samples_in_the_anomaly_colour() {
+    let mut app = test_app(0);
+    app.collector.current = slowed_by_paging();
+    let generation = history_with_drop(500, 250, Tone::Unusual);
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let rows = buffer_rows(&buffer);
+    let text = rows.join("\n");
+    // What else is unusual sits under the bars, in the anomaly colour.
+    let bottom = &rows[9];
+    assert!(bottom.contains("▼ paging 2.0 MiB/s (usual none)"), "{text}");
+    let x = bottom
+        .find('▼')
+        .map(|byte| bottom[..byte].chars().count())
+        .unwrap() as u16;
+    assert_eq!(buffer[(x, 9)].fg, UNUSUAL);
+    // The usual speed is a dashed line with its value on the axis, visible
+    // exactly where the bars fall short of it.
+    let usual = rows
+        .iter()
+        .position(|row| row.contains('┄'))
+        .expect("a line at the usual speed");
+    assert!(
+        rows[usual]
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with("50 "),
+        "{text}"
+    );
+    let dashes: Vec<u16> = (0..60)
+        .filter(|x| buffer[(*x, usual as u16)].symbol() == "┄")
+        .collect();
+    assert!(dashes
+        .iter()
+        .all(|x| buffer[(*x, usual as u16)].fg == UNUSUAL));
+    assert!((53..59).all(|x| dashes.contains(&x)), "{dashes:?}");
+    assert!((43..53).all(|x| !dashes.contains(&x)), "{dashes:?}");
+    // The slow samples are the only ones in the anomaly colour, and nothing
+    // is tinted behind the bars.
+    assert!((53..59).all(|x| buffer[(x, 8)].fg == UNUSUAL));
+    assert!((43..53).all(|x| buffer[(x, 8)].fg == GREEN));
+    assert!((43..59).all(|x| buffer[(x, 1)].bg == PANEL));
+
+    // A chart whose signal was usual carries no mark at all.
+    let gpu = history_with_drop(99, 40, Tone::Green);
+    let buffer = chart_buffer(&app, 60, 10, "GPU", &gpu, ChartMetric::Gpu);
+    assert!(!buffer_rows(&buffer).join("\n").contains('▼'));
+    assert!((0..60).all(|x| (0..10).all(|y| buffer[(x, y)].fg != UNUSUAL)));
+
+    // With nothing else unusual the chart says so instead of leaving the
+    // arrow alone, also on a narrow panel.
+    let mut unexplained = app.collector.current.correlation.clone();
+    unexplained.cause = CorrelationCause::None;
+    unexplained.lead = String::new();
+    app.collector.current.correlation = unexplained;
+    for width in [60, 30] {
+        let buffer = chart_buffer(
+            &app,
+            width,
+            10,
+            "generation",
+            &generation,
+            ChartMetric::Generation,
+        );
+        let text = buffer_rows(&buffer).join("\n");
+        assert!(text.contains("▼ nothing else unusual"), "{text}");
+    }
+
+    // Once the slowdown is over the line and the reason go; the samples
+    // keep their colour in the history.
+    app.collector.current.correlation = CorrelationInsight::default();
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let text = buffer_rows(&buffer).join("\n");
+    assert!(!text.contains('▼'), "{text}");
+    assert!((0..60)
+        .all(|x| (0..10).all(|y| buffer[(x, y)].symbol() != "┄" || buffer[(x, y)].fg != UNUSUAL)));
+    assert!((53..59).all(|x| buffer[(x, 8)].fg == UNUSUAL));
+}
+
+#[test]
+fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
+    let mut app = test_app(0);
+    app.collector.current = slowed_by_paging();
+    let swap = defaults().swap_warn_rate;
+    let paging_history = history_with_drop(0, swap * 2, Tone::Yellow);
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "paging / I/O",
+        &paging_history,
+        ChartMetric::Swap,
+    );
+    let rows = buffer_rows(&buffer);
+    assert!(rows[9].ends_with(" ▲ slowed GEN ↓50% ─┘"), "{}", rows[9]);
+    // The border takes the anomaly colour; the summary keeps its own.
+    assert_eq!(buffer[(0, 0)].fg, UNUSUAL);
+    assert_eq!(buffer[(59, 5)].fg, UNUSUAL);
+    assert!(rows[9].contains("page-in"), "{}", rows[9]);
+    // A summary that would run into the tag gives way to it.
+    let narrow = chart_buffer(
+        &app,
+        30,
+        10,
+        "paging / I/O",
+        &paging_history,
+        ChartMetric::Swap,
+    );
+    let bottom = buffer_rows(&narrow).pop().unwrap();
+    assert!(
+        bottom.ends_with(" ▼ GEN ─┘") && !bottom.contains("in "),
+        "{bottom}"
+    );
+    // Other panels are left alone.
+    let gpu = history_with_drop(99, 40, Tone::Green);
+    let buffer = chart_buffer(&app, 60, 10, "GPU", &gpu, ChartMetric::Gpu);
+    assert_ne!(buffer[(0, 0)].fg, UNUSUAL);
+
+    // Each cause points at the panel that shows its signal.
+    let panel = |cause: CorrelationCause, lead: &str| {
+        let mut insight = app.collector.current.correlation.clone();
+        insight.cause = cause;
+        insight.lead = lead.into();
+        crate::drop_marks::linked(&insight)
+    };
+    for (cause, lead, chart) in [
+        (CorrelationCause::Paging, "paging", Some(Chart::Paging)),
+        (CorrelationCause::Compression, "x", Some(Chart::Compression)),
+        (CorrelationCause::MemoryPressure, "x", Some(Chart::Memory)),
+        (CorrelationCause::ModelMemory, "x", Some(Chart::Memory)),
+        (CorrelationCause::MetalMemory, "x", Some(Chart::Memory)),
+        (CorrelationCause::Thermal, "x", Some(Chart::Gpu)),
+        (CorrelationCause::GpuIdle, "x", Some(Chart::Gpu)),
+        // The runtime's CPU is a figure in the header, not a chart.
+        (CorrelationCause::Cpu, "x", None),
+        (CorrelationCause::DiskIo, "x", Some(Chart::Cache)),
+        (
+            CorrelationCause::ConcurrentPrefill,
+            "x",
+            Some(Chart::Prefill),
+        ),
+        (CorrelationCause::Queueing, "x", Some(Chart::Queue)),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · disk read 1 GiB/s",
+            Some(Chart::Cache),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · 3 SSD cache blocks loaded",
+            Some(Chart::Cache),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · paging 80 MiB/s",
+            Some(Chart::Paging),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · memory pressure",
+            Some(Chart::Memory),
+        ),
+        (
+            CorrelationCause::Stall,
+            "no new token for 2s · GPU idle",
+            None,
+        ),
+        // Nothing else unusual: nothing is tagged.
+        (CorrelationCause::None, "", None),
+    ] {
+        assert!(panel(cause, lead) == chart, "{cause:?} {lead}");
+    }
+    let mut healthy = app.collector.current.correlation.clone();
+    healthy.direction = ThroughputDirection::Flat;
+    assert!(crate::drop_marks::linked(&healthy).is_none());
+
+    // A stall is tagged as one; the queue and prompt panels carry tags too.
+    app.collector.current.correlation.cause = CorrelationCause::Stall;
+    app.collector.current.correlation.lead = "no new token for 2s · paging 80 MiB/s".into();
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "paging / I/O",
+        &paging_history,
+        ChartMetric::Swap,
+    );
+    assert!(buffer_rows(&buffer)[9].ends_with(" ▲ stalled GEN ─┘"));
+    app.collector.current.correlation.cause = CorrelationCause::Queueing;
+    let queue = render_view(60, 8, |frame| {
+        app.draw_operator_chart(frame, frame.area(), Chart::Queue)
+    });
+    assert!(queue.contains("slowed GEN"), "{queue}");
+    // Too small to hold the tag: the panel is left as drawn.
+    let tiny = render_view(8, 3, |frame| app.draw_request_chart(frame, frame.area()));
+    assert!(!tiny.contains('▼') && !tiny.contains('▲'), "{tiny}");
+}
+
+// --- slowdowns: generation unusually slow, and what else is unusual -----
+
+/// Ten polls at the usual 50 tok/s, then `rest`, observed in order.
+fn after_usual(rest: Vec<Sample>) -> Vec<Sample> {
+    let mut samples: Vec<Sample> = (0..10).map(|second| paging(second, 50.0, 0)).collect();
+    samples.extend(rest);
+    observe_all(&mut CorrelationEngine::default(), &mut samples);
+    samples
+}
+
+#[test]
+fn a_slowdown_is_three_slow_samples_and_ends_after_three_usual_ones() {
+    let swap = defaults().swap_warn_rate * 2;
+    let mut rest: Vec<Sample> = (10..20).map(|second| paging(second, 25.0, swap)).collect();
+    rest.extend((20..25).map(|second| paging(second, 50.0, 0)));
+    let samples = after_usual(rest);
+    let reason = format!("paging {} (usual none)", rate(swap));
+
+    // One slow poll, or two, is not a slowdown.
+    assert!(!samples[10].correlation.is_material_drop());
+    assert!(!samples[11].correlation.is_material_drop());
+    let began = &samples[12].correlation;
+    assert_eq!(began.direction, ThroughputDirection::Down);
+    assert_eq!(began.cause, CorrelationCause::Paging);
+    assert_eq!(
+        began.summary,
+        format!("GEN ↓50.0% (50.0→25.0 tok/s) · unusual: {reason}")
+    );
+    assert_eq!(began.lead, reason);
+    assert_eq!(began.details, format!("paging · {reason}"));
+    assert_eq!(began.unusual, vec![CorrelationCause::Paging]);
+    assert!(began.slow);
+    // It is counted from its first slow sample.
+    assert_eq!(
+        began.episode,
+        Some(DropEpisode {
+            reference: 50.0,
+            low: 25.0,
+            seconds: 2.0,
+            samples: 3,
+        })
+    );
+    // Its usual speed stays fixed however long it lasts.
+    assert_eq!(samples[19].correlation.episode.unwrap().reference, 50.0);
+    assert_eq!(samples[19].correlation.episode.unwrap().seconds, 9.0);
+
+    // Two polls back at the usual speed do not end it; the third does.
+    for index in [20, 21] {
+        let insight = &samples[index].correlation;
+        assert!(insight.is_material_drop(), "{index}");
+        assert!(!insight.slow, "{index}: this sample is not itself slow");
+        assert!(insight.summary.starts_with("GEN ↓50.0% (50.0→25.0 tok/s)"));
+    }
+    let over = &samples[22].correlation;
+    assert_eq!(over.direction, ThroughputDirection::Flat);
+    assert_eq!(
+        over.ended,
+        Some(DropEnd {
+            settled: false,
+            seconds: 12.0,
+            low: 25.0,
+            rate: 50.0,
+            reference: 50.0,
+        })
+    );
+    assert!(samples[23].correlation.ended.is_none());
+
+    // The Journal: one row as it begins, one as it ends.
+    assert_eq!(
+        journal_rows(&samples, &["SLOWDOWN", "RECOVERED", "SETTLED"]),
+        vec![
+            (
+                "SLOWDOWN".to_owned(),
+                format!(
+                    "GEN ↓50.0% (50.0→25.0 tok/s) · {reason} → Reduce active models; recheck paging."
+                )
+            ),
+            (
+                "RECOVERED".to_owned(),
+                "generation back to 50.0 tok/s after 12s · low 25.0 tok/s".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn speed_that_jumps_about_is_usual_and_a_steady_runtime_shows_a_small_drop() {
+    // The oMLX server's own log: speculative decoding swings between ~25
+    // and ~120 tok/s from one second to the next. A run of slow polls is
+    // what this runtime ordinarily does.
+    let mut engine = CorrelationEngine::default();
+    let jumpy = [
+        56.0, 62.0, 67.0, 14.0, 30.0, 16.0, 25.0, 29.0, 79.0, 28.0, 28.0, 17.0, 34.0, 7.0, 52.0,
+        62.0, 116.0, 105.0, 115.0, 117.0, 122.0, 50.0, 80.0, 72.0, 43.0, 48.0, 30.0, 21.0, 17.0,
+        34.0, 19.0, 86.0, 119.0, 88.0, 109.0, 114.0, 81.0, 123.0, 45.0, 62.0, 80.0, 39.0, 17.0,
+        32.0, 16.0,
+    ];
+    for (second, tps) in jumpy.iter().enumerate() {
+        let insight = engine.observe(&paging(second as u64, *tps, 0), defaults());
+        assert!(!insight.is_material_drop(), "{second}: {}", insight.summary);
+    }
+    // A runtime that holds 50 ± 1 tok/s: 38 is a slowdown, 44 is not (less
+    // than a fifth below its usual speed).
+    let steady = |slow: f64| {
+        let mut samples: Vec<Sample> = (0..20)
+            .map(|second| paging(second, 49.0 + (second % 3) as f64, 0))
+            .collect();
+        samples.extend((20..24).map(|second| paging(second, slow, 0)));
+        observe_all(&mut CorrelationEngine::default(), &mut samples);
+        samples.pop().unwrap().correlation
+    };
+    assert!(!steady(44.0).is_material_drop());
+    let slowed = steady(38.0);
+    assert!(slowed.is_material_drop());
+    assert_eq!(
+        slowed.summary,
+        "GEN ↓24.0% (50.0→38.0 tok/s) · nothing else unusual"
+    );
+    assert_eq!(slowed.cause, CorrelationCause::None);
+    assert!(slowed.lead.is_empty() && slowed.details.is_empty());
+}
+
+#[test]
+fn a_slowdown_with_nothing_else_unusual_becomes_the_usual_speed_after_thirty_seconds() {
+    let samples = after_usual((10..60).map(|second| paging(second, 30.0, 0)).collect());
+    assert!(samples[41].correlation.is_material_drop());
+    let settled = &samples[42].correlation;
+    assert_eq!(settled.direction, ThroughputDirection::Flat);
+    assert_eq!(
+        settled.ended,
+        Some(DropEnd {
+            settled: true,
+            seconds: 32.0,
+            low: 30.0,
+            rate: 30.0,
+            reference: 50.0,
+        })
+    );
+    // From then on thirty is the usual speed: nothing more is reported.
+    assert!(
+        samples[43..]
+            .iter()
+            .all(|sample| !sample.correlation.is_material_drop()
+                && sample.correlation.ended.is_none())
+    );
+    assert_eq!(samples[59].correlation.delta_percent, Some(0.0));
+    assert_eq!(
+        journal_rows(&samples, &["SLOWDOWN", "RECOVERED", "SETTLED"]),
+        vec![
+            (
+                "SLOWDOWN".to_owned(),
+                "GEN ↓40.0% (50.0→30.0 tok/s) · nothing else unusual → Check the runtime's log at this time.".to_owned()
+            ),
+            (
+                "SETTLED".to_owned(),
+                "holding 30.0 tok/s for 32s, down from 50.0 · nothing else unusual; now the usual speed".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_signal_at_its_usual_level_is_not_the_reason_and_one_that_grew_says_from_what() {
+    // Paging ran at the same rate while speed was usual: it is not what
+    // changed when speed fell.
+    let swap = defaults().swap_warn_rate * 2;
+    let mut samples: Vec<Sample> = (0..10).map(|second| paging(second, 50.0, swap)).collect();
+    samples.extend((10..14).map(|second| paging(second, 25.0, swap)));
+    // Then it grew fourfold.
+    samples.extend((14..16).map(|second| paging(second, 25.0, swap * 4)));
+    observe_all(&mut CorrelationEngine::default(), &mut samples);
+    let held = &samples[13].correlation;
+    assert!(held.is_material_drop());
+    assert_eq!(held.cause, CorrelationCause::None, "{}", held.summary);
+    assert!(held.unusual.is_empty());
+    let grew = &samples[15].correlation;
+    assert_eq!(grew.cause, CorrelationCause::Paging);
+    assert_eq!(
+        grew.lead,
+        format!("paging {} (usual {})", rate(swap * 4), rate(swap))
+    );
+}
+
+/// A second request beside the one `decoding` builds.
+fn beside(mut sample: Sample, prompt: u64, prefilling: bool) -> Sample {
+    let mut other = sample.llm_requests[0].clone();
+    other.id = "other".into();
+    other.prompt = prompt;
+    other.prefilled = prefilling.then_some(1_000);
+    sample.llm_requests.push(other);
+    sample
+}
+
+#[test]
+fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
+    let compression = defaults().compression_warn_rate * 2;
+    let usual = |second: u64| {
+        let mut sample = paging(second, 50.0, 0);
+        sample.pressure = "GREEN".into();
+        sample.llm_waiting_requests = Some(0);
+        sample.llm_model_memory = Some(80);
+        sample.llm_model_memory_max = Some(100);
+        sample.llm_count = 1;
+        sample.llm_cpu = 95.0;
+        sample
+    };
+    let slowed = |change: &dyn Fn(Sample) -> Sample| {
+        let mut samples: Vec<Sample> = (0..10).map(usual).collect();
+        samples.extend((10..13).map(|second| {
+            let mut sample = usual(second);
+            sample.llm_generation_tps = Some(25.0);
+            change(sample)
+        }));
+        observe_all(&mut CorrelationEngine::default(), &mut samples);
+        samples.pop().unwrap().correlation
+    };
+    type Change = Box<dyn Fn(Sample) -> Sample>;
+    let cases: Vec<(CorrelationCause, String, Change)> = vec![
+        (
+            CorrelationCause::Thermal,
+            "thermal limit".into(),
+            Box::new(|mut s| {
+                s.thermal = "limited 60%".into();
+                s
+            }),
+        ),
+        (
+            CorrelationCause::MemoryPressure,
+            "memory pressure critical".into(),
+            Box::new(|mut s| {
+                s.pressure = "RED".into();
+                s
+            }),
+        ),
+        (
+            CorrelationCause::MemoryPressure,
+            "memory pressure watch".into(),
+            Box::new(|mut s| {
+                s.pressure = "YELLOW".into();
+                s
+            }),
+        ),
+        (
+            CorrelationCause::DiskIo,
+            "disk read 900.0 MiB/s · 40 SSD cache blocks loaded (usual none)".into(),
+            Box::new(|s| with_disk(s, 900 * MIB, 40)),
+        ),
+        (
+            CorrelationCause::DiskIo,
+            "1 SSD cache block saved (usual none)".into(),
+            Box::new(|mut s| {
+                s.disk.saves = 1;
+                s
+            }),
+        ),
+        (
+            CorrelationCause::ConcurrentPrefill,
+            "35.6k prefill beside generation".into(),
+            Box::new(|s| beside(s, 35_628, true)),
+        ),
+        (
+            CorrelationCause::Compression,
+            format!("compression {} (usual none)", rate(compression)),
+            Box::new(move |mut s| {
+                s.compress = compression;
+                s
+            }),
+        ),
+        (
+            CorrelationCause::Queueing,
+            "2 waiting (usual 0)".into(),
+            Box::new(|mut s| {
+                s.llm_waiting_requests = Some(2);
+                s
+            }),
+        ),
+        (
+            CorrelationCause::ModelMemory,
+            "model MEM 95% of ceiling (usual 80%)".into(),
+            Box::new(|mut s| {
+                s.llm_model_memory = Some(95);
+                s
+            }),
+        ),
+        (
+            CorrelationCause::MetalMemory,
+            "Metal MEM 100% (usual 97%)".into(),
+            Box::new(|mut s| {
+                s.gpu_in_use = Some(100);
+                s
+            }),
+        ),
+        (
+            CorrelationCause::Cpu,
+            "runtime CPU 380% (usual 95%)".into(),
+            Box::new(|mut s| {
+                s.llm_cpu = 380.0;
+                s
+            }),
+        ),
+        (
+            CorrelationCause::GpuIdle,
+            "GPU 40% (usual 99%)".into(),
+            Box::new(|mut s| {
+                s.gpu_util = Some(40);
+                s
+            }),
+        ),
+    ];
+    for (cause, lead, change) in &cases {
+        let insight = slowed(change.as_ref());
+        assert_eq!(insight.cause, *cause, "{}", insight.summary);
+        assert_eq!(&insight.lead, lead);
+        assert_eq!(insight.unusual, vec![*cause]);
+        assert_eq!(insight.notes, vec![lead.clone()]);
+        assert_eq!(insight.note(*cause), Some(lead.as_str()));
+        // What it is judged against: slow from a fifth below the usual 50.
+        assert_eq!(insight.usual_speed, Some((50.0, 40.0)));
+        assert_eq!(
+            insight.event_key,
+            Some(CorrelationKey {
+                direction: ThroughputDirection::Down,
+                cause: *cause,
+            })
+        );
+    }
+    // A change short of mattering is not named: memory a point higher, a
+    // prompt a few tokens longer, compression under its warning rate, a
+    // little more CPU, a GPU still mostly busy.
+    let quiet = slowed(&|mut s| {
+        s.llm_cpu = 130.0;
+        s.gpu_util = Some(85);
+        s.llm_model_memory = Some(81);
+        s.llm_requests[0].prompt += 500;
+        s.compress = compression / 4;
+        s
+    });
+    assert_eq!(quiet.cause, CorrelationCause::None, "{}", quiet.summary);
+
+    // Several at once: the host's limits lead, the summary names two, the
+    // details all of them.
+    let both = slowed(&|mut s| {
+        s.thermal = "limited 60%".into();
+        s.llm_waiting_requests = Some(2);
+        s
+    });
+    assert_eq!(
+        both.note(CorrelationCause::Queueing),
+        Some("2 waiting (usual 0)")
+    );
+    assert_eq!(both.note(CorrelationCause::Paging), None);
+    // An idle GPU is what a slowdown looks like: it is named last.
+    let starved = slowed(&|mut s| {
+        s.gpu_util = Some(40);
+        s.llm_cpu = 380.0;
+        s
+    });
+    assert_eq!(
+        starved.unusual,
+        vec![CorrelationCause::Cpu, CorrelationCause::GpuIdle]
+    );
+    assert_eq!(starved.marked_samples(), 3, "known at its third sample");
+    let mut later = starved.clone();
+    later.episode.as_mut().unwrap().samples = 4;
+    assert_eq!(later.marked_samples(), 1);
+    assert_eq!(both.cause, CorrelationCause::Thermal);
+    assert_eq!(
+        both.summary,
+        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal limit + 2 waiting (usual 0)"
+    );
+    assert_eq!(
+        both.details,
+        "thermal limiting · thermal limit · 2 waiting (usual 0)"
+    );
+    assert_eq!(
+        both.unusual,
+        vec![CorrelationCause::Thermal, CorrelationCause::Queueing]
+    );
+}
+
+#[test]
+fn a_prompt_several_times_longer_is_new_work_and_is_learned_not_called_slow() {
+    let long = |second: u64| {
+        let mut sample = paging(second, 30.0, 0);
+        sample.llm_requests[0].prompt = 203_379;
+        sample
+    };
+    let samples = after_usual((10..30).map(long).collect());
+    // Slower than the shorter prompt ran, and expected to be: it is never
+    // a slowdown, and once seen it has a usual speed of its own.
+    assert!(samples.iter().all(|s| !s.correlation.is_material_drop()));
+    assert!(samples.iter().all(|s| !s.correlation.slow));
+    assert_eq!(samples[17].correlation.usual_speed, None);
+    let learned = &samples[29].correlation;
+    assert_eq!(learned.usual_speed.unwrap().0, 30.0);
+    assert!(
+        learned.usual_for.starts_with("1 request · 205."),
+        "{}",
+        learned.usual_for
+    );
+}
+
+#[test]
+fn a_stall_inside_a_slowdown_is_journaled_once_and_the_slowdown_is_not_repeated() {
+    let swap = defaults().swap_warn_rate * 2;
+    let mut rest: Vec<Sample> = (10..14).map(|second| paging(second, 25.0, swap)).collect();
+    // The request goes quiet, stalls for two polls, then resumes slow.
+    let mut quiet = paging(14, 0.0, swap);
+    quiet.llm_requests[0].idle_for = Some(Duration::from_secs_f64(0.9));
+    rest.push(quiet);
+    for (second, idle) in [(15, 2.0), (16, 3.1)] {
+        let mut stalled = paging(second, 0.0, swap);
+        stalled.llm_requests[0].idle_for = Some(Duration::from_secs_f64(idle));
+        rest.push(stalled);
+    }
+    rest.extend((17..20).map(|second| paging(second, 25.0, swap)));
+    let samples = after_usual(rest);
+    // Going quiet is neither slow nor back to usual: the slowdown holds,
+    // at the speed it had.
+    assert!(samples[14].correlation.is_material_drop());
+    assert!(!samples[14].correlation.slow);
+    assert!(samples[14].correlation.summary.contains("50.0→25.0"));
+    let stall = &samples[15].correlation;
+    assert_eq!(stall.cause, CorrelationCause::Stall);
+    assert!(stall.slow && stall.unusual.is_empty());
+    assert_eq!(stall.summary, format!("GEN stalled · {}", stall.lead));
+    assert_eq!(stall.episode.unwrap().samples, 6);
+    assert!(samples[17].correlation.repeat);
+    let rows = journal_rows(&samples, &["SLOWDOWN", "STALL", "RESUMED"]);
+    assert_eq!(
+        rows.iter()
+            .map(|(state, _)| state.as_str())
+            .collect::<Vec<_>>(),
+        ["SLOWDOWN", "STALL", "RESUMED"]
+    );
+}
+
+#[test]
+fn a_slowdown_that_repeats_its_reason_within_a_minute_is_one_journal_story() {
+    let swap = defaults().swap_warn_rate * 2;
+    let burst = |from: u64| -> Vec<Sample> {
+        (from..from + 5)
+            .map(|second| paging(second, 25.0, swap))
+            .chain((from + 5..from + 10).map(|second| paging(second, 50.0, 0)))
+            .collect()
+    };
+    // Two bursts ten seconds apart, and a third two minutes later.
+    let mut rest = burst(10);
+    rest.extend(burst(20));
+    rest.extend(burst(140));
+    let samples = after_usual(rest);
+    assert!(samples[22].correlation.is_material_drop());
+    assert!(samples[22].correlation.repeat);
+    assert!(
+        samples[27].correlation.ended.is_none(),
+        "told as part of the first: its end is not a row either"
+    );
+    let rows = journal_rows(&samples, &["SLOWDOWN", "RECOVERED"]);
+    assert_eq!(
+        rows.iter()
+            .map(|(state, _)| state.as_str())
+            .collect::<Vec<_>>(),
+        ["SLOWDOWN", "RECOVERED", "SLOWDOWN", "RECOVERED"]
+    );
+}
+
+#[test]
+fn a_slowdown_waits_while_nothing_generates_and_is_over_after_thirty_idle_seconds() {
+    let idle = |second: u64| {
+        let mut sample = paging(second, 0.0, 0);
+        sample.llm_generation_tps_live = false;
+        sample.llm_requests.clear();
+        sample.llm_active_requests = Some(0);
+        sample
+    };
+    let swap = defaults().swap_warn_rate * 2;
+    let samples = after_usual(vec![
+        paging(10, 25.0, swap),
+        paging(11, 25.0, swap),
+        // Between two requests there is no speed to judge.
+        idle(12),
+        paging(13, 25.0, swap),
+        paging(14, 25.0, swap),
+        idle(15),
+        paging(16, 25.0, swap),
+        // Idle for longer than a slowdown takes to settle: it is over.
+        idle(17),
+        paging(50, 25.0, swap),
+    ]);
+    assert_eq!(
+        samples[12].correlation.direction,
+        ThroughputDirection::Unknown
+    );
+    let began = &samples[13].correlation;
+    assert!(began.is_material_drop(), "three slow polls of generation");
+    assert_eq!(began.episode.unwrap().seconds, 3.0);
+    assert!(!samples[15].correlation.is_material_drop());
+    assert!(samples[16].correlation.is_material_drop(), "it continues");
+    assert_eq!(samples[16].correlation.episode.unwrap().samples, 5);
+    assert!(samples[16].correlation.repeat);
+    assert!(!samples[18].correlation.is_material_drop(), "a new start");
+}
+
+#[test]
+fn usual_values_belong_to_one_model_and_remote_or_idle_rates_teach_nothing() {
+    let mut engine = CorrelationEngine::default();
+    for second in 0..10 {
+        engine.observe(&paging(second, 50.0, 0), defaults());
+    }
+    assert_eq!(engine.speed.level(), Some(50.0));
+    // A rate kept from the last request, with nothing running, is not one.
+    let mut retained = paging(10, 0.0, 0);
+    retained.llm_requests.clear();
+    retained.llm_active_requests = Some(0);
+    let insight = engine.observe(&retained, defaults());
+    assert_eq!(insight.direction, ThroughputDirection::Unknown);
+    assert!(insight.summary.is_empty());
+    assert_eq!(engine.speed.level(), Some(50.0));
+    // Another model starts from nothing.
+    let mut other = paging(11, 20.0, 0);
+    other.llm_model = "another".into();
+    let insight = engine.observe(&other, defaults());
+    assert_eq!(insight.direction, ThroughputDirection::Unknown);
+    assert_eq!(insight.delta_percent, None);
+    assert_eq!(engine.speed.level(), None);
+    for second in 12..20 {
+        let mut sample = paging(second, 20.0, 0);
+        sample.llm_model = "another".into();
+        engine.observe(&sample, defaults());
+    }
+    assert_eq!(engine.speed.level(), Some(20.0));
+}
+
+#[test]
+fn a_slowdown_colours_its_samples_on_the_charts_of_what_was_unusual() {
+    let mut collector = Collector::with_host(
+        60,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    let fill = |history: &mut VecDeque<ChartPoint>, tone: Tone| {
+        history.clear();
+        history.extend((0..6).map(|_| ChartPoint::new(Some(10), tone)));
+    };
+    let tones = |history: &VecDeque<ChartPoint>| -> Vec<bool> {
+        history
+            .iter()
+            .map(|point| point.tone == Tone::Unusual)
+            .collect()
+    };
+    let reset = |collector: &mut Collector| {
+        fill(&mut collector.generation_history, Tone::Green);
+        fill(&mut collector.swap_history, Tone::Yellow);
+        fill(&mut collector.compression_history, Tone::Green);
+        fill(&mut collector.disk_history, Tone::Cyan);
+        fill(&mut collector.load_history, Tone::Green);
+        fill(&mut collector.gpu_history, Tone::Green);
+        fill(&mut collector.prefill_history, Tone::Green);
+        // A sample with no reading has nothing to colour.
+        collector.swap_history[4].value = None;
+    };
+    reset(&mut collector);
+    let mut sample = slowed_by_paging();
+
+    // Known at its third slow sample: the two before it are marked too, on
+    // the generation chart and on the chart of what was unusual.
+    sample.correlation.episode.as_mut().unwrap().samples = 3;
+    collector.mark_unusual(&sample);
+    assert_eq!(
+        tones(&collector.generation_history),
+        [false, false, false, true, true, true]
+    );
+    assert_eq!(
+        tones(&collector.swap_history),
+        [false, false, false, true, false, true]
+    );
+    for history in [
+        &collector.compression_history,
+        &collector.disk_history,
+        &collector.load_history,
+        &collector.gpu_history,
+        &collector.prefill_history,
+    ] {
+        assert!(tones(history).iter().all(|unusual| !unusual));
+    }
+
+    // After that, one sample at a time; a sample back at the usual speed
+    // inside the slowdown keeps its own colour.
+    reset(&mut collector);
+    sample.correlation.episode.as_mut().unwrap().samples = 4;
+    sample.correlation.slow = false;
+    sample.correlation.unusual = vec![
+        CorrelationCause::Compression,
+        CorrelationCause::MemoryPressure,
+        CorrelationCause::Thermal,
+        CorrelationCause::ConcurrentPrefill,
+        CorrelationCause::DiskIo,
+        // Shown per request, not per sample: nothing to colour.
+    ];
+    collector.mark_unusual(&sample);
+    assert!(tones(&collector.generation_history).iter().all(|u| !u));
+    for history in [
+        &collector.compression_history,
+        &collector.disk_history,
+        &collector.load_history,
+        &collector.gpu_history,
+        &collector.prefill_history,
+    ] {
+        assert_eq!(tones(history), [false, false, false, false, false, true]);
+    }
+
+    // A stall colours its own sample and the chart it points at.
+    reset(&mut collector);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Stall,
+        lead: "no new token for 2s · disk read 900.0 MiB/s".into(),
+        stall_seconds: Some(2.0),
+        slow: true,
+        ..CorrelationInsight::default()
+    };
+    collector.mark_unusual(&sample);
+    assert!(tones(&collector.generation_history)[5]);
+    assert!(tones(&collector.disk_history)[5]);
+    assert!(!tones(&collector.generation_history)[4]);
+
+    // Outside a slowdown an unusually slow sample and an unusual reading
+    // are each coloured on their own chart, that one sample only.
+    reset(&mut collector);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        slow: true,
+        unusual: vec![CorrelationCause::GpuIdle],
+        notes: vec!["GPU 40% (usual 99%)".into()],
+        usual_speed: Some((50.0, 40.0)),
+        ..CorrelationInsight::default()
+    };
+    collector.mark_unusual(&sample);
+    let latest = [false, false, false, false, false, true];
+    assert_eq!(tones(&collector.generation_history), latest);
+    assert_eq!(tones(&collector.gpu_history), latest);
+    assert!(tones(&collector.swap_history).iter().all(|u| !u));
+
+    // A sample with nothing unusual in it touches nothing.
+    reset(&mut collector);
+    sample.correlation = CorrelationInsight::default();
+    collector.mark_unusual(&sample);
+    assert!(tones(&collector.generation_history).iter().all(|u| !u));
+}
+
+#[test]
+fn outside_a_slowdown_a_sample_still_says_what_is_unusual_in_it() {
+    let usual = |second: u64| {
+        let mut sample = paging(second, 50.0, 0);
+        sample.llm_waiting_requests = Some(0);
+        sample.llm_count = 1;
+        sample.llm_cpu = 95.0;
+        sample
+    };
+    let mut engine = CorrelationEngine::default();
+    let mut observe = |sample: Sample| engine.observe(&sample, defaults());
+    for second in 0..10 {
+        observe(usual(second));
+    }
+
+    // One slow sample is not a slowdown, and is unusually slow all the same.
+    let mut slow = usual(10);
+    slow.llm_generation_tps = Some(25.0);
+    let lone = observe(slow);
+    assert!(lone.slow && !lone.is_material_drop());
+    assert_eq!(lone.usual_speed, Some((50.0, 40.0)));
+    assert!(lone.unusual.is_empty() && lone.summary.is_empty());
+    assert_eq!(lone.marked_samples(), 1);
+
+    // A reading of the host far from its usual value is unusual while
+    // generation runs at its usual speed, and says what is usual.
+    let mut busy = usual(11);
+    busy.llm_cpu = 380.0;
+    busy.gpu_util = Some(40);
+    let found = observe(busy);
+    assert!(!found.slow && !found.is_material_drop());
+    assert_eq!(
+        found.unusual,
+        vec![CorrelationCause::Cpu, CorrelationCause::GpuIdle]
+    );
+    assert_eq!(
+        found.note(CorrelationCause::Cpu),
+        Some("runtime CPU 380% (usual 95%)")
+    );
+    assert_eq!(
+        found.note(CorrelationCause::GpuIdle),
+        Some("GPU 40% (usual 99%)")
+    );
+    // Nothing for the Journal: that is for slowdowns.
+    assert!(found.summary.is_empty() && found.event_key.is_none());
+
+    // The workload is not watched: another request and a queue are what
+    // was asked for, and only ever the reason for a slowdown.
+    let mut asked = beside(usual(12), 9_000, true);
+    asked.llm_waiting_requests = Some(2);
+    assert!(observe(asked).unusual.is_empty());
+
+    // A burst that came and went leaves the usual value where it was. One
+    // that holds for thirty seconds at the usual speed is the usual value
+    // from then on.
+    for second in 13..=44 {
+        let mut sample = usual(second);
+        sample.llm_cpu = 380.0;
+        let insight = observe(sample);
+        assert_eq!(
+            insight.unusual,
+            if second <= 43 {
+                vec![CorrelationCause::Cpu]
+            } else {
+                Vec::new()
+            },
+            "second {second}"
+        );
+    }
+
+    // With nothing generating there is no speed to judge, and the usual
+    // speed is still known.
+    let mut idle = usual(45);
+    idle.llm_generation_tps = None;
+    idle.llm_generation_tps_live = false;
+    idle.llm_active_requests = Some(0);
+    idle.llm_requests.clear();
+    let idle = observe(idle);
+    assert_eq!(idle.direction, ThroughputDirection::Unknown);
+    assert_eq!(idle.usual_speed, Some((50.0, 40.0)));
+    assert!(!idle.slow && idle.unusual.is_empty());
+}
+
+#[test]
+fn the_generation_chart_always_draws_its_usual_speed_quietly() {
+    let mut app = test_app(0);
+    let mut sample = paging(30, 50.0, 0);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        usual_speed: Some((50.0, 40.0)),
+        ..CorrelationInsight::default()
+    };
+    app.collector.current = sample;
+    // Sixteen samples at the usual speed, one of them unusually slow.
+    let mut generation = history_with_drop(500, 500, Tone::Green);
+    generation[12] = ChartPoint::new(Some(200), Tone::Unusual);
+    let buffer = chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let rows = buffer_rows(&buffer);
+    let text = rows.join("\n");
+    // The dashed line sits at the usual speed, with its value on the axis,
+    // and is quiet: nothing is wrong.
+    let usual = rows
+        .iter()
+        .position(|row| row.contains('┄'))
+        .expect("a line at the usual speed") as u16;
+    assert!(
+        rows[usize::from(usual)]
+            .trim_start_matches('│')
+            .trim_start()
+            .starts_with("50 "),
+        "{text}"
+    );
+    let dashes: Vec<u16> = (1..59)
+        .filter(|x| buffer[(*x, usual)].symbol() == "┄")
+        .collect();
+    assert!(dashes.contains(&55), "{dashes:?}\n{text}");
+    assert!(dashes
+        .iter()
+        .all(|x| buffer[(*x, usual)].fg == Tone::Muted.color()));
+    // The border says what the line is. No reason is given: nothing slowed.
+    assert!(rows[9].contains("tok/s · ┄ usual 50.0"), "{text}");
+    assert!(!text.contains('▼'), "{text}");
+    // The slow sample alone is in the anomaly colour.
+    assert_eq!(buffer[(55, 8)].fg, UNUSUAL);
+    assert!((43..59)
+        .filter(|x| *x != 55)
+        .all(|x| buffer[(x, 8)].fg == GREEN));
+
+    // A narrow panel keeps the unit and lets the usual value go.
+    let narrow = buffer_rows(&chart_buffer(
+        &app,
+        22,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ));
+    assert!(narrow[9].contains("tok/s"), "{}", narrow[9]);
+    assert!(!narrow[9].contains("usual"), "{}", narrow[9]);
+
+    // Before a usual speed is known there is nothing to say about it.
+    app.collector.current.correlation = CorrelationInsight::default();
+    let unknown = buffer_rows(&chart_buffer(
+        &app,
+        60,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ));
+    assert!(!unknown.join("\n").contains("usual"));
+}
+
+#[test]
+fn dips_that_come_and_go_become_part_of_the_usual_range() {
+    // Two slow polls and back, again and again: never three in a row, so
+    // never a slowdown, and each dip is learned as something this runtime
+    // does. Before long three in a row are ordinary too.
+    let mut engine = CorrelationEngine::default();
+    let mut second = 0;
+    let mut observe = |engine: &mut CorrelationEngine, tps: f64| {
+        second += 1;
+        engine.observe(&paging(second, tps, 0), defaults())
+    };
+    for _ in 0..10 {
+        observe(&mut engine, 50.0);
+    }
+    for _ in 0..12 {
+        for tps in [25.0, 25.0, 50.0] {
+            assert!(!observe(&mut engine, tps).is_material_drop());
+        }
+    }
+    for _ in 0..4 {
+        let insight = observe(&mut engine, 25.0);
+        assert!(!insight.is_material_drop(), "{}", insight.summary);
+    }
+}
+
+#[test]
+fn a_stall_names_everything_the_host_was_doing_beside_it() {
+    let mut stalled = beside(paging(3, 0.0, PAGING_ACTIVE_ENTER_RATE), 9_000, false);
+    for request in &mut stalled.llm_requests {
+        request.idle_for = Some(Duration::from_secs_f64(2.2));
+    }
+    stalled.gpu_util = Some(40);
+    stalled.compress = defaults().compression_warn_rate;
+    stalled.pressure = "YELLOW".into();
+    stalled.disk = domain::DiskActivity {
+        write: Some(64 * MIB),
+        ..Default::default()
+    };
+    let insight = CorrelationEngine::default().observe(&stalled, defaults());
+    assert_eq!(insight.cause, CorrelationCause::Stall);
+    assert_eq!(
+        insight.lead,
+        format!(
+            "no new token for 2s · GPU 40% · disk write 64.0 MiB/s · paging {} · compression {} · memory pressure · 2 requests running",
+            rate(PAGING_ACTIVE_ENTER_RATE),
+            rate(defaults().compression_warn_rate)
+        )
+    );
+    // No usual speed is needed to see a stall, and none is learned from it.
+    assert!(insight.episode.is_none());
+}
+
+#[test]
+fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
+    let mut sample = slowed_by_paging();
+    sample.llm_observed_at = Some(SystemTime::now());
+    sample.correlation.notes = vec![
+        "paging 2.0 MiB/s (usual none)".into(),
+        "GPU 40% (usual 99%)".into(),
+    ];
+    sample.correlation.unusual = vec![CorrelationCause::Paging, CorrelationCause::GpuIdle];
+    sample.correlation.usual_speed = Some((50.0, 40.0));
+    let lines = crate::report::diagnostic_lines(&sample);
+    let at = |text: &str| lines.iter().position(|line| line == text);
+    assert!(at("Usual generation speed 50.0 tok/s · slow below 40.0").is_some());
+    assert!(
+        at("Unusual: paging 2.0 MiB/s (usual none)") < at("Unusual: GPU 40% (usual 99%)"),
+        "{lines:?}"
+    );
+    assert!(at("Unusual: GPU 40% (usual 99%)") < at("CONNECTION"));
+    let mut report = Vec::new();
+    crate::report::write_static(&mut report, &sample, 2, defaults(), Platform::MacOs).unwrap();
+    let report = String::from_utf8(report).unwrap();
+    assert!(
+        report.contains("USUAL SPEED   50.0 tok/s · slow below 40.0"),
+        "{report}"
+    );
+
+    // An expanded generation chart names the same two figures in its title.
+    let mut app = test_app(0);
+    app.collector.current = sample.clone();
+    app.charts.expanded = true;
+    let generation = history_with_drop(500, 250, Tone::Unusual);
+    let top = buffer_rows(&chart_buffer(
+        &app,
+        140,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ))
+    .remove(0);
+    assert!(top.contains("usual 50.0 · slow below 40.0"), "{top}");
+    assert!(top.contains("slow 12s · low 25.0"), "{top}");
+    // No other chart claims it, and neither does the Overview's compact one.
+    let paging_chart = buffer_rows(&chart_buffer(
+        &app,
+        110,
+        10,
+        "paging / I/O",
+        &generation,
+        ChartMetric::Swap,
+    ))
+    .remove(0);
+    assert!(!paging_chart.contains("usual"), "{paging_chart}");
+    app.charts.expanded = false;
+    let compact = buffer_rows(&chart_buffer(
+        &app,
+        110,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ))
+    .remove(0);
+    assert!(!compact.contains("usual"), "{compact}");
+
+    // Outside a slowdown the figures stay, and a reading that is unusual
+    // on its own is still listed, here and in the one-shot report.
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        unusual: vec![CorrelationCause::GpuIdle],
+        notes: vec!["GPU 40% (usual 99%)".into()],
+        usual_speed: Some((50.0, 40.0)),
+        ..CorrelationInsight::default()
+    };
+    let lines = crate::report::diagnostic_lines(&sample);
+    assert!(lines
+        .iter()
+        .any(|line| line.starts_with("Usual generation speed")));
+    assert!(lines.contains(&"Unusual: GPU 40% (usual 99%)".to_owned()));
+    let mut report = Vec::new();
+    crate::report::write_static(&mut report, &sample, 2, defaults(), Platform::MacOs).unwrap();
+    let report = String::from_utf8(report).unwrap();
+    assert!(
+        report.contains("UNUSUAL       GPU 40% (usual 99%)"),
+        "{report}"
+    );
+    assert!(!report.contains("SLOWDOWN"), "{report}");
+
+    // With nothing unusual, nothing is listed.
+    sample.correlation.unusual.clear();
+    sample.correlation.notes.clear();
+    let lines = crate::report::diagnostic_lines(&sample);
+    assert!(!lines.iter().any(|line| line.starts_with("Unusual:")));
+}
+
+#[test]
+fn speed_is_judged_against_earlier_samples_of_similar_work() {
+    let mut engine = CorrelationEngine::default();
+    let mut observe = |sample: Sample| engine.observe(&sample, defaults());
+    let alone = |second: u64, tps: f64| paging(second, tps, 0);
+    let pair = |second: u64, tps: f64| beside(paging(second, tps, 0), 60_000, false);
+    let long = |second: u64, tps: f64| {
+        let mut sample = paging(second, tps, 0);
+        sample.llm_requests[0].prompt = 240_000;
+        sample
+    };
+    for second in 0..10 {
+        observe(alone(second, 50.0));
+    }
+    // Two requests writing at once, never seen before: there is nothing
+    // like it to compare with, so it is learned rather than called slow
+    // against a lone request's speed.
+    let first = observe(pair(10, 30.0));
+    assert!(!first.slow && !first.is_material_drop());
+    assert_eq!(first.usual_speed, None);
+
+    // Once two requests have run at that speed it is their usual speed,
+    // and a lone request is still judged against lone ones.
+    for second in 11..30 {
+        observe(pair(second, 30.0));
+    }
+    let two = observe(pair(30, 30.0));
+    assert!(!two.slow && two.unusual.is_empty(), "{}", two.summary);
+    assert_eq!(two.usual_speed.unwrap().0, 30.0);
+    assert_eq!(two.usual_for, "2 requests · 131.2k context");
+    let one = observe(alone(31, 50.0));
+    assert!(!one.slow);
+    assert_eq!(one.usual_speed.unwrap().0, 50.0);
+    assert_eq!(one.usual_for, "1 request · 69.5k context");
+
+    // The same holds for a context several times longer: slower, and
+    // usual for that context, while the shorter one keeps its own speed.
+    for second in 32..50 {
+        observe(long(second, 36.0));
+    }
+    let longer = observe(long(50, 36.0));
+    assert!(!longer.slow, "{}", longer.summary);
+    assert_eq!(longer.usual_speed.unwrap().0, 36.0);
+    assert_eq!(longer.usual_for, "1 request · 242.5k context");
+    let short = observe(alone(51, 36.0));
+    assert!(short.slow, "36 tok/s is slow for the shorter context");
+    assert_eq!(short.usual_speed.unwrap().0, 50.0);
+
+    // Three slow samples of familiar work are a slowdown, and the request
+    // count, already allowed for, is not given as its reason.
+    let slowdown = (52..55)
+        .map(|second| observe(pair(second, 12.0)))
+        .last()
+        .unwrap();
+    assert!(slowdown.is_material_drop());
+    assert_eq!(
+        slowdown.cause,
+        CorrelationCause::None,
+        "{}",
+        slowdown.summary
+    );
+    assert_eq!(
+        slowdown.summary,
+        "GEN ↓60.0% (30.0→12.0 tok/s) · nothing else unusual"
+    );
+}
+
+#[test]
+fn the_usual_speed_line_follows_the_work_column_by_column() {
+    let mut app = test_app(0);
+    let mut sample = paging(30, 30.0, 0);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        usual_speed: Some((30.0, 24.0)),
+        usual_for: "2 requests · 128.5k context".into(),
+        ..CorrelationInsight::default()
+    };
+    app.collector.current = sample;
+    // Eight samples alone at a usual 50 tok/s, then eight beside another
+    // request at a usual 30: every bar is at its own usual speed.
+    let mut generation: VecDeque<ChartPoint> = (0..16)
+        .map(|index| {
+            let usual = if index < 8 { 500 } else { 300 };
+            let mut point = ChartPoint::new(Some(usual * 4 / 5), Tone::Green);
+            point.usual = Some(usual);
+            point
+        })
+        .collect();
+    let buffer = chart_buffer(
+        &app,
+        68,
+        12,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    let rows = buffer_rows(&buffer);
+    let text = rows.join("\n");
+    // Each column's line row, left to right.
+    let lines: Vec<(u16, u16)> = (1..67)
+        .filter_map(|x| {
+            (1..11)
+                .find(|y| buffer[(x, *y)].symbol() == "┄")
+                .map(|y| (x, y))
+        })
+        .collect();
+    let rows_seen: Vec<u16> = lines.iter().map(|(_, y)| *y).collect();
+    // The line steps down once, where the work got heavier, and is grey:
+    // nothing is unusual about a speed that matches its work.
+    let (first, last) = (lines[0], lines[lines.len() - 1]);
+    assert!(first.1 < last.1, "{lines:?}\n{text}");
+    assert!(
+        rows_seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{text}"
+    );
+    assert_eq!(buffer[last].fg, Tone::Muted.color());
+    // The border names the work the latest usual speed is for.
+    assert!(
+        rows[11].contains("tok/s · ┄ usual 30.0 for 2 requests · 128.5k context"),
+        "{text}"
+    );
+
+    // Bars past their usual speed have the line cut through them, so it
+    // reads across the whole chart.
+    let tall: VecDeque<ChartPoint> = generation
+        .iter()
+        .map(|point| ChartPoint {
+            value: point.usual.map(|usual| usual * 6 / 5),
+            ..*point
+        })
+        .collect();
+    let crossed = chart_buffer(&app, 68, 12, "generation", &tall, ChartMetric::Generation);
+    let through: Vec<u16> = (1..67)
+        .filter(|x| {
+            (1..11).any(|y| {
+                let cell = &crossed[(*x, y)];
+                cell.symbol() == "┄" && cell.bg == GREEN && cell.fg == PANEL
+            })
+        })
+        .collect();
+    assert!(
+        through.len() >= 16,
+        "{through:?}\n{}",
+        buffer_rows(&crossed).join("\n")
+    );
+
+    // A slow sample shows as a bar short of its own column's line, and the
+    // line over it takes the anomaly colour.
+    let newest = generation.back_mut().unwrap();
+    newest.value = Some(100);
+    newest.tone = Tone::Unusual;
+    let buffer = chart_buffer(
+        &app,
+        68,
+        12,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    );
+    assert_eq!(
+        buffer[last].fg,
+        UNUSUAL,
+        "{}",
+        buffer_rows(&buffer).join("\n")
+    );
 }
