@@ -2260,7 +2260,8 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
         "28.0 / 36.0 GiB",
         "█wired █app █comp █cache",
         "8.0 GiB left",
-        "18.0 GiB",
+        // The axis rounds up past the 18 GiB peak, as every chart's does.
+        "20.0 GiB",
     ] {
         assert!(text.contains(label), "missing {label}\n{text}");
     }
@@ -2283,6 +2284,14 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
         "{} vs {}",
         height(30),
         height(57)
+    );
+    // A steady reading stands below the top, never a solid block.
+    let plot_top = (0..20)
+        .find(|y| buffer[(1, *y)].symbol() == "2")
+        .expect("axis label");
+    assert!(
+        !"▁▂▃▄▅▆▇█".contains(buffer[(30, plot_top)].symbol()),
+        "the peak reaches the top of the axis"
     );
     assert_eq!(buffer[(57, 18)].fg, YELLOW);
     assert_eq!(buffer[(30, 18)].fg, GREEN);

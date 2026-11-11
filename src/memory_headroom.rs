@@ -227,13 +227,17 @@ pub(crate) fn draw(
     if points.iter().all(Option::is_none) {
         return true;
     }
-    let ceiling = points
+    // The axis rounds up past the peak, in tenths of a GiB, like every other
+    // chart's: a steady reading stands below the top as a level, rather
+    // than filling the plot into a block that reads as horizontal stripes.
+    const TENTH: u64 = (1 << 30) / 10;
+    let peak = points
         .iter()
         .flatten()
         .map(|(left, _)| *left)
         .max()
-        .unwrap_or(0)
-        .max(1);
+        .unwrap_or(0);
+    let ceiling = crate::chart_scale::ceiling(peak.div_ceil(TENTH), 1) * TENTH;
     let label = |y: u16, value: String| {
         (
             Paragraph::new(format!("{value:>8} ")).style(Style::default().fg(MUTED)),

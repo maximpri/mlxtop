@@ -75,6 +75,9 @@
 
 ### Dashboards
 
+- **Memory's history has an axis like every other chart's.** It topped out
+  at its own peak, so steady headroom filled the plot to the top and read as
+  horizontal stripes. It now rounds up past the peak, as the rate charts do.
 - **The generation chart draws its usual speed** as a dashed line, column by
   column: it steps when a request joins or leaves and runs through bars that
   pass it. It is grey while speed is usual and magenta during a slowdown. The
