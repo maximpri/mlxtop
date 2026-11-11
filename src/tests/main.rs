@@ -5444,7 +5444,7 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
         app.render_indicator_chart(frame, frame.area(), name, history, metric)
     });
     for label in [
-        "KV cache",
+        "KV cache / model I/O",
         "KV hit 90% · ≈1h 30m saved",
         "session",
         "90% of 1.2M · ≈1h 30m saved",
@@ -7203,7 +7203,7 @@ fn decode_time_reads_are_weights_and_the_disk_panel_shows_their_cost() {
         app.render_indicator_chart(frame, frame.area(), name, &history, metric)
     });
     for label in [
-        "KV cache",
+        "KV cache / model I/O",
         "streaming weights",
         "weights",
         "25% of decode from disk · 18 vs 42 tok/s",

@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.12 — 2026-11-11
+## 3.3.0-rc.13 — 2026-11-11
 
 ### Diagnosis
 
@@ -58,7 +58,7 @@
   gives the share of decoding that read from disk, with the decode speed
   then and from memory (`25% of decode from disk · 18 vs 42 tok/s`), and the
   bottom edge reads `streaming weights from disk`. The cache panel is
-  now titled `KV cache`.
+  now titled `KV cache / model I/O`.
 - **KV cache leads with its hit rate**: `KV hit 91% · ≈1h 25m
   saved`, the share of the session's prompt tokens served from cache and
   the prefill time that saved at the measured prefill speed. Where the cache

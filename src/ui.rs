@@ -614,7 +614,7 @@ impl App {
     pub(crate) fn cache_panel(&self) -> (&'static str, &VecDeque<ChartPoint>, ChartMetric) {
         let disk = &self.collector.disk_history;
         if disk.iter().any(|point| point.value.is_some()) {
-            ("KV cache", disk, ChartMetric::Disk)
+            ("KV cache / model I/O", disk, ChartMetric::Disk)
         } else {
             (
                 "KV cache",
