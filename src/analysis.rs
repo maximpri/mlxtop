@@ -71,6 +71,9 @@ pub(crate) struct CorrelationObservation {
     /// Tokens held by the requests writing an answer (prompt and output so
     /// far, together), when the runtime lists its requests.
     pub(crate) context: Option<u64>,
+    /// Who is writing: the generating requests' ids, or, where the runtime
+    /// lists none, how many are active. Empty when nothing is.
+    pub(crate) writers: Vec<String>,
 }
 
 impl CorrelationObservation {
@@ -754,6 +757,8 @@ pub(crate) struct CorrelationEngine {
     episode: Option<Episode>,
     /// When generation was last seen running.
     seen: Option<SystemTime>,
+    /// Which requests were writing at the previous sample.
+    writers: Vec<String>,
     /// The reason last journaled, and when it was last seen.
     told: Option<(CorrelationCause, Option<SystemTime>)>,
 }
@@ -795,6 +800,12 @@ impl CorrelationEngine {
             self.reset();
             self.model = Some(model);
         }
+        // A request that began or ended between two polls wrote for only
+        // part of the interval its speed is divided over: such a sample is
+        // shown, never judged or learned. The same writers at both ends of
+        // the interval make it whole.
+        let whole = !current.writers.is_empty() && current.writers == self.writers;
+        self.writers = current.writers.clone();
         let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
         let speed = current.generation_tps.filter(|tps| {
             tps.is_finite() && (*tps > 0.0 || current.active_requests.unwrap_or_default() > 0)
@@ -821,7 +832,7 @@ impl CorrelationEngine {
         let speed = speed.unwrap_or_default();
         // A request that has just gone quiet may be about to stall: its
         // near-zero speed is neither slow nor usual until that is known.
-        let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5);
+        let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5) || !whole;
         // Judged against earlier samples of similar work: a longer context
         // or another request writing beside it is expected to be slower.
         let work = Work::of(&current);
@@ -1246,6 +1257,17 @@ impl CorrelationObservation {
                     .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
                     .sum()
             }),
+            writers: if sample.llm_requests.is_empty() {
+                sample
+                    .llm_active_requests
+                    .filter(|active| *active > 0)
+                    .map(|active| vec![format!("{active} active")])
+                    .unwrap_or_default()
+            } else {
+                let mut ids: Vec<String> = generating.iter().map(|r| r.id.clone()).collect();
+                ids.sort();
+                ids
+            },
         }
     }
 }

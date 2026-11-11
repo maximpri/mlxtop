@@ -6508,12 +6508,21 @@ fn a_slowdown_waits_while_nothing_generates_and_is_over_after_thirty_idle_second
         samples[12].correlation.direction,
         ThroughputDirection::Unknown
     );
-    let began = &samples[13].correlation;
-    assert!(began.is_material_drop(), "three slow polls of generation");
-    assert_eq!(began.episode.unwrap().seconds, 3.0);
+    // The first poll after a pause covers part of an interval: not judged.
+    assert!(!samples[13].correlation.is_material_drop());
+    assert!(
+        !samples[13].correlation.slow,
+        "a partial interval is never slow"
+    );
+    let began = &samples[14].correlation;
+    assert!(
+        began.is_material_drop(),
+        "three whole slow polls of generation"
+    );
+    assert_eq!(began.episode.unwrap().seconds, 4.0);
     assert!(!samples[15].correlation.is_material_drop());
     assert!(samples[16].correlation.is_material_drop(), "it continues");
-    assert_eq!(samples[16].correlation.episode.unwrap().samples, 5);
+    assert_eq!(samples[16].correlation.episode.unwrap().samples, 4);
     assert!(samples[16].correlation.repeat);
     assert!(!samples[18].correlation.is_material_drop(), "a new start");
 }
@@ -7215,4 +7224,43 @@ fn decode_time_reads_are_weights_and_the_disk_panel_shows_their_cost() {
         app.render_indicator_chart(frame, frame.area(), name, &history, metric)
     });
     assert!(narrow.contains("weights"), "{narrow}");
+}
+
+/// A 73-token reply at 130 tok/s takes about half a second: its only poll
+/// divides its tokens over an interval it wrote for part of. On one server
+/// that read 76 tok/s against a usual 131 and was marked unusual alone.
+#[test]
+fn a_request_that_starts_or_ends_between_polls_is_shown_not_judged() {
+    let mut engine = CorrelationEngine::default();
+    let request = |id: &str, second: u64, tps: f64| {
+        let mut sample = paging(second, tps, 0);
+        for running in &mut sample.llm_requests {
+            running.id = id.into();
+        }
+        sample
+    };
+    let mut second = 0;
+    // Short replies at about 130 tok/s, four polls each, teach the usual.
+    for reply in 0..6 {
+        for _ in 0..4 {
+            let sample = request(&format!("r{reply}"), second, 130.0);
+            engine.observe(&sample, defaults());
+            second += 1;
+        }
+    }
+    // The reply whose only poll is a partial interval.
+    let short = engine.observe(&request("short", second, 76.0), defaults());
+    assert!(!short.slow, "a partial interval is never slow");
+    assert!(!short.is_material_drop());
+    // The same speed over whole intervals of one request is unusual.
+    let mut judged = Vec::new();
+    for _ in 0..3 {
+        second += 1;
+        judged.push(engine.observe(&request("long", second, 76.0), defaults()));
+    }
+    assert!(!judged[0].slow, "its first poll is partial too");
+    assert!(
+        judged[1].slow && judged[2].slow,
+        "whole intervals are judged"
+    );
 }
