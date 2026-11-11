@@ -41,18 +41,18 @@ first. Select a chart and press Enter for its full view. Each panel keeps its
 place when requests arrive or the model becomes idle; an empty prompt load is
 one line, and the host charts get its rows.
 
-**Memory** puts the OS **PRESSURE** label in the reading slot, then bytes in
-use and the resident percentage, then a bar of what RAM holds: wired, app,
-compressed, cache and free, with the GPU wired limit marked (yellow, with a
-legend reason, when wired memory exceeds it). Its history stacks the same
-kinds for every sample, at eighth-cell precision with free memory empty at
-the top, so a model load reads as wired memory jumping while cache is
-squeezed out. The bottom row is a ribbon in each sample's pressure colour:
-green for normal, yellow for warning, red for critical. Linux stacks app and
-cache, Windows memory in use; without composition counters the history is an
-area of resident occupancy. Resident memory is total RAM minus free (and, on
-macOS, speculative) pages, so it includes reclaimable file cache; a full cache
-alone does not establish memory pressure. Linux derives pressure from
+**Memory** puts the OS **PRESSURE** label in the reading slot and shows
+headroom beneath it. The **GPU** meter is wired memory against the GPU wired
+limit, with what is left under it (`25.6 / 32.0 GiB`, `6.4 GiB left`); it
+turns orange from 90%, red from 97%, and says so when wired memory is over
+the limit. The **RAM** meter is memory in use (wired, app and compressed)
+with the file cache as its last segment, and what is left: free memory plus
+that cache, which the OS gives back on demand. Under the meters, a trace
+shows what was left over time, each sample in its pressure colour: green
+for normal, orange for warning, red for critical. A model load reads as the
+trace dropping. There is no resident percentage: a full file cache fills RAM
+without establishing memory pressure. Without composition counters the
+history is an area of occupancy. Linux derives pressure from
 unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
 `memory_warn_load` and `memory_critical_load` configure those Linux bands.
 macOS uses native pressure rather than percentage thresholds. macOS
@@ -69,7 +69,7 @@ disk. File paging counts against the system only while memory is tight
 (warning pressure, or 10% free or less); otherwise it is drawn in green as
 `Disk reads · memory not tight`, for example while a model loads. Both
 charts' axes never shrink below their warning rate, which is drawn as a
-dotted yellow line, so a trickle stays a short bar. A measured all-zero
+dotted orange line, so a trickle stays a short bar. A measured all-zero
 window says **No paging traffic** without inventing a ceiling; missing samples
 remain gaps.
 
@@ -134,7 +134,11 @@ Work mlxtop has not seen before is learned for eight samples before it is
 judged; it is never compared with different work.
 
 Generation is **slow** when its speed is unusually low for its work (and at
-least a fifth below usual) for three samples in a row. The reason given is
+least a fifth below usual) for three samples in a row. While no answer is
+being written, **prefill** is judged the same way against earlier prefills of
+similar prompts, and a slow one reads `PREFILL ↓61% (180.0→70.0 tok/s)`. A
+sample in which a request started or ended is not judged: its tokens are
+divided over an interval it worked for only part of. The reason given is
 whatever else is unusual at the same time: thermal limiting, memory pressure,
 paging, the runtime's disk work, a prompt prefilling beside the answer,
 compression, the queue, model or Metal memory, the runtime's CPU, or a GPU
@@ -149,14 +153,17 @@ that pass it. The bottom edge says what the latest is for, for example
 `┄ usual 30.0 for 2 requests · 131.2k context`. The line is grey while all is
 well.
 
-Magenta means unusual and nothing else. It appears as it happens, slowdown or
-not:
+Yellow means impact and nothing else. It appears only while the model is
+slowed or stalled:
 
-- a sample on the generation chart that is unusually slow, even a single one;
-- a sample on another chart whose reading is unusual for the host: paging,
+- the slowdown's samples on the generation chart;
+- the samples on another chart whose reading was unusual beside it: paging,
   compression, memory, disk, or a GPU left idle;
 - readings without a chart, in place: the header's `CPU 380% (usual 95%)` and
   `THERMAL` note.
+
+A reading that is unusual while the model keeps its speed changes no colour;
+Diagnostics lists it under `Unusual:`.
 
 A reading that stays unusual for 30 seconds while generation keeps its usual
 speed becomes the usual value. Requests, prompts and the queue are not marked
@@ -164,7 +171,7 @@ on their own; they are what you asked the runtime to do.
 
 During a slowdown the same colour ties the panels together:
 
-- the usual-speed line turns magenta and the reason is named under the bars;
+- the usual-speed line turns yellow and the reason is named under the bars;
 - the border of the panel that shows the reason is tagged `▲ slowed GEN ↓50%`;
 - the queue's active count and history are marked when the reason is how many
   requests waited.
@@ -188,12 +195,16 @@ generation before it has a usual speed to compare with.
 
 ## oMLX telemetry
 
-The oMLX adapter checks `http://127.0.0.1:8080/health` by default and discovers
-the configured host, port and optional API key from:
+The oMLX adapter checks `http://127.0.0.1:8000/health` by default, oMLX's own
+default port. It discovers the host, port and optional API key from:
 
 ```text
 ~/.config/omlx-coding/server.env
 ```
+
+Without that file, it takes the port from `OMLX_PORT`, then from `server.port`
+(and `server.host`) in oMLX's `settings.json`, found in `OMLX_BASE_PATH` or by
+default `~/.omlx`.
 
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
@@ -511,12 +522,22 @@ again each time Settings opens, so edits made by hand show up.
 -i, --interval N   refresh interval in seconds, 1–60 (default: 1)
 -n, --history N    chart/journal history, 20–3600 (default: 300)
 -1, --once         print a static report and exit
+--record FILE      append every sample to FILE, one JSON line each
 -V, --version      print the installed version and exit
 -h, --help         show help
 
 mlxtop doctor [--interval N]   diagnose the connection and readings, then exit
 mlxtop update [--rc]           install the latest release (--rc: or release candidate)
+mlxtop replay FILE             read a recording back through the detection rules
 ```
+
+A recording keeps every sample as mlxtop saw it: the machine's readings and
+the runtime's, request by request. `mlxtop replay FILE` runs them through
+today's rules and Journal and prints how many generation and prefill samples
+there were, how many fell inside a slowdown or stall, and each finding with
+its time. Record a session in which the model slowed, then replay it after a
+change to the rules, or attach it to a bug report. A recording holds request
+ids, model names and token counts, never prompts or output.
 
 `mlxtop update` downloads the release archive for this platform from GitHub,
 checks it against the release's `SHA256SUMS` and the new binary's reported
@@ -539,7 +560,7 @@ you leave out keeps its built-in default.
   "history": 500,
   "omx": {
     "host": "127.0.0.1",
-    "port": 8080
+    "port": 8000
   },
   "memory_warn_load": 70,
   "memory_critical_load": 85,
@@ -562,10 +583,10 @@ you leave out keeps its built-in default.
 | `interval` | integer | 1 | Refresh interval in seconds (1–60) |
 | `history` | integer | 300 | Chart/journal history size (20–3600) |
 | `omx.host` | string | "127.0.0.1" | oMLX server host |
-| `omx.port` | integer | 8080 | oMLX server port |
+| `omx.port` | integer | 8000 | oMLX server port; unset, discovered as described in [oMLX telemetry](#omlx-telemetry) |
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
-| `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in yellow |
+| `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in orange |
 | `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; the Journal clears saturation 10 points lower; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
@@ -592,7 +613,8 @@ memory pressure are always recorded.
 - **CLI arguments override config file values.** `--interval` and `--history` win
   over `interval` and `history`.
 - **Explicit endpoint settings override discovery.** mlxtop reads
-  `~/.config/omlx-coding/server.env` to find a running oMLX server, but a host or
+  `~/.config/omlx-coding/server.env`, `OMLX_PORT` and oMLX's `settings.json` to
+  find a running oMLX server, but a host or
   port you set under `omx` always wins. Each field resolves on its own, so setting
   only `omx.port` keeps the discovered host.
 - **Out-of-range `interval` or `history` in the file falls back to the default**
@@ -726,7 +748,7 @@ prompt sizes in tokens, not health or latency assessments. The headline keeps
 the exact selected prompt size and its observation age visible.
 
 Request cache reuse uses the cache chart's bands for prompts of at least 4,096
-tokens: green from 50%, yellow from 20%, red below 20%. Smaller prompts stay
+tokens: green from 50%, orange from 20%, red below 20%. Smaller prompts stay
 cyan. Low reuse on a cold request is expected;
 a low percentage by itself does not establish a cache problem.
 
@@ -751,7 +773,7 @@ observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
 
 | Chart | Form | Reading |
 | --- | --- | --- |
-| memory | stacked composition history over a pressure ribbon (area without composition counters) | PRESSURE, bytes in use, resident % and a composition bar |
+| memory | what RAM has left over time, in each sample's pressure colour (occupancy area without composition counters) | PRESSURE; a GPU meter (wired against the GPU limit) and a RAM meter (in use, cache, what is left) |
 | compression | bars from zero, axis at least the warning rate | stored / compressed bytes and ratio, compressing / decompressing rates, share of RAM |
 | paging / I/O | bars from zero, axis at least the warning rate | page-in / page-out rates, swap capacity bar |
 | generation, prefill | bars from zero | live tok/s, or a labeled `LAST` reading |
@@ -765,13 +787,13 @@ window in the top bar, such as `window 46s`, is the rolling history span, not
 elapsed runtime. The span stays fixed while new samples enter on the right.
 Resize the terminal, expand a chart or change zoom to change the visible span.
 
-GPU and paging samples retain green/yellow/red value bands.
-GPU defaults are green below 75%, yellow from 75% and red from 90%; these are
+GPU and paging samples retain green/orange/red value bands.
+GPU defaults are green below 75%, orange from 75% and red from 90%; these are
 load bands, not proof of a bottleneck. Configured thresholds apply consistently
 to numeric readings, traces and device meters. Percentage axes stay at 0–100;
 all other axes use the real measured unit and fit the visible data.
 
-**Queue** plots active requests in cyan and waiting requests in yellow on one
+**Queue** plots active requests in cyan and waiting requests in orange on one
 shared, labeled zero baseline. A compact queue keeps its counts and adds a
 mark per request: `●` running, `○` waiting, `+` when they do not fit. A white `═` marks equal measured counts. Overlapping connectors merge into continuous muted lines and junctions.
 Muted `≈` marks unequal values that coincide at terminal resolution. Exact
@@ -799,7 +821,10 @@ existing usage JSONL envelope:
 ```
 
 `output_tokens_per_second` is an optional finite, nonnegative completed-request
-output average. It does not change the live generation chart.
+output average. It does not change the live generation chart. A `llama.cpp`
+record may instead carry llama-server's own `timings` as the client received
+them: `predicted_per_second` is read as the output speed and `cache_n` as the
+cached prompt tokens.
 
 Use a nonnegative integer measured from request dispatch to the first generated
 token. Add this field alongside `provider`, `request_id`, `observed_at` and
@@ -844,14 +869,14 @@ sessions to monitor independent endpoints concurrently.
 | `lmstudio` or `llmster` | 1234 | `/api/v1/models`, fallback `/api/v0/models`, then `/v1/models` |
 | `vllm` | 8000 | `/metrics` |
 | `sglang` | 30000 | `/metrics` (requires `--enable-metrics`) |
-| `llama.cpp` | 8080 | `/slots`, `/metrics` (requires `--metrics`) |
+| `llama.cpp` | 9931, then 8080 | `/slots`, `/metrics` (requires `--metrics`); builds from October 2026 listen on 9931 |
 | `koboldcpp` | 5001 | `/api/extra/perf` |
 | `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
 | `splash` | 8000 | `/status` |
 | `tensorfold` | 8080 | `/metrics`, `/v1/models` |
-| `strata` | 8080 | `/metrics/prometheus`, `/v1/models` |
+| `strata` | 8080, then 8095 | `/metrics?format=prometheus`, `/v1/models`; 8095 is a bare `strata serve` |
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
-| `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
+| `jan` | 1337, then 6767 | `/v1/models`; the desktop app serves on 1337, `jan serve` on 6767 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
 
 ```sh
@@ -921,8 +946,11 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   server-wide generation/prompt-token rates from successive counter samples.
   These are sampled server rates, not per-request averages. The first sample,
   counter resets, changed series and gaps longer than five seconds produce no
-  rate. vLLM also supplies interval and cumulative prefix-token cache reuse;
-  SGLang supplies prefix hit rate when a single series is unambiguous.
+  rate. vLLM supplies interval and cumulative prefix-token cache reuse (from
+  `gpu_prefix_cache_*` on vLLM 0.9.1 and earlier). SGLang's reuse is its cached
+  prompt tokens over all prompt tokens. SGLang adds a request's tokens to its
+  counters only when it finishes, so its rates are averages, kept out of live
+  rate charts and slowdown detection.
   Processes shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
@@ -971,7 +999,8 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
 - **TensorFold:** detected by the `tensorfold` or `tensorfold-native` executable,
   or selected with `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
-  completion-counter throughput, prefix-cache reuse, KV occupancy and device memory;
+  completion-counter throughput, prefix-cache reuse, KV occupancy and model memory
+  (device memory on CUDA, the process footprint on a Mac);
   `/v1/models` supplies model names. Throughput needs two samples and advances when
   requests finish; these rates are labeled as averages and excluded from live throughput
   charts and slowdown alarms. Request history and individual
@@ -987,7 +1016,7 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
   root URL (without `/v1`). The existing remote-auth restrictions also apply.
 - **Strata:** detected by the `strata` or `strata-engine` executable,
-  or selected with `MLXTOP_PROVIDER=strata`. Reads `/metrics/prometheus` for active and waiting
+  or selected with `MLXTOP_PROVIDER=strata`. Reads `/metrics?format=prometheus` for active and waiting
   queues, KV occupancy, prefix-cache reuse, mean first-token time and engine GPU memory;
   `/v1/models` supplies model names beside the metric labels. Strata's own `strata:live_tok_s`
   and `strata:live_prefill_tok_s_mean` gauges drive live decode and prefill speeds; without
@@ -1122,7 +1151,7 @@ mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
-supported adapters. The application does not contain analytics, upload
+supported adapters. The application does not track how it is used, upload
 collected metrics, modify model state or send synthetic inference requests.
 
 Provider credentials are read only when needed and are never displayed. See

@@ -8,7 +8,7 @@ use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
-    Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
+    Phase, Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
 };
 use crate::formatting::{
     bytes, compact_tokens, llm_generation_rate_label, llm_prefill_rate_label, percent, rate,
@@ -68,9 +68,14 @@ pub(crate) struct CorrelationObservation {
     pub(crate) ssd_full: bool,
     /// CPU the runtime's processes use, in percent of one core.
     pub(crate) cpu: Option<f64>,
+    /// The share of draft tokens accepted since the last poll.
+    pub(crate) draft_acceptance: Option<f64>,
     /// Tokens held by the requests writing an answer (prompt and output so
     /// far, together), when the runtime lists its requests.
     pub(crate) context: Option<u64>,
+    /// Who is writing: the generating requests' ids, or, where the runtime
+    /// lists none, how many are active. Empty when nothing is.
+    pub(crate) writers: Vec<String>,
 }
 
 impl CorrelationObservation {
@@ -126,13 +131,14 @@ pub(crate) enum Signal {
     ModelMemory,
     MetalMemory,
     Cpu,
+    DraftRejection,
     GpuIdle,
 }
 
 /// Every signal, the host's limits before the workload: when several are
 /// unusual at once, the first is named as the reason. An idle GPU comes
 /// last: it is what a slowdown looks like, and a reason only by itself.
-pub(crate) const SIGNALS: [Signal; 11] = [
+pub(crate) const SIGNALS: [Signal; 12] = [
     Signal::Thermal,
     Signal::Pressure,
     Signal::Paging,
@@ -143,6 +149,7 @@ pub(crate) const SIGNALS: [Signal; 11] = [
     Signal::ModelMemory,
     Signal::MetalMemory,
     Signal::Cpu,
+    Signal::DraftRejection,
     Signal::GpuIdle,
 ];
 
@@ -183,6 +190,7 @@ impl Signal {
             Self::ModelMemory => CorrelationCause::ModelMemory,
             Self::MetalMemory => CorrelationCause::MetalMemory,
             Self::Cpu => CorrelationCause::Cpu,
+            Self::DraftRejection => CorrelationCause::DraftAcceptance,
             Self::GpuIdle => CorrelationCause::GpuIdle,
         }
     }
@@ -212,6 +220,9 @@ impl Signal {
             Self::ModelMemory => fraction(o.model_memory, o.model_memory_max),
             Self::MetalMemory => fraction(o.metal_in_use, o.metal_alloc),
             Self::Cpu => o.cpu,
+            // Judged as the share of draft tokens rejected, so that it is
+            // unusual when it rises.
+            Self::DraftRejection => o.draft_acceptance.map(|share| 1.0 - share),
             // Judged as the share of the GPU left idle, so that like every
             // other signal it is unusual when it rises.
             Self::GpuIdle => o.gpu_util.map(|gpu| 100.0 - f64::from(gpu.min(100))),
@@ -228,6 +239,8 @@ impl Signal {
             Self::ModelMemory | Self::MetalMemory => (0.90, 0.0, 0.02),
             // Half a core, and half as much again as usual.
             Self::Cpu => (50.0, 0.5, 50.0),
+            // Under 70% accepted, and fifteen points fewer than usual.
+            Self::DraftRejection => (0.30, 0.0, 0.15),
             // A GPU under 70% busy, and twenty points idler than usual.
             Self::GpuIdle => (30.0, 0.0, 20.0),
         };
@@ -274,6 +287,11 @@ impl Signal {
             Self::Cpu => format!(
                 "runtime CPU {:.0}% (usual {usual:.0}%)",
                 o.cpu.unwrap_or_default()
+            ),
+            Self::DraftRejection => format!(
+                "draft acceptance {:.0}% (usual {:.0}%)",
+                o.draft_acceptance.unwrap_or_default() * 100.0,
+                (1.0 - usual) * 100.0
             ),
             Self::GpuIdle => format!(
                 "GPU {}% (usual {:.0}%)",
@@ -642,10 +660,6 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    pub(crate) fn from_sample(sample: &Sample) -> Self {
-        Self::of(&CorrelationObservation::from_sample(sample))
-    }
-
     fn of(o: &CorrelationObservation) -> Self {
         let requests = if o.generating > 0 {
             o.generating
@@ -754,6 +768,12 @@ pub(crate) struct CorrelationEngine {
     episode: Option<Episode>,
     /// When generation was last seen running.
     seen: Option<SystemTime>,
+    /// Which requests were writing at the previous sample.
+    writers: Vec<String>,
+    /// Prefill is judged as generation is, with usual values of its own: a
+    /// prompt being read works the machine differently from an answer
+    /// being written.
+    prefill: Option<Box<CorrelationEngine>>,
     /// The reason last journaled, and when it was last seen.
     told: Option<(CorrelationCause, Option<SystemTime>)>,
 }
@@ -776,6 +796,9 @@ struct Episode {
     silent: bool,
     /// Its samples since something else was last unusual.
     quiet: Vec<CorrelationObservation>,
+    /// The latest reason found in it, in words: once that reason passes
+    /// while speed is still down, the slowdown is still its doing.
+    reason: Option<(CorrelationCause, String)>,
 }
 
 impl CorrelationEngine {
@@ -795,6 +818,39 @@ impl CorrelationEngine {
             self.reset();
             self.model = Some(model);
         }
+        // With no answer being written, a prompt being read is the work to
+        // judge. Beside an answer it is a reason, not a subject.
+        let writing = current.stalled_for.is_some()
+            || current
+                .generation_tps
+                .is_some_and(|tps| tps.is_finite() && tps > 0.0);
+        if !writing {
+            if let Some(reading) = current.reading(sample) {
+                let track = self.prefill.get_or_insert_with(Default::default);
+                let mut insight = track.judge(reading, thresholds);
+                insight.phase = Phase::Prefill;
+                insight.summary =
+                    insight
+                        .summary
+                        .replacen(Phase::Generation.label(), Phase::Prefill.label(), 1);
+                return insight;
+            }
+        }
+        self.judge(current, thresholds)
+    }
+
+    /// Judge one observation of a speed against earlier ones of similar work.
+    fn judge(
+        &mut self,
+        current: CorrelationObservation,
+        thresholds: Thresholds,
+    ) -> CorrelationInsight {
+        // A request that began or ended between two polls wrote for only
+        // part of the interval its speed is divided over: such a sample is
+        // shown, never judged or learned. The same writers at both ends of
+        // the interval make it whole.
+        let whole = !current.writers.is_empty() && current.writers == self.writers;
+        self.writers = current.writers.clone();
         let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
         let speed = current.generation_tps.filter(|tps| {
             tps.is_finite() && (*tps > 0.0 || current.active_requests.unwrap_or_default() > 0)
@@ -821,7 +877,7 @@ impl CorrelationEngine {
         let speed = speed.unwrap_or_default();
         // A request that has just gone quiet may be about to stall: its
         // near-zero speed is neither slow nor usual until that is known.
-        let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5);
+        let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5) || !whole;
         // Judged against earlier samples of similar work: a longer context
         // or another request writing beside it is expected to be slower.
         let work = Work::of(&current);
@@ -889,6 +945,7 @@ impl CorrelationEngine {
                     reported: Vec::new(),
                     silent: false,
                     quiet: Vec::new(),
+                    reason: None,
                 }
             }
             (None, None) => {
@@ -965,11 +1022,26 @@ impl CorrelationEngine {
             percent.abs(),
             open.reference
         );
-        let cause = findings
+        let mut cause = findings
             .first()
             .map(|found| found.signal.cause())
             .unwrap_or_default();
         let texts: Vec<&str> = findings.iter().map(|found| found.text.as_str()).collect();
+        if let Some(first) = findings.first() {
+            open.reason = Some((cause, first.text.clone()));
+        }
+        // What was unusual has passed and speed is still down: the slowdown
+        // keeps the reason it was found with, said as past.
+        let earlier = if findings.is_empty() {
+            open.reason
+                .clone()
+                .map(|(was, text)| (was, format!("{text} earlier")))
+        } else {
+            None
+        };
+        if let Some((was, _)) = &earlier {
+            cause = *was;
+        }
         // One Journal row per reason in a slowdown, and none for a slowdown
         // that repeats the last one's reason within a minute.
         let same_story = self.told.is_some_and(|(told, at)| {
@@ -991,9 +1063,12 @@ impl CorrelationEngine {
             self.told = Some((cause, current.at));
         }
         let insight = CorrelationInsight {
+            phase: Phase::Generation,
             direction: ThroughputDirection::Down,
             cause,
-            summary: if texts.is_empty() {
+            summary: if let Some((_, text)) = &earlier {
+                format!("{rate_label} · {text}")
+            } else if texts.is_empty() {
                 format!("{rate_label} · nothing else unusual")
             } else {
                 format!(
@@ -1014,6 +1089,7 @@ impl CorrelationEngine {
             lead: texts
                 .first()
                 .map(|text| (*text).to_owned())
+                .or_else(|| earlier.as_ref().map(|(_, text)| text.clone()))
                 .unwrap_or_default(),
             stall_seconds: None,
             event_key: Some(CorrelationKey {
@@ -1133,23 +1209,45 @@ impl CorrelationEngine {
             Some(gpu) => with.push(format!("GPU {gpu}%")),
             None => {}
         }
+        // A host reading explains a stall only when the model has not been
+        // running fast beside it: disk writes at the rate they ran at a
+        // minute ago, at full speed, are not why it stopped now.
+        let mut blamed = Vec::new();
+        let mut as_usual = Vec::new();
+        let mut weigh = |signal: Signal, text: String| {
+            if self.seen_while_fast(signal, current) {
+                as_usual.push(text);
+            } else {
+                with.push(text);
+                blamed.push(signal.cause());
+            }
+        };
         if let Some(disk) = current.disk_label() {
-            with.push(disk);
+            weigh(Signal::Disk, disk);
         }
         if current.paging_rate >= PAGING_ACTIVE_ENTER_RATE {
-            with.push(format!("paging {}", rate(current.paging_rate)));
+            weigh(
+                Signal::Paging,
+                format!("paging {}", rate(current.paging_rate)),
+            );
         }
         if current.compression_rate >= thresholds.compression_warn_rate {
-            with.push(format!("compression {}", rate(current.compression_rate)));
+            weigh(
+                Signal::Compression,
+                format!("compression {}", rate(current.compression_rate)),
+            );
         }
         if current.pressure >= 2 {
-            with.push("memory pressure".into());
+            weigh(Signal::Pressure, "memory pressure".into());
         }
         if running(current) > 1 {
             with.push(format!("{} requests running", running(current)));
         }
         if !with.is_empty() {
             evidence = format!("{evidence} · {}", with.join(" · "));
+        }
+        if !as_usual.is_empty() {
+            evidence = format!("{evidence} · as when it ran fast: {}", as_usual.join(", "));
         }
         let seconds = self
             .episode
@@ -1165,6 +1263,7 @@ impl CorrelationEngine {
             }
         });
         CorrelationInsight {
+            phase: Phase::Generation,
             direction: ThroughputDirection::Down,
             cause: CorrelationCause::Stall,
             summary: format!("GEN stalled · {evidence}"),
@@ -1180,11 +1279,36 @@ impl CorrelationEngine {
             ended: None,
             repeat: false,
             slow: true,
-            unusual: Vec::new(),
+            unusual: blamed,
             notes: Vec::new(),
             usual_speed: slow_range(&self.speed.usual(self.work)),
             usual_for: self.work.label(),
         }
+    }
+
+    /// Whether `signal` reached its current level at least twice in recent
+    /// samples taken while the model ran at its usual speed (learned, or
+    /// held while being judged). With too little history it is not known,
+    /// and the reading keeps its place as a possible reason.
+    fn seen_while_fast(&self, signal: Signal, current: &CorrelationObservation) -> bool {
+        let Some(index) = SIGNALS.iter().position(|known| *known == signal) else {
+            return false;
+        };
+        let Some(value) = signal.value(current).filter(|value| *value > 0.0) else {
+            return false;
+        };
+        let fast: Vec<f64> = self.host[index]
+            .values()
+            .chain(self.held[index].1.iter().copied())
+            .collect();
+        if fast.len() < crate::anomaly::LEARN_SAMPLES {
+            return false;
+        }
+        // Within a third of it counts as the same level: rates jitter.
+        fast.iter()
+            .filter(|seen| **seen >= value * 2.0 / 3.0)
+            .count()
+            >= 2
     }
 
     pub(crate) fn reset(&mut self) {
@@ -1193,6 +1317,40 @@ impl CorrelationEngine {
 }
 
 impl CorrelationObservation {
+    /// This sample as prefill work: the speed prompts are read at, by the
+    /// requests reading one, over the prompt tokens they hold. `None` when
+    /// no prompt is being read at a measured speed.
+    fn reading(&self, sample: &Sample) -> Option<Self> {
+        let speed = sample
+            .llm_prefill_tps
+            .filter(|tps| sample.llm_prefill_tps_live && tps.is_finite() && *tps > 0.0)?;
+        let readers: Vec<_> = sample
+            .llm_requests
+            .iter()
+            .filter(|r| !r.completed && !r.queued && r.prefilled.is_some())
+            .collect();
+        if readers.is_empty() && !sample.llm_requests.is_empty() {
+            return None;
+        }
+        let mut ids: Vec<String> = readers.iter().map(|r| r.id.clone()).collect();
+        ids.sort();
+        Some(Self {
+            generation_tps: Some(speed),
+            generating: readers.len() as u64,
+            prefilling: 0,
+            prefill_prompt: None,
+            stalled_for: None,
+            output_tokens: None,
+            context: (!readers.is_empty()).then(|| readers.iter().map(|r| r.prompt).sum()),
+            writers: if readers.is_empty() {
+                self.writers.clone()
+            } else {
+                ids
+            },
+            ..self.clone()
+        })
+    }
+
     pub(crate) fn from_sample(sample: &Sample) -> Self {
         // Runtimes report prefill progress only while a prompt is being read.
         let running: Vec<_> = sample
@@ -1240,12 +1398,24 @@ impl CorrelationObservation {
             disk: sample.disk,
             ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
             cpu: (sample.llm_count > 0).then_some(sample.llm_cpu),
+            draft_acceptance: sample.llm_draft_acceptance,
             context: (!generating.is_empty()).then(|| {
                 generating
                     .iter()
                     .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
                     .sum()
             }),
+            writers: if sample.llm_requests.is_empty() {
+                sample
+                    .llm_active_requests
+                    .filter(|active| *active > 0)
+                    .map(|active| vec![format!("{active} active")])
+                    .unwrap_or_default()
+            } else {
+                let mut ids: Vec<String> = generating.iter().map(|r| r.id.clone()).collect();
+                ids.sort();
+                ids
+            },
         }
     }
 }

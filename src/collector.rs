@@ -47,6 +47,10 @@ pub(crate) struct PreviousCounters {
     pub(crate) swap_used: u64,
 }
 
+/// How often readings that change over seconds (thermal state, power) are
+/// taken; each costs a process.
+const SLOW_READ_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub(crate) struct CollectorView {
     pub(crate) current: Sample,
@@ -54,6 +58,7 @@ pub(crate) struct CollectorView {
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) disk_history: VecDeque<ChartPoint>,
+    pub(crate) decode_reads: VecDeque<crate::domain::DecodeRead>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
@@ -66,6 +71,7 @@ pub(crate) struct CollectorView {
     pub(crate) signals: VecDeque<SignalEvent>,
     pub(crate) request_history: request_history::History,
     pub(crate) operator_history: operator_history::History,
+    pub(crate) session: crate::session::Session,
 }
 
 #[derive(Clone)]
@@ -87,11 +93,17 @@ pub(crate) struct Collector {
     pub(crate) correlation: CorrelationEngine,
     pub(crate) previous: Option<PreviousCounters>,
     pub(crate) previous_llm_cache: Option<CacheCounters>,
+    /// The runtime's cached-token total when mlxtop first saw it, with the
+    /// runtime it belongs to: what was saved before then is not counted.
+    pub(crate) cached_at_start: Option<(String, u64)>,
+    /// When thermal state and power were last read.
+    pub(crate) slow_read_at: Option<Instant>,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) disk_history: VecDeque<ChartPoint>,
+    pub(crate) decode_reads: VecDeque<crate::domain::DecodeRead>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
@@ -102,6 +114,7 @@ pub(crate) struct Collector {
     pub(crate) signals: VecDeque<SignalEvent>,
     pub(crate) request_history: request_history::History,
     pub(crate) operator_history: operator_history::History,
+    pub(crate) session: crate::session::Session,
     pub(crate) history_limit: usize,
     pub(crate) thresholds: Thresholds,
     /// The `omx` section the oMLX endpoint was resolved from.
@@ -194,11 +207,15 @@ impl Collector {
             correlation: CorrelationEngine::default(),
             previous: None,
             previous_llm_cache: None,
+            cached_at_start: None,
+            slow_read_at: None,
+            session: Default::default(),
             current: Sample::default(),
             generation_history: VecDeque::with_capacity(history_limit),
             prefill_history: VecDeque::with_capacity(history_limit),
             cache_history: VecDeque::with_capacity(history_limit),
             disk_history: VecDeque::with_capacity(history_limit),
+            decode_reads: VecDeque::with_capacity(history_limit),
             load_history: VecDeque::with_capacity(history_limit),
             composition_history: VecDeque::with_capacity(history_limit),
             swap_history: VecDeque::with_capacity(history_limit),
@@ -254,7 +271,11 @@ impl Collector {
             ),
         }
         let counters = match self.platform {
-            Platform::MacOs => macos_counters_for_rates(host, self.page_size),
+            // The memory reading already ran vm_stat: one call serves both.
+            Platform::MacOs => sample
+                .vm_counters
+                .take()
+                .unwrap_or_else(|| macos_counters_for_rates(host, self.page_size)),
             Platform::Linux => linux_counters_for_rates(host),
             Platform::Windows => VmCounters::default(),
         };
@@ -316,7 +337,20 @@ impl Collector {
         });
 
         match self.platform {
-            Platform::MacOs => sample_macos_gpu_thermal(host, &mut sample),
+            Platform::MacOs => {
+                // Thermal state and power change over seconds: read them
+                // every few polls and keep the last reading between.
+                let slow = self
+                    .slow_read_at
+                    .is_none_or(|at| now.duration_since(at) >= SLOW_READ_INTERVAL);
+                sample_macos_gpu_thermal(host, &mut sample, slow);
+                if slow {
+                    self.slow_read_at = Some(now);
+                } else {
+                    sample.thermal = self.current.thermal.clone();
+                    sample.system_power_mw = self.current.system_power_mw;
+                }
+            }
             Platform::Linux => sample_linux_gpu_thermal(host, &mut sample, &self.current.gpus),
             Platform::Windows => sample_windows_gpu_thermal(host, &mut sample, &self.current.gpus),
         }
@@ -491,6 +525,17 @@ impl Collector {
             }
         });
         sample.llm_cache_efficiency = llm_stats.and_then(|stats| stats.cache_efficiency);
+        sample.llm_total_prompt_tokens = llm_stats.and_then(|stats| stats.total_prompt_tokens);
+        sample.llm_total_cached_tokens = llm_stats
+            .and_then(|stats| stats.total_cached_tokens)
+            .filter(|cached| {
+                sample
+                    .llm_total_prompt_tokens
+                    .is_some_and(|prompt| *cached <= prompt)
+            });
+        sample.llm_watched_cached_tokens = sample
+            .llm_total_cached_tokens
+            .map(|cached| watched(&mut self.cached_at_start, &sample.llm_provider, cached));
         sample.llm_cache_interval_efficiency =
             cache_interval_efficiency(&mut self.previous_llm_cache, llm_stats, live_is_stale)
                 .or_else(|| {
@@ -499,6 +544,9 @@ impl Collector {
                         .flatten()
                 });
         sample.llm_prefix_hit_rate = llm_stats.and_then(|stats| stats.prefix_hit_rate);
+        sample.llm_draft_acceptance = llm_stats
+            .and_then(|stats| stats.draft_acceptance)
+            .filter(|share| (0.0..=1.0).contains(share));
         sample.ssd_cache = llm_stats.and_then(|stats| stats.ssd_cache);
         sample.disk = disk_activity(
             sample.process_memory.as_ref(),
@@ -506,6 +554,7 @@ impl Collector {
             sample.ssd_cache,
             self.current.ssd_cache,
         );
+        sample.disk.weights = weight_reads(&sample);
         sample.llm_active_requests = llm_stats.and_then(|stats| stats.active_requests);
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
         sample.llm_model_memory = llm_stats.and_then(|stats| stats.model_memory);
@@ -556,12 +605,30 @@ impl Collector {
             self.history_limit,
             self.thresholds,
         );
+        // Weight reads are blue, prompt-cache traffic cyan.
         push_history_with_tone(
             &mut self.disk_history,
             sample.disk.rate(),
-            Tone::Cyan,
+            if sample.disk.weights > 0 {
+                Tone::Blue
+            } else {
+                Tone::Cyan
+            },
             self.history_limit,
         );
+        if let Some(speed) = sample
+            .llm_generation_tps
+            .filter(|speed| speed.is_finite() && *speed > 0.0)
+            .filter(|_| sample.disk.read.is_some())
+        {
+            if self.decode_reads.len() >= self.history_limit {
+                self.decode_reads.pop_front();
+            }
+            self.decode_reads.push_back(crate::domain::DecodeRead {
+                speed,
+                from_disk: sample.disk.weights > 0,
+            });
+        }
         // Generation has no threshold either: a sample is its usual speed
         // or, marked below, unusually slow.
         // Each sample keeps the usual speed for the work it was doing, so
@@ -574,6 +641,7 @@ impl Collector {
             };
             point.usual = point
                 .value
+                .filter(|_| sample.correlation.phase == crate::domain::Phase::Generation)
                 .and(sample.correlation.usual_speed)
                 .map(|(usual, _)| (usual * 10.0).round() as u64);
         }
@@ -626,13 +694,15 @@ impl Collector {
 
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
+        self.session.observe(&sample);
         // What generation was doing, so a log can be replayed against it.
-        let generating = crate::analysis::Work::from_sample(&sample);
+        let generating = crate::analysis::CorrelationObservation::from_sample(&sample);
+        crate::recording::write(&sample);
         diagnostics_log(
             "INFO",
             "sample",
             format!(
-                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={}",
+                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={} writers={} disk_read={} disk_write={} disk_weights={} ssd_loads={} ssd_saves={}",
                 sample_started.elapsed().as_millis(),
                 log_field(&sample.llm_status),
                 log_field(&sample.llm_provider),
@@ -654,21 +724,35 @@ impl Collector {
                 sample.swap_out,
                 sample.compress,
                 sample.decompress,
-                generating.requests,
+                generating.generating,
                 log_optional_u64(generating.context),
+                if generating.writers.is_empty() {
+                    "-".to_owned()
+                } else {
+                    log_field(&generating.writers.join(","))
+                },
+                log_optional_u64(sample.disk.read),
+                log_optional_u64(sample.disk.write),
+                sample.disk.weights,
+                sample.disk.loads,
+                sample.disk.saves,
             ),
         );
         self.current = sample.clone();
         sample
     }
 
-    /// Draws what is unusual where it happened, and nowhere else: an
-    /// unusually slow sample takes the anomaly colour on the generation
-    /// chart, and an unusual reading takes it on its own chart, slowdown or
-    /// not. A slowdown is known at its third slow sample, so its reason's
-    /// two samples before that are marked then.
+    /// Draws a slowdown or stall where it happened: its samples take the
+    /// anomaly colour on the generation chart, and what was unusual beside
+    /// it on that signal's own chart. A slowdown is known at its third slow
+    /// sample, so the two samples before that are marked then.
     pub(crate) fn mark_unusual(&mut self, sample: &Sample) {
         let insight = &sample.correlation;
+        // Colour means impact: nothing is painted while the model keeps
+        // its speed, however unusual a reading is.
+        if !insight.is_material_drop() {
+            return;
+        }
         let span = insight.marked_samples();
         let mut charts: Vec<Chart> = insight
             .unusual
@@ -677,7 +761,10 @@ impl Collector {
             .chain(crate::drop_marks::linked(insight))
             .collect();
         if insight.slow {
-            charts.push(Chart::Generation);
+            charts.push(match insight.phase {
+                crate::domain::Phase::Generation => Chart::Generation,
+                crate::domain::Phase::Prefill => Chart::Prefill,
+            });
         }
         for chart in charts {
             let history = match chart {
@@ -709,6 +796,8 @@ impl Collector {
             prefill_history: self.prefill_history.clone(),
             cache_history: self.cache_history.clone(),
             disk_history: self.disk_history.clone(),
+            decode_reads: self.decode_reads.clone(),
+            session: self.session.clone(),
             load_history: self.load_history.clone(),
             composition_history: self.composition_history.clone(),
             swap_history: self.swap_history.clone(),
@@ -824,17 +913,18 @@ impl Collector {
                         .iter()
                         .any(|now| now.id == request.id && now.provider == request.provider)
             }) {
-                add(
-                    "DONE",
-                    match done.output.filter(|out| *out > 0) {
-                        Some(out) => format!("{} · {} out", done.id, compact_tokens(out)),
-                        None if done.prefilled.is_some() => {
-                            format!("{} · ended while prefilling", done.id)
-                        }
-                        None => format!("{} · no output", done.id),
-                    },
-                    Tone::Cyan,
-                );
+                let mut summary = match done.output.filter(|out| *out > 0) {
+                    Some(out) => format!("{} · {} out", done.id, compact_tokens(out)),
+                    None if done.prefilled.is_some() => {
+                        format!("{} · ended while prefilling", done.id)
+                    }
+                    None => format!("{} · no output", done.id),
+                };
+                // Where its time went: what to shorten to answer sooner.
+                if let Some(timing) = self.request_history.timing(done) {
+                    summary.push_str(&format!(" · {}", timing_label(&timing)));
+                }
+                add("DONE", summary, Tone::Cyan);
             }
             let lists_requests = lists_requests || !previous.llm_requests.is_empty();
             if (previous_active == 0) != (active == 0) && !lists_requests {
@@ -954,8 +1044,11 @@ impl Collector {
                     add(
                         "RECOVERED",
                         format!(
-                            "generation back to {:.1} tok/s after {:.0}s · low {:.1} tok/s",
-                            end.rate, end.seconds, end.low
+                            "{} back to {:.1} tok/s after {:.0}s · low {:.1} tok/s",
+                            sample.correlation.phase.word(),
+                            end.rate,
+                            end.seconds,
+                            end.low
                         ),
                         Tone::Green,
                     );
@@ -1086,6 +1179,8 @@ impl Collector {
         self.prefill_history.clear();
         self.cache_history.clear();
         self.disk_history.clear();
+        self.decode_reads.clear();
+        self.session = Default::default();
         self.load_history.clear();
         self.composition_history.clear();
         self.swap_history.clear();
@@ -1166,6 +1261,65 @@ pub(crate) fn disk_activity(
         loads,
         saves,
         evictions,
+        weights: 0,
+    }
+}
+
+/// Reads the runtime made while decoding, with no prompt being prefilled and
+/// no prompt-cache block loaded, are its weights: an engine streaming MoE
+/// experts from disk. Prompt work reads its cache; that is not counted.
+pub(crate) fn weight_reads(sample: &Sample) -> u64 {
+    let disk = sample.disk;
+    let decoding = sample.llm_generation_tps.is_some_and(|speed| speed > 0.0);
+    let prefilling = sample.llm_prefill_tokens_expected.is_some()
+        || sample
+            .llm_requests
+            .iter()
+            .any(|request| request.prefilled.is_some() && !request.completed);
+    match disk.read {
+        Some(read)
+            if decoding
+                && !prefilling
+                && disk.loads == 0
+                && read >= crate::analysis::DISK_ACTIVE_RATE =>
+        {
+            read
+        }
+        _ => 0,
+    }
+}
+
+/// A request's time in order: `queued 2s → prompt 18s → answer 12s`. Parts
+/// it spent no time in are left out.
+pub(crate) fn timing_label(timing: &crate::request_history::Timing) -> String {
+    let seconds = |value: f64| {
+        if value < 10.0 {
+            format!("{value:.1}s")
+        } else {
+            crate::formatting::duration_label(value)
+        }
+    };
+    [
+        ("queued", timing.queued),
+        ("prompt", timing.prefill),
+        ("answer", timing.decode),
+    ]
+    .into_iter()
+    .filter(|(_, value)| *value > 0.0)
+    .map(|(name, value)| format!("{name} {}", seconds(value)))
+    .collect::<Vec<_>>()
+    .join(" → ")
+}
+
+/// Cached tokens since mlxtop first saw `runtime`'s total. A new runtime,
+/// or one restarted with its counters back at zero, starts the count again.
+pub(crate) fn watched(start: &mut Option<(String, u64)>, runtime: &str, cached: u64) -> u64 {
+    match start {
+        Some((seen, first)) if seen == runtime && *first <= cached => cached - *first,
+        _ => {
+            *start = Some((runtime.to_owned(), cached));
+            0
+        }
     }
 }
 

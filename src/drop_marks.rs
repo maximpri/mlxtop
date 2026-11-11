@@ -19,8 +19,12 @@ pub(crate) fn chart_of(cause: CorrelationCause) -> Option<Chart> {
         CorrelationCause::DiskIo => Chart::Cache,
         CorrelationCause::ConcurrentPrefill => Chart::Prefill,
         CorrelationCause::Queueing => Chart::Queue,
-        // The runtime's CPU is a figure in the header, not a chart.
-        CorrelationCause::Cpu | CorrelationCause::Stall | CorrelationCause::None => return None,
+        // The runtime's CPU is a figure in the header, and draft acceptance
+        // one on the generation chart's edge: neither has a chart of its own.
+        CorrelationCause::Cpu
+        | CorrelationCause::DraftAcceptance
+        | CorrelationCause::Stall
+        | CorrelationCause::None => return None,
     })
 }
 
@@ -30,13 +34,10 @@ pub(crate) fn linked(insight: &CorrelationInsight) -> Option<Chart> {
     if !insight.is_material_drop() || insight.lead.is_empty() {
         return None;
     }
-    let lead = insight.lead.as_str();
     match insight.cause {
-        CorrelationCause::Stall if lead.contains("disk ") || lead.contains("SSD cache") => {
-            Some(Chart::Cache)
-        }
-        CorrelationCause::Stall if lead.contains("paging") => Some(Chart::Paging),
-        CorrelationCause::Stall if lead.contains("memory pressure") => Some(Chart::Memory),
+        // A stall names a host reading only when it ran differently while
+        // the model was fast; readings as usual are not marked.
+        CorrelationCause::Stall => insight.unusual.first().copied().and_then(chart_of),
         cause => chart_of(cause),
     }
 }
@@ -50,10 +51,10 @@ pub(crate) fn tag(insight: &CorrelationInsight, room: usize) -> String {
         .filter(|_| !stall)
         .map(|percent| format!(" ↓{:.0}%", percent.abs()))
         .unwrap_or_default();
-    let (verb, short) = if stall {
-        ("stalled GEN", " ▼ STALL ")
-    } else {
-        ("slowed GEN", " ▼ GEN ")
+    let (verb, short) = match (stall, insight.phase) {
+        (true, _) => ("stalled GEN", " ▼ STALL "),
+        (false, crate::domain::Phase::Generation) => ("slowed GEN", " ▼ GEN "),
+        (false, crate::domain::Phase::Prefill) => ("slowed PREFILL", " ▼ PREFILL "),
     };
     [
         format!(" ▲ {verb}{drop} "),

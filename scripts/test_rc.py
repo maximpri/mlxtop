@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 import rc
@@ -113,6 +114,14 @@ class PrivateRcTests(unittest.TestCase):
             self.assertEqual(rc.main(["run", "omlx-test", "--once", "--dry-run"]), 0)
         build.assert_not_called()
         run.assert_not_called()
+
+    def test_run_passes_a_recording_path_quoted(self):
+        output = io.StringIO()
+        with patch.object(rc.subprocess, "run") as run, redirect_stdout(output):
+            self.assertEqual(rc.main(["run", "omlx-test", "--record", "~/a b.jsonl", "--dry-run"]), 0)
+        run.assert_not_called()
+        self.assertIn("--record", output.getvalue())
+        self.assertIn("a b.jsonl", output.getvalue())
 
 
 if __name__ == "__main__":

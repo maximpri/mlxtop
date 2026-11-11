@@ -32,14 +32,16 @@ changed when the model slowed.
 - **15 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
   Ollama, LM Studio, KoboldCpp, TensorFold, Strata and more, detected
   automatically.
-- **Local and read-only:** no sudo, no account, no analytics. It never sends
-  prompts or touches your models or runtime settings.
+- **Local and read-only:** no sudo, no account, no usage tracking. It never
+  sends prompts or touches your models or runtime settings.
 
-**What's new in 3.3.0:** mlxtop finds slowdowns by anomaly detection,
-judging speed against earlier work of the same size, and names what else was
-unusual at the time: paging, memory, heat, disk or the queue. The generation
-chart draws its usual speed, and stalls are seen as they happen. 3.2 added
-Strata and TensorFold and dashboard panels that resize with your terminal.
+**What's new in 3.3.0:** mlxtop finds slow answers and slow prompt reads
+by judging speed against earlier work of the same size, names what else was
+happening (paging, memory, heat, disk, the queue, draft acceptance) and says
+what to change. Memory shows headroom against the GPU limit, the KV cache
+its hit rate and the prefill time it saved, and `u` sums up a session: what
+each cause cost and where requests' time went. `--record` and `mlxtop
+replay` check the rules against real sessions.
 [Release notes →](CHANGELOG.md)
 
 ## Install
@@ -158,7 +160,7 @@ that file by hand:
 ```json
 {
   "interval": 2,
-  "omx": { "host": "127.0.0.1", "port": 8080 }
+  "omx": { "host": "127.0.0.1", "port": 8000 }
 }
 ```
 
@@ -177,8 +179,8 @@ Every field and default is listed in the
 ## Privacy
 
 mlxtop reads system counters, process information and your runtime's local
-APIs. It has no analytics, doesn't upload anything, and by default sends
-provider credentials only to endpoints on your own machine. Its local
+APIs. It doesn't track how you use it, doesn't upload anything, and by
+default sends provider credentials only to endpoints on your own machine. Its local
 diagnostic log never contains prompts, model output or API keys. See
 [data sources and privacy](docs/USER_GUIDE.md#data-sources-and-privacy) and the
 [security policy](SECURITY.md).

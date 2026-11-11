@@ -24,6 +24,10 @@ struct Counters {
     decode_ms: Option<f64>,
     prefilled: u64,
     prefill_ms: f64,
+    /// Draft tokens proposed and accepted (speculative decoding), when the
+    /// model has a draft.
+    drafted: Option<u64>,
+    accepted: Option<u64>,
 }
 
 impl Counters {
@@ -42,6 +46,8 @@ impl Counters {
             prefill_ms: json_value(status, &["metrics", "prefill_wall_ms"])?
                 .as_f64()
                 .filter(|ms| ms.is_finite() && *ms >= 0.0)?,
+            drafted: counter(status, &["metrics", "drafted_tokens"]),
+            accepted: counter(status, &["metrics", "accepted_draft_tokens"]),
         })
     }
 }
@@ -252,6 +258,18 @@ impl SplashHistory {
             .map_or(Duration::ZERO, |ms| Duration::from_secs_f64(ms / 1000.0));
         let captured = now.checked_sub(age).unwrap_or(now);
         let counters = Counters::read(status, captured);
+        // The share of draft tokens accepted since the last capture: what
+        // speculative decoding is earning now, not over the engine's life.
+        let draft_acceptance = self
+            .previous
+            .as_ref()
+            .zip(counters.as_ref())
+            .filter(|(before, now)| before.engine == now.engine)
+            .and_then(|(before, now)| {
+                let drafted = now.drafted?.checked_sub(before.drafted?)?;
+                let accepted = now.accepted?.checked_sub(before.accepted?)?;
+                (drafted > 0 && accepted <= drafted).then(|| accepted as f64 / drafted as f64)
+            });
         let rates = self.rates(counters.clone(), prefilling > 0, now);
 
         let mut result = LlmTelemetry {
@@ -269,6 +287,7 @@ impl SplashHistory {
             model_memory: counter(status, &["memory_actual", "current_bytes"]),
             model_memory_max: counter(status, &["memory_governor", "limit_bytes"])
                 .filter(|limit| *limit > 0),
+            draft_acceptance,
             ..LlmTelemetry::default()
         };
 

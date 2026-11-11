@@ -43,7 +43,7 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 
 - Overview answers: what is running, is it healthy, what is limiting it, and
   what should the operator inspect? Host-critical resources come first:
-  memory (pressure and composition), compression and paging, then prompt size,
+  memory (pressure and composition), the runtime's cache and paging, then prompt size,
   which drives KV-cache memory. Throughput is the outcome and stays compact.
 - Charts show trends and comparisons. Keep their primary reading, units and
   freshness adjacent. Keep supporting explanations shorter than the chart.
@@ -63,22 +63,39 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   Show each fact once. The runtime card's title repeats runtime prompt counters
   only when they differ from the request shown in prompt load.
   Every row shares one grid of three equal columns, so panel edges line up.
-  The host row takes all remaining height (at least six rows): memory,
-  compression and paging on macOS; on Linux, which has no compressor counters,
-  memory spans two columns beside paging. The memory reading slot shows
-  PRESSURE; bytes and resident percentage follow, then a composition bar
-  (wired, app, compressed, cache, free) with the GPU wired limit marked when
-  known, and a history of that composition over a pressure ribbon.
+  The host row takes all remaining height (at least six rows): memory, cache
+  and paging. The memory reading slot shows PRESSURE. Its body is headroom,
+  never a resident percentage, which reads as an alarm on a machine whose
+  cache is full and whose pressure is normal: a GPU meter of wired memory
+  against the GPU wired limit, with what is left under it; a RAM meter of
+  what is in use (wired, app, compressed) with file cache as its last
+  segment, and what is left (free plus cache); and a trace of what was left
+  over time, each sample in its pressure colour. Short panels keep the two
+  meters. Without composition counters it is an occupancy area.
   Compression charts compress + decompress traffic (the compressor's size is
   in the memory legend, not repeated as a share of RAM); paging includes the
   swap capacity bar. Prompt history spans two
   columns of the next row (about 28% of the height, nine to fourteen rows; one
-  line until the first request); Cache and Queue stack in the third. Each
-  prompt bar carries its cached share as a green segment, so reuse per request
-  is read there; the cache panel (`cache I/O`) plots the runtime's own disk
-  reads and writes, with the session's reuse above and the SSD cache's fill
-  as a capacity bar along the bottom, like swap. Without OS disk readings
-  (remote or non-macOS runtimes) it plots each interval's reuse. Generation,
+  line until the first request); compression and queue stack in the third, and
+  on Linux, which has no compressor counters, the queue takes it alone. Each
+  prompt bar carries its cached share as a green segment. The KV cache panel
+  (`KV cache / model I/O`) shows what the runtime's disk work costs and saves, never raw
+  disk speeds. Reads made while decoding, with no prompt prefilling and no
+  prompt-cache block loaded, are weights (an engine streaming MoE experts):
+  those samples are blue, and a blue `weights` bar gives the share of
+  decoding that read from disk with the median decode speed then and from
+  memory. Its title is the KV cache hit rate, the share of the session's
+  prompt tokens served from cache, with the prefill time that saved at the
+  median measured prefill speed. Where the cache tier counts its own hits, one
+  bar splits them: green from memory, cyan loaded back from the SSD (never
+  thinner than a cell when it served any), dim computed; a second bar is the
+  last prompt's hit rate. The runtime's disk traffic is charted beneath (a
+  sparkline when short, never a sentence). An external KV cache is meant to
+  fill, so the SSD row gives its size and what it did this session (blocks
+  loaded back, saved, evicted), not a fill bar, and the bottom edge says what
+  the SSD tier did last: loading, saving or evicting prefixes, or idle.
+  Without OS disk readings (remote or non-macOS runtimes) it plots each
+  interval's reuse. Generation,
   prefill and GPU take one column each in a seven- to ten-row row (four on
   short terminals, where readings stay in the titles). Journal grows from five
   to ten rows on tall terminals; everything else goes to the host row.
@@ -133,7 +150,7 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Role | Treatment |
 | --- | --- |
 | Healthy or favorable measured condition | Green plus a label or value |
-| Condition worth inspecting | Yellow plus an explicit reason |
+| Condition worth inspecting | Orange plus an explicit reason |
 | Critical measured condition | Red plus an explicit reason |
 | Chart identity | Existing metric color; a title color alone is not severity |
 | Live request in prompt history | Cyan plus LIVE |
@@ -142,11 +159,11 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Prompt size changes | Muted numeric comparison; never warning markers on bars |
 | Resident RAM | Bytes and percentage; the PRESSURE label and the history's ribbon carry OS pressure severity |
 | RAM composition | Wired blue, app cyan, compressed and cache two greys of different lightness, free empty; softened toward the panel in the history |
-| GPU utilization | Green/yellow/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
+| GPU utilization | Green/orange/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
 | Throughput | Green; a speed has no threshold and no grade |
-| Unusual samples | Magenta, on every time chart, and used for nothing else: an unusually slow sample on the generation chart, and an unusual reading of the host on its own chart, slowdown or not |
-| Cache reuse | Green from 50%, yellow from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
-| Queue waiting series | Yellow only while requests wait in view; muted at zero |
+| Impact | Yellow, on every time chart, and used for nothing else: the samples of a slowdown or stall on the generation chart, and the readings unusual beside it on their own charts. People react to colour, so a reading that is unusual while the model keeps its speed is not painted |
+| Cache reuse | Green from 50%, orange from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
+| Queue waiting series | Orange only while requests wait in view; muted at zero |
 | Supporting text, unknown data, historical advice | Muted |
 
 Never require color alone to interpret severity, freshness or selection. Use
@@ -250,31 +267,34 @@ colors in time-series history instead of recoloring old samples on refresh.
   latest is for (`tok/s · ┄ usual 30.0 for 2 requests · 131.2k context`). A screen that looks the same
   healthy as it did before the detector existed gives no reason to trust
   it.
-- Mark each unusual sample where it is, when it happens: an unusually slow
-  sample on the generation chart at once, without waiting for three in a
-  row, and an unusual reading of the host (thermal, pressure, paging, disk,
-  compression, memory, runtime CPU, idle GPU) on its own chart while
-  generation runs at its usual speed. The workload (requests, prompts, the
-  queue) is not marked on its own: it changes because someone asked. A reading that stays unusual for
+- Performance is the prompt read as well as the answer written. With no
+  answer being written, prefill speed is judged by the same rule against
+  earlier prefills of similar prompts, with its own usual values, and a slow
+  prefill is drawn on the prefill chart as a slow answer is on generation's.
+- Colour means impact. The app exists to find what limits the model, so
+  nothing is painted for being unusual alone: an unusual reading of the host
+  (thermal, pressure, paging, disk, compression, memory, runtime CPU, idle
+  GPU) while generation keeps its usual speed is listed in Diagnostics and
+  keeps its colour. The workload (requests, prompts, the queue) is never a
+  finding on its own: it changes because someone asked. A reading that stays unusual for
   30 s with speed still usual becomes its usual value; one that comes and
   goes widens its usual range. None of this is journaled: the Journal is
-  for slowdowns. On one server's log this marks about one sample every
-  80 s.
+  for slowdowns.
 - Draw a slowdown with the same colour, on the samples it concerns, and
-  nowhere else. Its samples are magenta on the generation chart, and so are
+  nowhere else. Its samples are yellow on the generation chart, and so are
   the samples of each signal that was unusual with it on that signal's
   chart: the two line up by eye. No chart is tinted behind its marks, and a
   chart whose signal was usual is untouched. While a slowdown lasts, the
-  usual-speed line turns magenta (the gap under it is the drop) and the
+  usual-speed line turns yellow (the gap under it is the drop) and the
   chart names the reason
   under its bars (`▼ paging 96.0 MiB/s (usual 2.0 MiB/s)`, or
-  `▼ nothing else unusual`). The panel that shows the reason takes a magenta
+  `▼ nothing else unusual`). The panel that shows the reason takes a yellow
   border and says what it did at the right of its bottom edge:
   `▲ slowed GEN ↓50%` (`▲ stalled GEN`), shortened to `▼ GEN` on a narrow
   panel. A bottom summary that would run into the tag gives way to it.
   The assessment says how long a slowdown has lasted from 5 s.
 - Anomalies live where their signal is already shown; they get no view of
-  their own. A reading with no chart turns magenta in place with its usual
+  their own. A reading with no chart turns yellow in place with its usual
   value: the header's `CPU 380% (usual 95%)` and its `THERMAL` note, the
   queue's active count and the samples of its history. An expanded
   generation chart and Diagnostics say what a slowdown is judged against

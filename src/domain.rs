@@ -5,7 +5,7 @@ use crate::{gpu, process_memory};
 use std::time::{Duration, SystemTime};
 pub(crate) const MIB: u64 = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Tone {
     Green,
     Yellow,
@@ -17,7 +17,7 @@ pub(crate) enum Tone {
     Unusual,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TelemetrySource {
     #[default]
     None,
@@ -145,7 +145,7 @@ pub(crate) struct Consumer {
     pub(crate) processes: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LlmProcess {
     pub(crate) pid: u32,
     pub(crate) name: String,
@@ -196,7 +196,7 @@ pub(crate) struct LlmLogStats {
 /// monitor therefore never invents these values from RSS or GPU utilization;
 /// they are populated only from a provider endpoint that can observe the
 /// serving process directly.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MlxTelemetry {
     pub(crate) version: Option<String>,
     pub(crate) active_memory: Option<u64>,
@@ -211,7 +211,7 @@ pub(crate) struct MlxTelemetry {
     pub(crate) process_footprint: Option<u64>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MetalTelemetry {
     pub(crate) device_name: Option<String>,
     pub(crate) architecture: Option<String>,
@@ -250,6 +250,8 @@ pub(crate) enum CorrelationCause {
     Cpu,
     /// The GPU unusually idle while an answer is written: it is waiting.
     GpuIdle,
+    /// Speculative decoding accepting unusually few draft tokens.
+    DraftAcceptance,
 }
 
 impl CorrelationCause {
@@ -268,6 +270,7 @@ impl CorrelationCause {
             Self::DiskIo => "runtime disk I/O",
             Self::Cpu => "runtime CPU",
             Self::GpuIdle => "GPU underused",
+            Self::DraftAcceptance => "draft acceptance",
         }
     }
 
@@ -281,7 +284,8 @@ impl CorrelationCause {
             | Self::ModelMemory
             | Self::DiskIo
             | Self::Cpu
-            | Self::GpuIdle => Tone::Yellow,
+            | Self::GpuIdle
+            | Self::DraftAcceptance => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -293,8 +297,37 @@ pub(crate) struct CorrelationKey {
     pub(crate) cause: CorrelationCause,
 }
 
+/// Which part of a request's work a finding is about: reading its prompt, or
+/// writing its answer. Both are the model's performance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Phase {
+    #[default]
+    Generation,
+    Prefill,
+}
+
+impl Phase {
+    /// `generation` or `prefill`, as a sentence says it.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Generation => "generation",
+            Self::Prefill => "prefill",
+        }
+    }
+
+    /// `GEN` or `PREFILL`, as a label says it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Generation => "GEN",
+            Self::Prefill => "PREFILL",
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CorrelationInsight {
+    /// The work this finding is about.
+    pub(crate) phase: Phase,
     pub(crate) direction: ThroughputDirection,
     pub(crate) cause: CorrelationCause,
     pub(crate) summary: String,
@@ -330,7 +363,7 @@ pub(crate) struct CorrelationInsight {
 
 /// One slowdown, from the sample where speed first fell to now. The speed
 /// it fell from stays fixed, so a long slowdown is not mistaken for normal.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DropEpisode {
     /// Normal speed before the drop, in tok/s.
     pub(crate) reference: f64,
@@ -379,6 +412,21 @@ impl CorrelationInsight {
         self.notes.get(index).map(String::as_str)
     }
 
+    /// Whether this finding is about the speed `metric` charts.
+    pub(crate) fn concerns(&self, metric: ChartMetric) -> bool {
+        matches!(
+            (self.phase, metric),
+            (Phase::Generation, ChartMetric::Generation) | (Phase::Prefill, ChartMetric::Prefill)
+        )
+    }
+
+    /// What `cause`'s signal is doing while the model is slowed or stalled.
+    /// Colour means impact: a reading that is unusual while the model keeps
+    /// its speed is said in Diagnostics, not painted.
+    pub(crate) fn impact(&self, cause: CorrelationCause) -> Option<&str> {
+        self.note(cause).filter(|_| self.is_material_drop())
+    }
+
     /// Samples this finding colours, newest last. A slowdown is known at
     /// its third slow sample, so the two before it are coloured then.
     pub(crate) fn marked_samples(&self) -> usize {
@@ -420,7 +468,7 @@ impl CorrelationInsight {
 
 /// A runtime's on-disk prompt cache (oMLX keeps KV blocks on an SSD): its
 /// fill and its lifetime counters, which the collector turns into activity.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SsdCache {
     pub(crate) used: u64,
     pub(crate) capacity: u64,
@@ -428,6 +476,10 @@ pub(crate) struct SsdCache {
     pub(crate) loads: u64,
     pub(crate) saves: u64,
     pub(crate) evictions: u64,
+    /// Prompt tokens served from cached KV this session, and the part of
+    /// them loaded back from the SSD rather than held in memory.
+    pub(crate) hit_tokens: Option<u64>,
+    pub(crate) disk_hit_tokens: Option<u64>,
 }
 
 impl SsdCache {
@@ -439,13 +491,24 @@ impl SsdCache {
 
 /// What the runtime did with its disk between two samples: storage bytes per
 /// second from the OS, and SSD-cache block counts from the runtime.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DiskActivity {
     pub(crate) read: Option<u64>,
     pub(crate) write: Option<u64>,
     pub(crate) loads: u64,
     pub(crate) saves: u64,
     pub(crate) evictions: u64,
+    /// The part of `read` that was weights: what the runtime read while it
+    /// decoded, with no prompt prefilling and no prompt-cache block loaded.
+    /// An engine that streams MoE experts from disk reads here every token.
+    pub(crate) weights: u64,
+}
+
+/// One decoding sample: its speed, and whether weights came from disk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DecodeRead {
+    pub(crate) speed: f64,
+    pub(crate) from_disk: bool,
 }
 
 impl DiskActivity {
@@ -460,6 +523,9 @@ impl DiskActivity {
 #[derive(Clone, Default)]
 pub(crate) struct LlmTelemetry {
     pub(crate) ssd_cache: Option<SsdCache>,
+    /// The share of draft tokens accepted since the last poll (speculative
+    /// decoding), 0–1.
+    pub(crate) draft_acceptance: Option<f64>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -493,8 +559,13 @@ pub(crate) struct LlmTelemetry {
     pub(crate) mlx: MlxTelemetry,
 }
 
-#[derive(Clone)]
+/// One poll of the machine and the runtime. It is written to a recording
+/// as it is and read back for replay; what is derived from it (the
+/// finding, the runtime report, process readings) is not recorded.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct Sample {
+    #[serde(skip)]
     pub(crate) runtime: crate::runtime_diagnostics::RuntimeReport,
     pub(crate) updated: String,
     /// Local offset from UTC in seconds, read alongside `updated`. Request
@@ -538,8 +609,15 @@ pub(crate) struct Sample {
     pub(crate) metal: MetalTelemetry,
     pub(crate) mlx: MlxTelemetry,
     pub(crate) thermal: String,
+    /// Power the whole machine draws, in milliwatts, where macOS reports it.
+    pub(crate) system_power_mw: Option<u64>,
+    /// The vm_stat counters the memory reading parsed, handed on to the
+    /// rate calculation so one call serves both. Never recorded.
+    #[serde(skip)]
+    pub(crate) vm_counters: Option<VmCounters>,
     pub(crate) llm_count: u32,
     pub(crate) llm_rss: u64,
+    #[serde(skip)]
     pub(crate) process_memory: Option<process_memory::Reading>,
     pub(crate) process_memory_growth: Option<i64>,
     /// The runtime's storage traffic and SSD-cache use since the last sample.
@@ -564,8 +642,19 @@ pub(crate) struct Sample {
     pub(crate) llm_prompt_tokens: Option<u64>,
     pub(crate) llm_requests: Vec<RequestUsage>,
     pub(crate) llm_cache_efficiency: Option<f64>,
+    /// The runtime's own session totals: every prompt token it was sent and
+    /// how many of them came from its cache instead of being computed.
+    pub(crate) llm_total_prompt_tokens: Option<u64>,
+    pub(crate) llm_total_cached_tokens: Option<u64>,
+    /// Of those, the prompt tokens served from cache since mlxtop started
+    /// watching: what the prefill time it saved is measured over.
+    pub(crate) llm_watched_cached_tokens: Option<u64>,
     pub(crate) llm_cache_interval_efficiency: Option<f64>,
     pub(crate) llm_prefix_hit_rate: Option<f64>,
+    /// The share of draft tokens accepted since the last poll, 0–1: what
+    /// speculative decoding earned. Low acceptance is slow decoding on a
+    /// healthy machine.
+    pub(crate) llm_draft_acceptance: Option<f64>,
     pub(crate) llm_active_requests: Option<u64>,
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
@@ -578,6 +667,7 @@ pub(crate) struct Sample {
     /// The engine a runtime serves through, when not its own: oMLX's Splash.
     pub(crate) llm_engine: Option<String>,
     pub(crate) llm_remote: bool,
+    #[serde(skip)]
     pub(crate) correlation: CorrelationInsight,
     pub(crate) llm_top: String,
     pub(crate) llm_pid: u32,
@@ -678,6 +768,8 @@ impl Default for Sample {
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
             thermal: "unavailable".into(),
+            system_power_mw: None,
+            vm_counters: None,
             llm_count: 0,
             llm_rss: 0,
             process_memory: None,
@@ -702,8 +794,12 @@ impl Default for Sample {
             llm_prompt_tokens: None,
             llm_requests: Vec::new(),
             llm_cache_efficiency: None,
+            llm_total_prompt_tokens: None,
+            llm_total_cached_tokens: None,
+            llm_watched_cached_tokens: None,
             llm_cache_interval_efficiency: None,
             llm_prefix_hit_rate: None,
+            llm_draft_acceptance: None,
             llm_active_requests: None,
             llm_waiting_requests: None,
             llm_model_memory: None,
@@ -730,7 +826,7 @@ impl Default for Sample {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct VmCounters {
     pub(crate) free: Option<u64>,
     pub(crate) speculative: Option<u64>,
@@ -749,7 +845,7 @@ pub(crate) struct VmCounters {
     pub(crate) reactivations: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RequestUsage {
     pub provider: String,
     pub model: String,

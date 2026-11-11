@@ -19,6 +19,30 @@
   Judged against similar requests, 3.5% were slow instead of 10.3%. Work not
   seen before is learned for eight samples, never judged against different
   work.
+- **A slow prefill is found like a slow answer.** While no answer is being
+  written, the speed prompts are read at is judged by the same rule,
+  against earlier prefills of similar prompts, with usual values of its own:
+  `PREFILL ↓61% (180.0→70.0 tok/s) · paging …`. Its samples are marked on
+  the prefill chart, the panel behind it is tagged `slowed PREFILL`, and
+  the headline reads `Prefill slowed`. Beside an answer being written, a
+  prefill stays a reason, not a subject. On one server's log (2,607 prefill
+  samples in 235 prefills) the rule found no slowdown.
+- **Advice names the change and the reading behind it**: `Wired memory is
+  31.0 GiB of the 32.0 GiB GPU limit: raise it (sudo sysctl
+  iogpu.wired_limit_mb=…) or shorten the context`, `The model no longer
+  fits beside everything else (2.0 GiB of RAM left)`, `macOS is limiting
+  speed for heat at 92 W`. With nothing on the machine to explain a
+  slowdown, the advice says so and points at the text, the draft model or
+  the runtime.
+- **Speculative decoding's draft acceptance is measured.** With Splash, the
+  share of draft tokens accepted since the last poll is read, shown on the
+  generation chart's edge (`draft 72%`), and named as a slowdown's reason
+  when it falls: the machine is then not the limit. oMLX keeps it private.
+- **A request that starts or ends between two polls is not judged.** Its
+  tokens are divided over an interval it wrote for only part of, so its
+  speed reads low: a 73-token reply at 130 tok/s read 76 tok/s and was
+  marked unusual with nothing else unusual beside it. Only samples with the
+  same requests writing at both ends of the interval are judged or learned.
 - **The reason is what else is unusual at the same time**, said beside its
   usual value: `paging 96.0 MiB/s (usual 2.0 MiB/s)`. Reasons are paging,
   compression, memory pressure, thermal limiting, disk and SSD-cache work, a
@@ -35,6 +59,15 @@
 - **Disk-cache stalls are named.** mlxtop reads the runtime's own storage
   traffic and oMLX's SSD-cache counters (blocks loaded, saved, evicted, and
   how full the cache is), and points the next step at the cache disk.
+- **A stall blames only what ran differently while the model was fast.**
+  On one server two requests wrote 38 MiB/s to disk at 60–85 tok/s, then
+  stopped for seven seconds with the GPU idle and the writes unchanged. The
+  stall was blamed on the disk and its samples coloured on the cache chart.
+  A disk, paging, compression or memory-pressure reading now explains a
+  stall only if it was not reached twice in recent samples at the usual
+  speed; otherwise it is listed as `as when it ran fast: disk write 37.1
+  MiB/s`, nothing but generation is coloured, and the advice points inside
+  the runtime.
 - **A slowdown is remembered until it ends**, keeps the speed it fell from,
   and keeps its first reason for as long as that reason holds.
 - The diagnostic log records `generating=` and `context=` for each sample,
@@ -42,21 +75,81 @@
 
 ### Dashboards
 
+- **Impact is yellow; warnings are orange.** The anomaly colour was
+  magenta. It is now a clear yellow, and the warning grade (pressure
+  `watch`, warning lines, queued requests, a nearly full GPU) moves from amber
+  to orange so yellow still means impact and nothing else.
+- **Memory's history has an axis like every other chart's.** It topped out
+  at its own peak, so steady headroom filled the plot to the top and read as
+  horizontal stripes. It now rounds up past the peak, as the rate charts do.
 - **The generation chart draws its usual speed** as a dashed line, column by
   column: it steps when a request joins or leaves and runs through bars that
-  pass it. It is grey while speed is usual and magenta during a slowdown. The
+  pass it. It is grey while speed is usual and yellow during a slowdown. The
   bottom edge, Diagnostics and `--once` say what it is for: `usual 30.0 for
   2 requests · 131.2k context`.
-- **Magenta means unusual, and nothing else.** A slow sample is magenta on
-  the generation chart at once; an unusual reading of the host is magenta on
-  its own chart or in the header. A host reading that stays unusual for 30
-  seconds at the usual speed becomes its usual value.
+- **Yellow means impact, and nothing else.** During a slowdown or stall its
+  samples are yellow on the generation chart, and what was unusual beside
+  it is yellow on that signal's own chart or in the header, so the cause
+  reads off the charts. A reading that is unusual while the model keeps its
+  speed changes no colour: Diagnostics lists it. A host reading that stays
+  unusual for 30 seconds at the usual speed becomes its usual value.
+- **The KV cache panel shows weights streamed from disk.** For engines that load MoE
+  experts from disk, such as Splash and Strata, what the runtime reads while
+  it decodes, with no prompt prefilling and no prompt-cache block loaded,
+  counts as weights. Those samples are blue on the chart, a `weights` bar
+  gives the share of decoding that read from disk, with the decode speed
+  then and from memory (`25% of decode from disk · 18 vs 42 tok/s`), and the
+  bottom edge reads `streaming weights from disk`. The cache panel is
+  now titled `KV cache / model I/O`.
+- **KV cache leads with its hit rate**: `KV hit 91% · ≈1h 25m
+  saved`, the share of the session's prompt tokens served from cache and
+  the prefill time that saved at the measured prefill speed. Where the cache
+  tier counts its own hits (oMLX with Splash), one bar splits them: green
+  from memory, cyan loaded back from the SSD, dim computed (`RAM 91% · SSD
+  <1%`). A second bar gives the last prompt's hit rate. The disk traffic is
+  always charted, and the bottom edge says what the SSD tier is doing:
+  loading, saving or evicting prefixes, or idle.
+- **The SSD row says what the SSD cache did, not how full it is.** An
+  external KV cache is meant to fill, so the fill bar is gone: `SSD 120.0 GiB
+  · 1.5k blocks loaded · 1.3k saved · 327 evicted` this session. A full,
+  evicting cache is no longer shown as a warning.
+- **The paging panel says what paging means**: `no paging`, `reading files
+  · memory not tight`, `reading files back: memory is tight` or `swapping:
+  memory is short`, where it repeated the title's rate as `page-in … ·
+  page-out …`.
+- **The memory panel's GPU meter reads what the header reads**: Metal's
+  count of GPU memory in use against the GPU limit, where the OS gives it,
+  else wired memory. They disagreed (18.0 and 3.2 GiB on one screen).
+- With no runtime found, the header says `No LLM runtime detected` once,
+  not `not detected · not detected`.
+- **The enlarged memory view gives each kind's size** (wired, app,
+  compressed, cache, free) under its meters.
+- **KV cache and compression swap places.** The cache sits in the host row
+  between memory and paging; compression stacks above the queue. On Linux,
+  with no compressor counters, the queue takes that column.
+- **Memory shows headroom.** A GPU meter reads wired memory against the GPU
+  limit and what is left (`25.6 / 32.0 GiB`, `6.4 GiB left`); a RAM meter
+  reads memory in use with the file cache as its last segment and what is
+  left, free plus cache (`31.7 / 36.0 GiB`, `4.3 GiB left`); a trace shows
+  what was left over time in each sample's pressure colour. `98% resident`
+  is gone: it read as an alarm on a Mac whose cache was full and whose
+  pressure was normal. The stacked composition history and its two-row
+  legend made way for the meters.
+- **The header reads GPU memory against the GPU limit** the memory legend
+  marks (`iogpu.wired_limit_mb`, or the runtime's recommended working set),
+  not the driver's current allocation, which grows with use and read
+  near full: `GPU mem 23.8 GiB / 32.0 GiB` where it said `/ 24.6 GiB`.
+- **Thermal state is always in the header**, with the power the machine
+  draws: `thermal ok · 61 W`. It was shown only when macOS reported a
+  warning. Power comes from macOS's power telemetry and needs no sudo.
+- **Swap that macOS has not created yet reads `swap 0 B used`**, not `swap
+  off`: macOS adds swap files only when it needs them.
+- **A short compression panel draws its traffic**, not `Light compression ·
+  below warning`, and drops the rate split that repeated its title.
 - **Charts are no longer shaded during a slowdown.** The panel behind it says
   what it did instead: `▲ slowed GEN ↓50%` or `▲ stalled GEN`.
 - **Generation and prefill bars are green.** They were graded yellow and red
   against a rolling baseline, which flickered with every swing in speed.
-- **The cache panel shows the disk.** `cache I/O` plots the runtime's disk
-  reads and writes, the session's reuse, and the SSD cache's fill.
 - **Queue shows what each request is doing**: `◐ PREFILL` with a progress
   bar, `● GEN` with tokens out and tok/s, `○ QUEUED` with its prompt size.
 - **Prefill progress counts new tokens** and never reads 100% before it
@@ -76,10 +169,80 @@
   and cached share, `DONE` with the tokens produced. GPU busy and idle flips
   are no longer journaled.
 
+### Runtimes
+
+- **oMLX is found at its own default port, 8000**, and from its own
+  settings: `OMLX_PORT`, then `server.port` in `~/.omlx/settings.json` (or
+  `OMLX_BASE_PATH`). A `~/.config/omlx-coding/server.env` still comes first.
+- **Strata's metrics are read again.** mlxtop polled `/metrics/prometheus`,
+  which holds llama-server's names, so every Strata series was empty; it now
+  reads `/metrics?format=prometheus`. A bare `strata serve` on 8095 is found
+  as well as the launcher on 8080.
+- **llama-server is looked for on 9931, its default since October 2026,**
+  then on 8080, and the Jan desktop app on 1337, then `jan serve` on 6767.
+  The port that answered is kept until a poll fails.
+- **SGLang shows a cache hit rate**: cached prompt tokens over all prompt
+  tokens. The counter names mlxtop read do not exist in SGLang. Its rates
+  move only when a request finishes, so they are now averages, not live.
+- **TensorFold shows model memory on a Mac**, from the process footprint;
+  device memory is reported on CUDA only.
+- **vLLM 0.9.1 and earlier show a cache hit rate**, from the older
+  `gpu_prefix_cache_*` names.
+- **llama.cpp usage records keep their speed and cache:** a record carrying
+  llama-server's own timings is read for `predicted_per_second` and
+  `cache_n`.
+- **LM Studio's `decision` models are not counted as chat models**, and a
+  model listed without loaded instances no longer empties the model list.
+
+### Session summary
+
+- **`u` opens what the session amounted to**, and mlxtop prints it on exit:
+  time watched and spent writing and reading prompts; speed lost to each
+  cause, largest first (the share of each interval spent below the usual
+  speed, a stall's whole interval); where the requests' time went (queue,
+  prompt, answer) with the median and slowest time to first token and the
+  three slowest answers; the KV cache hit rate with the prefill time saved
+  while watched; and joules per token written, from the machine's power.
+- **A finished request says where its time went** on its Journal row:
+  `DONE 4c6a… · 700 out · queued 0.4s → prompt 18s → answer 12s`.
+
+### Quality
+
+- **A QA judge checks every screen.** The test suite renders mlxtop in
+  each state that matters (idle, healthy, prefilling, Linux, a slowdown, a
+  stall, the session summary, Diagnostics) at five terminal sizes, from
+  80×24 to 200×60, and fails on the anomaly colour with nothing slowed, a
+  slowdown no chart shows, a noise phrase coming back, a broken value, a
+  missing panel, a broken border or a key bar that lost `q quit`.
+  `scripts/qa_judge.py` has a model review the same screens against the UX
+  rules on any OpenAI-compatible local server, and fails on a blocker; the
+  release steps run both.
+
+### Recording and replay
+
+- **`--record FILE` writes every sample to a file**, one JSON line each,
+  and **`mlxtop replay FILE`** reads it back through the detection rules
+  and Journal: how many generation and prefill samples there were, how many
+  fell inside a slowdown or stall, and each finding with its time. A rule
+  can be checked against a real incident, and a recording can go with a
+  bug report. `scripts/rc.py run HOST --record FILE` records a staged RC.
+- The diagnostic log records, for each sample, which requests were
+  writing, the runtime's disk reads, writes and weight reads, and SSD
+  blocks loaded and saved. `generating=` reads 0 when nothing is.
+
 ### Changed
+
+- **Lighter sampling.** One `vm_stat` per poll serves both the memory
+  reading and paging rates (it ran twice), and thermal state and power,
+  which change over seconds, are read every five seconds instead of every
+  poll: three fewer processes per second on macOS.
 
 - `--once` prints `SLOWDOWN`, `UNUSUAL` and `USUAL SPEED` where it printed
   `CORRELATION` and `EVIDENCE`.
+- **Prefill time saved counts only what mlxtop watched.** The KV cache
+  title's `≈… saved` covers prompt tokens served from cache since mlxtop
+  started, not the runtime's lifetime total (which read `≈121h saved` on
+  one server). The lifetime hit rate stays.
 
 ## 3.2.1 — 2026-11-03
 

@@ -45,7 +45,7 @@ fn unavailable_unallocated_and_unused_swap_are_distinct() {
     assert!(!text(&missing).contains("0%"));
     sample.swap_available = true;
     let unallocated = render(&sample, 40);
-    assert!(text(&unallocated).contains("swap off"));
+    assert!(text(&unallocated).contains("swap 0 B used"));
     assert!(unallocated.content.iter().all(|cell| cell.bg != CYAN));
     sample.swap_total = 2 * 1024 * MIB;
     let unused = render(&sample, 40);

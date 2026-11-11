@@ -379,7 +379,7 @@ pub(crate) fn macos_host() -> FakeHost {
             "The system has 38654705664 (2359296 pages with a page size of 16384).\n\
              System-wide memory free percentage: 63%\n",
         )
-        .command("/usr/bin/vm_stat", MACOS_VM_STAT_1)
+        // One vm_stat per poll serves both memory and paging rates.
         .command("/usr/bin/vm_stat", MACOS_VM_STAT_1)
         .command("/usr/bin/vm_stat", MACOS_VM_STAT_2)
         .command(
@@ -504,6 +504,8 @@ pub(crate) fn empty_view() -> CollectorView {
         prefill_history: VecDeque::new(),
         cache_history: VecDeque::new(),
         disk_history: VecDeque::new(),
+        decode_reads: Default::default(),
+        session: Default::default(),
         load_history: VecDeque::new(),
         composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),

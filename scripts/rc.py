@@ -180,14 +180,15 @@ sys.stdout.buffer.write((root / 'rc.tar.gz').read_bytes())
 
 
 def run(args):
+    flags = (["--once"] if args.once else []) + (["--record", args.record] if args.record else [])
     if args.host:
-        code = 'exec "$HOME/' + REMOTE_ROOT + '/current/mlxtop"' + (" --once" if args.once else "")
+        code = 'exec "$HOME/' + REMOTE_ROOT + '/current/mlxtop"' + "".join(" " + shlex.quote(flag) for flag in flags)
         command = ssh_command(args, code, interactive=not args.once)
     else:
         binary = OUTPUT / "current" / "mlxtop"
         if not binary.is_file():
             raise ValueError("No local RC staged; use build or fetch first")
-        command = [str(binary)] + (["--once"] if args.once else [])
+        command = [str(binary)] + flags
     if args.dry_run:
         print(shlex.join(command))
         return
@@ -207,6 +208,7 @@ def main(argv=None):
         command.add_argument("--dry-run", action="store_true", help="Print the operation without building or connecting")
         if name == "run":
             command.add_argument("--once", action="store_true", help="Print a static report instead of opening the dashboard")
+            command.add_argument("--record", metavar="FILE", help="Append every sample to FILE on the machine that runs mlxtop (replay with: mlxtop replay FILE)")
     args = parser.parse_args(argv)
     if getattr(args, "port", None) is not None and not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")

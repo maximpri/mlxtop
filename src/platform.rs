@@ -46,6 +46,7 @@ pub(crate) fn sample_macos_memory(host: &dyn Host, sample: &mut Sample, page_siz
     let vm = host.command("/usr/bin/vm_stat", &[]).unwrap_or_default();
     sample.vm_available = !vm.trim().is_empty();
     let counters = parse_vm_stat(&vm, page_size);
+    sample.vm_counters = Some(counters.clone());
     // vm_stat prints free_count minus speculative_count as "Pages free".
     // memory_pressure -Q uses AVAILABLE_NON_COMPRESSED_MEMORY, including
     // active and inactive application pages, so it cannot measure RAM use.
@@ -71,7 +72,9 @@ pub(crate) fn macos_counters_for_rates(host: &dyn Host, page_size: u64) -> VmCou
     parse_vm_stat(&vm, page_size)
 }
 
-pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample) {
+/// The GPU's load and memory, every poll; thermal state and power only when
+/// `slow` is set, since they change over seconds and each costs a process.
+pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample, slow: bool) {
     let ioreg = host
         .command(
             "/usr/sbin/ioreg",
@@ -84,11 +87,22 @@ pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample) {
     sample.metal.gpu_cores = live_metal.gpu_cores.or(sample.metal.gpu_cores);
     sample.metal.renderer_util = live_metal.renderer_util;
     sample.metal.tiler_util = live_metal.tiler_util;
+    if !slow {
+        return;
+    }
     sample.thermal = parse_thermal(
         &host
             .command("/usr/bin/pmset", &["-g", "therm"])
             .unwrap_or_default(),
     );
+    // Power telemetry needs no privileges; desktops publish it too.
+    sample.system_power_mw = host
+        .command(
+            "/usr/sbin/ioreg",
+            &["-r", "-d", "1", "-w", "0", "-c", "AppleSmartBattery"],
+        )
+        .and_then(|text| find_named_number(&text, "SystemPowerIn"))
+        .filter(|milliwatts| *milliwatts > 0);
 }
 
 // --- Linux sampling -------------------------------------------------------

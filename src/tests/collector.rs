@@ -404,7 +404,7 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
     // What happened, what else was unusual, and what to do, in one row.
     assert!(has(
         "SLOWDOWN",
-        "throughput fell · thermal limit → Reduce concurrency; recheck thermals."
+        "throughput fell · thermal limit → macOS is limiting speed for heat"
     ));
     assert!(has("PAGING", "cleared"));
     assert!(has("THERMAL", "limited 80%"));
@@ -903,6 +903,57 @@ fn omlx_endpoint_discovery_reads_server_env_and_honors_config() {
 }
 
 #[test]
+fn a_stock_omlx_is_found_from_its_own_settings_and_port_variable() {
+    assert_eq!(DEFAULT_OMLX_PORT, 8000, "oMLX's own default");
+    let home = TempDir::new("omlx-settings");
+    home.write(
+        ".omlx/settings.json",
+        r#"{"server":{"host":"0.0.0.0","port":8123}}"#,
+    );
+    let found = discover_omlx_endpoint(Some(&home.0), None, None);
+    assert_eq!(found.port, Some(8123));
+    assert_eq!(
+        found.host, None,
+        "a wildcard bind is not an address to call"
+    );
+    assert_eq!(
+        discover_omlx_endpoint(Some(&home.0), None, Some("8200")).port,
+        Some(8200),
+        "OMLX_PORT overrides the settings file"
+    );
+    let base = TempDir::new("omlx-base");
+    base.write(
+        "settings.json",
+        r#"{"server":{"host":"10.0.0.7","port":8300}}"#,
+    );
+    let moved = discover_omlx_endpoint(Some(&home.0), Some(&base.0), Some("bad"));
+    assert_eq!(moved.port, Some(8300));
+    assert_eq!(moved.host.as_deref(), Some("10.0.0.7"));
+    home.write(
+        ".config/omlx-coding/server.env",
+        "PORT=8080
+",
+    );
+    assert_eq!(
+        discover_omlx_endpoint(Some(&home.0), None, Some("8200")).port,
+        Some(8080),
+        "a server.env written for oMLX wins"
+    );
+    assert_eq!(
+        parse_omlx_settings("not json"),
+        DiscoveredEndpoint::default()
+    );
+    assert_eq!(
+        parse_omlx_settings(r#"{"server":{"port":70000}}"#).port,
+        None
+    );
+    assert_eq!(
+        discover_omlx_endpoint(None, None, None),
+        DiscoveredEndpoint::default()
+    );
+}
+
+#[test]
 fn completion_logs_pick_the_newest_parsable_result() {
     assert_eq!(read_llm_stats(None).model, None);
     let home = TempDir::new("omlx-logs");
@@ -1283,4 +1334,55 @@ fn saturation_survives_gpu_busy_impact_deduplication() {
         "{:?}",
         journal(&c)
     );
+}
+
+#[test]
+fn cached_tokens_count_from_when_mlxtop_started_watching() {
+    let mut start = None;
+    assert_eq!(crate::collector::watched(&mut start, "oMLX", 80_000_000), 0);
+    assert_eq!(
+        crate::collector::watched(&mut start, "oMLX", 80_030_000),
+        30_000
+    );
+    // A restarted runtime counts again from its new total.
+    assert_eq!(crate::collector::watched(&mut start, "oMLX", 5_000), 0);
+    assert_eq!(crate::collector::watched(&mut start, "oMLX", 6_000), 1_000);
+    // So does another runtime.
+    assert_eq!(crate::collector::watched(&mut start, "vLLM", 9_000), 0);
+}
+
+#[test]
+fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
+    let host = macos_host();
+    let mut collector = collector(host.clone(), Platform::MacOs, None);
+    let before = host.calls().len();
+    let first = collector.sample();
+    let second = collector.sample();
+    let calls: Vec<String> = host.calls().into_iter().skip(before).collect();
+    let count = |prefix: &str| calls.iter().filter(|call| call.starts_with(prefix)).count();
+    assert_eq!(count("/usr/bin/vm_stat"), 2, "one per poll: {calls:?}");
+    assert_eq!(
+        count("/usr/bin/pmset"),
+        1,
+        "thermal is read every few seconds"
+    );
+    assert_eq!(
+        count("/usr/sbin/ioreg -r -d 1 -w 0 -c AppleSmartBattery"),
+        1
+    );
+    // Between readings, the last one stands.
+    assert_eq!(second.thermal, first.thermal);
+    assert_eq!(second.system_power_mw, first.system_power_mw);
+    // Five seconds on, they are read again.
+    collector.slow_read_at = collector
+        .slow_read_at
+        .map(|at| at - std::time::Duration::from_secs(6));
+    collector.sample();
+    let again = host
+        .calls()
+        .into_iter()
+        .skip(before)
+        .filter(|c| c.starts_with("/usr/bin/pmset"))
+        .count();
+    assert_eq!(again, 2);
 }

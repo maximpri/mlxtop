@@ -89,7 +89,10 @@ fn gpu_memory(sample: &Sample) -> Option<String> {
         return gpu::memory_totals(&sample.gpus)
             .map(|(used, total)| format!("VRAM sum {} / {}", bytes(used), bytes(total)));
     }
-    match (sample.gpu_in_use, sample.gpu_alloc) {
+    match (
+        sample.gpu_in_use,
+        crate::memory_composition::gpu_limit(sample).or(sample.gpu_alloc),
+    ) {
         (Some(used), Some(total)) => Some(format!("GPU mem {} / {}", bytes(used), bytes(total))),
         (Some(used), None) => Some(format!("GPU mem {}", bytes(used))),
         (None, Some(total)) => Some(format!("GPU mem — / {}", bytes(total))),
@@ -136,8 +139,27 @@ fn thermal_note(sample: &Sample) -> Option<String> {
     .then(|| format!("THERMAL {}", sample.thermal))
 }
 
+/// Thermal state, always, with the power the machine draws beside it.
+fn thermal_reading(sample: &Sample) -> Option<String> {
+    let power = sample
+        .system_power_mw
+        .map(|milliwatts| format!(" · {:.0} W", milliwatts as f64 / 1000.0))
+        .unwrap_or_default();
+    if let Some(thermal) = thermal_note(sample) {
+        return Some(format!("{thermal}{power}"));
+    }
+    (sample.thermal != "unavailable" || !power.is_empty()).then(|| {
+        let state = if sample.thermal == "unavailable" {
+            "thermal —"
+        } else {
+            "thermal ok"
+        };
+        format!("{state}{power}")
+    })
+}
+
 fn thermal_parts(sample: &Sample) -> Vec<String> {
-    let mut parts: Vec<String> = thermal_note(sample).into_iter().collect();
+    let mut parts: Vec<String> = thermal_reading(sample).into_iter().collect();
     if let Some(renderer) = sample.metal.renderer_util {
         parts.push(format!("R {renderer}%"));
     }
@@ -152,11 +174,14 @@ fn plain(value: String, color: Color) -> Line<'static> {
 }
 
 fn identity(sample: &Sample, width: usize) -> Line<'static> {
+    // With no runtime found, one statement, not "not detected" twice.
+    let text = if sample.llm_provider == "not detected" {
+        "No LLM runtime detected".to_owned()
+    } else {
+        format!("{} · {}", llm_runtime_label(sample), sample.llm_model)
+    };
     Line::from(Span::styled(
-        compact_label(
-            &format!("{} · {}", llm_runtime_label(sample), sample.llm_model),
-            width,
-        ),
+        compact_label(&text, width),
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -186,10 +211,15 @@ fn state(sample: &Sample) -> Line<'static> {
 /// GPU memory against its limit as a small meter, graded as it nears full:
 /// the Metal working set filling up is what slows generation.
 fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
+    // Against the limit the memory legend marks, not the driver's current
+    // allocation, which grows with use and would read near full.
     let (used, total) = if sample.has_discrete_gpus() {
         gpu::memory_totals(&sample.gpus)?
     } else {
-        (sample.gpu_in_use?, sample.gpu_alloc?)
+        (
+            sample.gpu_in_use?,
+            crate::memory_composition::gpu_limit(sample).or(sample.gpu_alloc)?,
+        )
     };
     if total == 0 {
         return None;
@@ -228,18 +258,20 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     // A reading that is unusual takes the anomaly colour here, where it is
     // shown, with its usual value.
     let insight = &sample.correlation;
-    if let Some(thermal) = thermal_note(sample) {
-        let color = if insight.note(CorrelationCause::Thermal).is_some() {
+    if let Some(thermal) = thermal_reading(sample) {
+        let color = if insight.impact(CorrelationCause::Thermal).is_some() {
             Tone::Unusual.color()
-        } else {
+        } else if thermal_note(sample).is_some() {
             YELLOW
+        } else {
+            MUTED
         };
         fields.push(vec![Span::styled(thermal, Style::default().fg(color))]);
     }
     fields.extend(gpu_memory_meter(sample));
     if sample.llm_count > 0 {
         let mut field = muted(format!("LLM {} · ", bytes(sample.llm_rss)));
-        field.push(match insight.note(CorrelationCause::Cpu) {
+        field.push(match insight.impact(CorrelationCause::Cpu) {
             Some(note) => Span::styled(
                 note.trim_start_matches("runtime ").to_owned(),
                 Style::default().fg(Tone::Unusual.color()),

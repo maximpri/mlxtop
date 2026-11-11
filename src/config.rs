@@ -21,7 +21,7 @@ pub(crate) const TIGHT_FREE_PERCENT: u8 = 10;
 pub(crate) const COMPRESSION_WARN_EXIT: u64 = 32 * MIB;
 pub(crate) const GPU_WARN_EXIT: u64 = 70;
 pub(crate) const DEFAULT_OMLX_HOST: &str = "127.0.0.1";
-pub(crate) const DEFAULT_OMLX_PORT: u16 = 8080;
+pub(crate) const DEFAULT_OMLX_PORT: u16 = 8000;
 
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Config {

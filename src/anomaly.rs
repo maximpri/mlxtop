@@ -79,6 +79,11 @@ impl Usual {
         ))
     }
 
+    /// The recent samples, oldest first.
+    pub(crate) fn values(&self) -> impl Iterator<Item = f64> + '_ {
+        self.values.iter().copied()
+    }
+
     /// The usual value, when `value` is unusually far above it.
     pub(crate) fn above(&self, value: f64, share: f64, least: f64) -> Option<f64> {
         self.range(share, least)

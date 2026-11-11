@@ -99,13 +99,25 @@ releases and for release candidates offered as prereleases.
    `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md` (a candidate may add
    `## X.Y.Z-rc.N — YYYY-MM-DD`; without one its notes are a one-line
    placeholder), and merge the change through a pull request.
-2. Tag the merge commit on `main` and push the tag:
+2. Pass the QA judge. `cargo test` already runs its rules on every screen
+   (`every_screen_passes_the_qa_judge`: the anomaly colour only where the
+   model is slowed, no noise phrases, panels and borders whole, at five
+   terminal sizes). Before a final release, also have a model review the
+   same screens against the UX rules; it fails on a blocker:
+
+   ~~~sh
+   QA_JUDGE_URL=http://127.0.0.1:8000/v1 python3 scripts/qa_judge.py --report qa.md
+   ~~~
+
+   Any OpenAI-compatible local server works; set `QA_JUDGE_API_KEY` if it
+   needs a key. Attach `qa.md` to the release pull request.
+3. Tag the merge commit on `main` and push the tag:
 
    ~~~sh
    git tag -a vX.Y.Z -m "mlxtop X.Y.Z" && git push origin vX.Y.Z
    ~~~
 
-3. The `Release` workflow tests and builds on native runners: the Apple
+4. The `Release` workflow tests and builds on native runners: the Apple
    Silicon macOS archive and DMG installer, and static musl archives for Linux
    x86_64 and ARM64. `scripts/collect_licenses.py` bundles the dependency
    license texts once for all targets, `scripts/package-release.sh` assembles
@@ -113,7 +125,7 @@ releases and for release candidates offered as prereleases.
    downloads. The workflow creates a **draft** release whose notes start from
    the version's changelog section; a `vX.Y.Z-rc.N` tag makes a draft
    prerelease.
-4. Review the draft's notes and assets, then publish it:
+5. Review the draft's notes and assets, then publish it:
 
    ~~~sh
    gh release edit vX.Y.Z --draft=false --latest

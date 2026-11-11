@@ -4,34 +4,20 @@ use crate::app::App;
 use crate::chart_navigation::Chart;
 use crate::chart_render::{
     bar_cells, chart_axis_label, chart_columns, chart_columns_for_plot, chart_display_value,
-    chart_form, chart_inactive_rate_label, chart_scale, chart_stat_label, chart_stats_for_width,
-    chart_window_label, meter_cells, normalize_chart_value, stretch_chart_columns, trace_connector,
-    trace_point, ChartForm, TraceCell, TraceStyle,
+    chart_form, chart_scale, chart_stat_label, chart_stats_for_width, chart_window_label,
+    normalize_chart_value, stretch_chart_columns, trace_connector, trace_point, ChartForm,
+    TraceCell, TraceStyle,
 };
 use crate::cli::VERSION;
-use crate::config::PAGING_ACTIVE_ENTER_RATE;
 use crate::domain::{ChartMetric, ChartPoint, Tone};
-use crate::formatting::{
-    activity_frame, bytes, compact_label, gpu_load_label, llm_generation_rate_label,
-    llm_prefill_progress_label, llm_prefill_rate_label, percent, pressure_state_label, rate,
-    telemetry_age, telemetry_source,
-};
+use crate::formatting::{activity_frame, telemetry_age};
 use crate::host::Platform;
-use crate::processes::process_provider;
-use crate::theme::{
-    centered_rect, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
-};
-use crate::{
-    drop_marks, gpu_dashboard, memory_composition, model_dashboard, operator_charts,
-    process_memory, request_dashboard, swap_usage,
-};
+use crate::theme::{panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, RED, YELLOW};
+use crate::{drop_marks, gpu_dashboard, model_dashboard, operator_charts, request_dashboard};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, TableState, Tabs, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Tabs};
 use ratatui::Frame;
 use std::collections::VecDeque;
 
@@ -109,6 +95,9 @@ impl App {
         }
         if self.diagnostics_open {
             self.draw_diagnostics(frame, outer[1]);
+        }
+        if self.summary_open {
+            self.draw_summary(frame, outer[1]);
         }
         if self.help {
             self.draw_help(frame, area);
@@ -446,8 +435,8 @@ impl App {
         } else {
             0
         };
-        // Host-critical resources come first and take the space: memory,
-        // compression and paging decide whether a model keeps its speed.
+        // Host-critical resources come first and take the space: memory, the
+        // runtime's cache and paging decide whether a model keeps its speed.
         // Prompt size drives KV-cache memory, so it follows. Throughput is the
         // outcome and stays a compact, fixed-height row. Geometry is stable
         // across idle and live states.
@@ -467,7 +456,7 @@ impl App {
             (available * 22 / 100).clamp(5, JOURNAL_MAX_HEIGHT)
         };
         // With no requests yet, prompt load is one line: the row hugs what
-        // cache and queue need but still scales with the terminal, like the
+        // compression and queue need but still scales with the terminal, like the
         // Journal, instead of pinning six rows on every screen size.
         let request_height = match (compact, devices) {
             (true, _) if self.collector.request_history.len() == 0 => 6,
@@ -496,7 +485,9 @@ impl App {
         let queue_width =
             operator_charts::queue_plot_width(&self.collector.operator_history, grid[2].width);
         let samples = [
-            host[0].width.saturating_sub(7),
+            host[0]
+                .width
+                .saturating_sub(2 + crate::memory_headroom::AXIS_GUTTER),
             host[1].width.saturating_sub(14),
             host.last()
                 .map_or(0, |column| column.width.saturating_sub(14)),
@@ -552,23 +543,20 @@ impl App {
         }
     }
 
-    /// macOS has compressor counters; Linux has none to chart, so its host
-    /// row keeps memory and paging at half width each.
+    /// macOS has compressor counters; Linux has none to chart, so its queue
+    /// takes the whole third supporting column.
     pub(crate) fn shows_compression(&self) -> bool {
         self.collector.platform == Platform::MacOs
     }
 
     /// Every Overview row shares one three-column grid, so panel edges line
-    /// up vertically. Linux has no compression panel; memory spans two columns.
+    /// up vertically.
     pub(crate) fn host_columns(&self, area: Rect) -> Vec<Rect> {
-        let [first, second, third] = overview_grid(area);
-        if self.shows_compression() {
-            vec![first, second, third]
-        } else {
-            vec![first.union(second), third]
-        }
+        overview_grid(area).to_vec()
     }
 
+    /// Memory, the runtime's cache and paging: what the model's memory holds,
+    /// what the cache saves and costs on disk, and what the OS pages.
     pub(crate) fn draw_resource_charts(&self, frame: &mut Frame, area: Rect) {
         let columns = self.host_columns(area);
         self.render_indicator_chart(
@@ -578,33 +566,35 @@ impl App {
             &self.collector.load_history,
             ChartMetric::Memory,
         );
-        if self.shows_compression() {
-            self.render_indicator_chart(
-                frame,
-                columns[1],
-                "compression",
-                &self.collector.compression_history,
-                ChartMetric::Compression,
-            );
-        }
+        let (name, history, metric) = self.cache_panel();
+        self.render_indicator_chart(frame, columns[1], name, history, metric);
         self.render_indicator_chart(
             frame,
-            columns[columns.len() - 1],
+            columns[2],
             "paging / I/O",
             &self.collector.swap_history,
             ChartMetric::Swap,
         );
     }
 
-    /// Prompt load spans two grid columns for its bars; cache and queue stack
-    /// in the third, since each carries one or two readings.
+    /// Prompt load spans two grid columns for its bars; compression and queue
+    /// stack in the third, since each carries one or two readings.
     pub(crate) fn draw_supporting_charts(&self, frame: &mut Frame, area: Rect) {
         let [first, second, third] = overview_grid(area);
         self.draw_request_chart(frame, first.union(second));
-        let [cache, queue] =
+        if !self.shows_compression() {
+            self.draw_operator_chart(frame, third, Chart::Queue);
+            return;
+        }
+        let [compression, queue] =
             Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third);
-        let (name, history, metric) = self.cache_panel();
-        self.render_indicator_chart(frame, cache, name, history, metric);
+        self.render_indicator_chart(
+            frame,
+            compression,
+            "compression",
+            &self.collector.compression_history,
+            ChartMetric::Compression,
+        );
         self.draw_operator_chart(frame, queue, Chart::Queue);
     }
 
@@ -614,9 +604,13 @@ impl App {
     pub(crate) fn cache_panel(&self) -> (&'static str, &VecDeque<ChartPoint>, ChartMetric) {
         let disk = &self.collector.disk_history;
         if disk.iter().any(|point| point.value.is_some()) {
-            ("cache I/O", disk, ChartMetric::Disk)
+            ("KV cache / model I/O", disk, ChartMetric::Disk)
         } else {
-            ("cache", &self.collector.cache_history, ChartMetric::Cache)
+            (
+                "KV cache",
+                &self.collector.cache_history,
+                ChartMetric::Cache,
+            )
         }
     }
 
@@ -744,111 +738,7 @@ impl App {
         let zoom = usize::from(self.charts.zoom(Chart::from(metric)));
         let sample = &self.collector.current;
         let current = history.back().and_then(|point| point.value);
-        let current_label = match metric {
-            // Drop qualifiers before units: a bare number is never the reading.
-            ChartMetric::Generation | ChartMetric::Prefill => current
-                .map(|value| {
-                    let rate = format!("{:.1} tok/s", value as f64 / 10.0);
-                    if area.width < 38 {
-                        rate
-                    } else {
-                        let live = match metric {
-                            ChartMetric::Generation => sample.llm_generation_tps_live,
-                            ChartMetric::Prefill => sample.llm_prefill_tps_live,
-                            _ => false,
-                        };
-                        if live {
-                            format!("LIVE {rate}")
-                        } else {
-                            format!("LAST {rate}")
-                        }
-                    }
-                })
-                .unwrap_or_else(|| {
-                    // The title reads what the chart's last bar shows. A
-                    // server average beside a different plotted sample
-                    // contradicts it; the average goes to the bottom border.
-                    if let Some(point) = history
-                        .iter()
-                        .filter(|_| area.width >= 38)
-                        .rev()
-                        .take(self.charts.visible_samples(
-                            Chart::from(metric),
-                            usize::from(area.width.saturating_sub(8)),
-                        ))
-                        .find(|point| point.value.is_some())
-                    {
-                        let rate =
-                            format!("{:.1} tok/s", point.value.unwrap_or_default() as f64 / 10.0);
-                        let with_age =
-                            format!("LAST {rate} · {}", telemetry_age(Some(point.observed_at)));
-                        // Narrow panels keep the state word (decoding), which
-                        // says why there is no current rate.
-                        if area.width >= 44 {
-                            return with_age;
-                        } else if area.width >= 38 {
-                            return format!("LAST {rate}");
-                        }
-                    }
-                    if metric == ChartMetric::Prefill
-                        && sample.llm_prefill_tps.is_some()
-                        && area.width >= 38
-                    {
-                        return llm_prefill_rate_label(sample);
-                    }
-                    let label = chart_inactive_rate_label(metric, &self.collector.current);
-                    if area.width < 38 {
-                        match label.as_str() {
-                            "decode active" => "decoding".into(),
-                            "prefill active" => "prefilling".into(),
-                            _ => label,
-                        }
-                    } else {
-                        label
-                    }
-                }),
-            ChartMetric::Cache => {
-                // Hit rate is measured only over intervals that read new
-                // prompt tokens; between prompts, keep the last one, marked.
-                let last = history
-                    .iter()
-                    .rev()
-                    .take(self.charts.visible_samples(
-                        Chart::from(metric),
-                        usize::from(area.width.saturating_sub(8)),
-                    ))
-                    .find_map(|point| point.value.map(|value| (value, point.observed_at)));
-                let value = match (current, last) {
-                    (Some(value), _) => format!("{value}%"),
-                    (None, Some((value, at))) if area.width >= 44 => {
-                        format!("LAST {value}% · {}", telemetry_age(Some(at)))
-                    }
-                    (None, Some((value, _))) if area.width >= 28 => format!("LAST {value}%"),
-                    _ => "—".into(),
-                };
-                if value.starts_with("LAST") || area.width < 28 {
-                    value
-                } else {
-                    format!("hit {value}")
-                }
-            }
-            ChartMetric::Gpu => current
-                .map(|value| format!("{value}%"))
-                .unwrap_or_else(|| "—".into()),
-            // OS pressure is the memory verdict; resident occupancy (which
-            // includes file cache) is the supporting reading beneath it.
-            ChartMetric::Memory => {
-                let state = pressure_state_label(&self.collector.current);
-                if area.width >= 34 {
-                    format!("PRESSURE {state}")
-                } else {
-                    state.into()
-                }
-            }
-            ChartMetric::Swap | ChartMetric::Compression | ChartMetric::Disk => {
-                current.map(rate).unwrap_or_else(|| "—".into())
-            }
-        };
+        let current_label = self.chart_reading(area, history, metric);
         let chart_tone = metric.chart_tone();
         let current_tone = history
             .back()
@@ -887,13 +777,13 @@ impl App {
         // is known. It is quiet until generation is slow, and then takes the
         // anomaly colour: the gap under it is the drop.
         let insight = &sample.correlation;
-        let slowed = metric == ChartMetric::Generation && insight.is_material_drop();
+        let slowed = insight.concerns(metric) && insight.is_material_drop();
         let normal = insight
             .episode
             .filter(|_| slowed)
             .map(|episode| episode.reference)
             .or(insight.usual_speed.map(|(usual, _)| usual))
-            .filter(|usual| metric == ChartMetric::Generation && *usual > 0.0)
+            .filter(|usual| insight.concerns(metric) && *usual > 0.0)
             .map(|usual| (usual * 10.0).round() as u64);
         let (warning, guide_tone) = match normal {
             Some(normal) if slowed => (Some(normal), Tone::Unusual),
@@ -959,9 +849,7 @@ impl App {
             ]);
         }
         // What this chart's slowdowns are judged against.
-        if let Some((usual, slow_below)) = insight
-            .usual_speed
-            .filter(|_| metric == ChartMetric::Generation)
+        if let Some((usual, slow_below)) = insight.usual_speed.filter(|_| insight.concerns(metric))
         {
             details.push(format!("usual {usual:.1} · slow below {slow_below:.1}"));
         }
@@ -989,142 +877,7 @@ impl App {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(DIM))
             .style(Style::default().bg(PANEL));
-        let summary = match metric {
-            ChartMetric::Generation
-                if self.charts.expanded
-                    && sample.llm_generation_tps.is_some()
-                    && !sample.llm_generation_tps_live =>
-            {
-                Some(llm_generation_rate_label(sample))
-            }
-            ChartMetric::Prefill
-                if self.charts.expanded
-                    && sample.llm_prefill_tps.is_some()
-                    && !sample.llm_prefill_tps_live =>
-            {
-                Some(llm_prefill_rate_label(sample))
-            }
-            // While a prefill runs, its position replaces the unit: the rate is already in the title,
-            // and 40.9k / 61.5k tells you how long the wait is.
-            ChartMetric::Prefill => {
-                Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
-            }
-            // oMLX and Splash report generation summed over running requests;
-            // say so when there are several, since each gets only its share.
-            ChartMetric::Generation => {
-                let unit = match generating_requests(sample) {
-                    n if n > 1 && area.width >= 38 => format!("tok/s · total of {n} requests"),
-                    n if n > 1 => format!("tok/s · {n} req"),
-                    _ => "tok/s".into(),
-                };
-                // What the dashed line is: the speed slowdowns are judged
-                // against. It gives way before the unit does.
-                // With the work it is for, when it is for one kind of work.
-                let usual = insight.usual_speed.and_then(|(usual, _)| {
-                    let mut texts = Vec::new();
-                    if !insight.usual_for.is_empty() {
-                        texts.push(format!(
-                            "{unit} · ┄ usual {usual:.1} for {}",
-                            insight.usual_for
-                        ));
-                    }
-                    texts.push(format!("{unit} · ┄ usual {usual:.1}"));
-                    texts.into_iter().find(|text| {
-                        Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
-                    })
-                });
-                Some(usual.unwrap_or(unit))
-            }
-            ChartMetric::Memory => None,
-            ChartMetric::Gpu => Some(if current == Some(0) {
-                "idle".into()
-            } else {
-                gpu_load_label(sample.gpu_util, self.thresholds).into()
-            }),
-            ChartMetric::Compression => {
-                let (compress, decompress) = if sample.rate_ready && sample.vm_available {
-                    (rate(sample.compress), rate(sample.decompress))
-                } else {
-                    ("—".into(), "—".into())
-                };
-                // Narrow panels share one unit instead of abbreviating names.
-                let shared_unit = compress
-                    .rsplit_once(' ')
-                    .zip(decompress.rsplit_once(' '))
-                    .filter(|((_, a), (_, b))| a == b)
-                    .map(|((c, unit), (d, _))| {
-                        format!("compressing {c} · decompressing {d} {unit}")
-                    });
-                let fits = |text: &String| {
-                    Line::from(text.as_str()).width() + 2
-                        <= usize::from(area.width.saturating_sub(2))
-                };
-                [
-                    Some(format!(
-                        "compressing {compress} · decompressing {decompress}"
-                    )),
-                    shared_unit,
-                    compress
-                        .rsplit_once(' ')
-                        .zip(decompress.rsplit_once(' '))
-                        .filter(|((_, a), (_, b))| a == b)
-                        .map(|((c, unit), (d, _))| format!("comp {c} · decomp {d} {unit}")),
-                    Some(format!("comp {compress} · decomp {decompress}")),
-                ]
-                .into_iter()
-                .flatten()
-                .find(fits)
-                .or_else(|| Some(format!("comp {compress}")))
-            }
-            ChartMetric::Swap => {
-                // All disk paging, as plotted: swap plus file page-ins/outs.
-                let (swap_in, swap_out) = if sample.rate_ready && !sample.paging_unavailable {
-                    (
-                        rate(sample.swap_in.saturating_add(sample.page_in)),
-                        rate(sample.swap_out.saturating_add(sample.page_out)),
-                    )
-                } else {
-                    ("—".into(), "—".into())
-                };
-                let spaced = format!("page-in {swap_in} · page-out {swap_out}");
-                Some(
-                    if Line::from(spaced.as_str()).width() + 2
-                        <= usize::from(area.width.saturating_sub(2))
-                    {
-                        spaced
-                    } else {
-                        format!("in {swap_in} · out {swap_out}")
-                    },
-                )
-            }
-            ChartMetric::Disk => {
-                let (read, write) = match (sample.disk.read, sample.disk.write) {
-                    (Some(read), Some(write)) => (rate(read), rate(write)),
-                    _ => ("—".into(), "—".into()),
-                };
-                let spaced = format!("read {read} · write {write}");
-                Some(
-                    if Line::from(spaced.as_str()).width() + 2
-                        <= usize::from(area.width.saturating_sub(2))
-                    {
-                        spaced
-                    } else {
-                        format!("r {read} · w {write}")
-                    },
-                )
-            }
-            // The title has the latest interval's hit rate; these are the
-            // session-wide figures it is measured against.
-            ChartMetric::Cache => Some(if area.width < 38 {
-                format!("since start {}", percent(sample.llm_cache_efficiency))
-            } else {
-                format!(
-                    "since start {} · prefix {}",
-                    percent(sample.llm_cache_efficiency),
-                    percent(sample.llm_prefix_hit_rate)
-                )
-            }),
-        };
+        let summary = self.chart_summary(area, history, metric);
         if let Some(summary) = summary {
             let summary = if rate_chart {
                 if area.width < 38 {
@@ -1153,7 +906,7 @@ impl App {
             // While generation is slow, its chart says why under the bars
             // that show it, in the anomaly colour: ▼ and what else is unusual.
             let room = usize::from(area.width.saturating_sub(4));
-            let reason = (metric == ChartMetric::Generation && insight.is_material_drop())
+            let reason = (insight.concerns(metric) && insight.is_material_drop())
                 .then(|| {
                     let lead = insight.lead.split(" → ").next().unwrap_or("");
                     // With nothing else unusual the label says so, rather
@@ -1195,199 +948,10 @@ impl App {
         if inner.is_empty() {
             return;
         }
-        if metric == ChartMetric::Memory {
-            let usage = match (sample.resident_memory, current) {
-                (Some(used), _) => format!("{} / {}", bytes(used), bytes(sample.total_memory)),
-                (None, Some(_)) if sample.total_memory > 0 => {
-                    format!("RAM {}", bytes(sample.total_memory))
-                }
-                (None, Some(_)) => "RAM —".into(),
-                (None, None) => "RAM reading unavailable".into(),
-            };
-            // Keep the occupancy percentage on narrow panels by sharing the unit.
-            let compact_usage = sample.resident_memory.and_then(|used| {
-                let (used, unit) = bytes(used)
-                    .rsplit_once(' ')
-                    .map(|(n, u)| (n.to_owned(), u.to_owned()))?;
-                let (total, total_unit) = bytes(sample.total_memory)
-                    .rsplit_once(' ')
-                    .map(|(n, u)| (n.to_owned(), u.to_owned()))?;
-                (unit == total_unit).then(|| format!("{used}/{total} {unit}"))
-            });
-            let mut line = Line::from(Span::styled(usage.clone(), Style::default().fg(MUTED)));
-            if let Some(value) = current {
-                let candidates = [
-                    (usage, format!(" · {value}% resident")),
-                    (
-                        compact_usage.clone().unwrap_or_default(),
-                        format!(" · {value}% resident"),
-                    ),
-                    (compact_usage.unwrap_or_default(), format!(" · {value}%")),
-                ];
-                if let Some((text, resident)) = candidates.into_iter().find(|(text, resident)| {
-                    !text.is_empty()
-                        && Line::from(format!("{text}{resident}").as_str()).width()
-                            <= usize::from(inner.width)
-                }) {
-                    line = Line::from(vec![
-                        Span::styled(text, Style::default().fg(MUTED)),
-                        Span::styled(resident, Style::default().fg(CYAN)),
-                    ]);
-                }
-            }
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, inner.y, inner.width, 1),
-            );
-            if inner.height < 2 {
-                return;
-            }
-            inner.y += 1;
-            inner.height -= 1;
-            // What the RAM holds matters more than how full it is: wired memory
-            // cannot be compressed or swapped; cache and free are headroom.
-            // Short panels give the legend every row; taller ones keep at
-            // least three rows for the occupancy trace.
-            let rows = if inner.height < 6 {
-                inner.height
-            } else {
-                (inner.height - 3).min(3)
-            };
-            let used = memory_composition::draw(
-                frame,
-                Rect::new(inner.x, inner.y, inner.width, rows),
-                sample,
-            );
-            inner.y += used;
-            inner.height -= used;
-            // Short panels cannot hold a meaningful trace: the exact reading and
-            // composition replace a flat line against a 0–100% axis.
-            if inner.height < 3 {
-                return;
-            }
-        }
-        if metric == ChartMetric::Compression {
-            if inner.height >= 5 && sample.compressor > 0 && sample.compressed_logical > 0 {
-                let (stored, held) = (bytes(sample.compressed_logical), bytes(sample.compressor));
-                let ratio = sample.compressed_logical as f64 / sample.compressor as f64;
-                let text = [
-                    format!("{stored} stored in {held} · {ratio:.1}× ratio"),
-                    format!("{stored} in {held} · {ratio:.1}×"),
-                    format!("{ratio:.1}× ratio"),
-                ]
-                .into_iter()
-                .find(|text| Line::from(text.as_str()).width() <= usize::from(inner.width))
-                .unwrap_or_default();
-                frame.render_widget(
-                    Paragraph::new(text).style(Style::default().fg(MUTED)),
-                    Rect::new(inner.x, inner.y, inner.width, 1),
-                );
-                inner.y += 1;
-                inner.height -= 1;
-            }
-            if inner.is_empty() {
-                return;
-            }
-            if inner.height < 3 {
-                frame.render_widget(
-                    Paragraph::new(match current {
-                        Some(0) => "No compression traffic",
-                        Some(rate) if rate >= self.thresholds.compression_warn_rate => {
-                            "Compression active"
-                        }
-                        Some(_) => "Light compression · below warning",
-                        None => "Compression unavailable",
-                    })
-                    .style(Style::default().fg(current_tone.color())),
-                    inner,
-                );
-                return;
-            }
-        }
-        if metric == ChartMetric::Disk {
-            // Reuse over the session; each request's share is in prompt load.
-            if inner.height >= 5 {
-                if let Some(reuse) = sample.llm_cache_efficiency {
-                    frame.render_widget(
-                        Paragraph::new(format!("{reuse:.0}% of prompt tokens reused"))
-                            .style(Style::default().fg(MUTED)),
-                        Rect::new(inner.x, inner.y, inner.width, 1),
-                    );
-                    inner.y += 1;
-                    inner.height -= 1;
-                }
-            }
-            if sample.ssd_cache.is_some() {
-                swap_usage::draw_ssd_cache(
-                    frame,
-                    Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-                    sample,
-                );
-                inner.height = inner.height.saturating_sub(1);
-            }
-            if inner.is_empty() {
-                return;
-            }
-            if inner.height < 3 {
-                frame.render_widget(
-                    Paragraph::new(match current {
-                        Some(0) => "No disk traffic",
-                        Some(rate) if rate >= crate::analysis::DISK_ACTIVE_RATE => "Disk active",
-                        Some(_) => "Light disk traffic",
-                        None => "Disk reading unavailable",
-                    })
-                    .style(Style::default().fg(current_tone.color())),
-                    inner,
-                );
-                return;
-            }
-        }
-        if metric == ChartMetric::Swap {
-            swap_usage::draw(
-                frame,
-                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-                sample,
-            );
-            inner.height = inner.height.saturating_sub(1);
-            if inner.is_empty() {
-                return;
-            }
-            if inner.height < 3 {
-                // Graded on what counts against the system, as the assessment
-                // is: file paging only while memory is tight.
-                let uncounted = if sample.memory_tight() {
-                    0
-                } else {
-                    sample.page_in.saturating_add(sample.page_out)
-                };
-                let counted = current.map(|rate| rate.saturating_sub(uncounted));
-                frame.render_widget(
-                    // Match the assessment: "active" starts at the warning rate.
-                    Paragraph::new(match (current, counted) {
-                        (Some(0), _) => "No paging traffic",
-                        (_, Some(rate)) if rate >= PAGING_ACTIVE_ENTER_RATE => "Paging active",
-                        (_, Some(rate)) if rate >= self.thresholds.swap_warn_rate => "Watch paging",
-                        (_, Some(0)) => "Disk reads · memory not tight",
-                        (Some(_), _) => "Light paging · below warning",
-                        (None, _) => "Paging unavailable",
-                    })
-                    .style(Style::default().fg(current_tone.color())),
-                    inner,
-                );
-                return;
-            }
-        }
-        if metric == ChartMetric::Cache && area.width < 38 && inner.height >= 4 {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "PREFIX HIT {}",
-                    percent(sample.llm_prefix_hit_rate)
-                ))
-                .style(Style::default().fg(MUTED)),
-                Rect::new(inner.x, inner.y, inner.width, 1),
-            );
-            inner.y += 1;
-            inner.height -= 1;
+        // Each panel's own rows above its plot; a panel that says all it
+        // has to say in them is done.
+        if self.draw_panel_rows(frame, area, &mut inner, history, metric, current_tone) {
+            return;
         }
         let compact_percent = inner.height < 3
             && matches!(
@@ -1535,13 +1099,7 @@ impl App {
             chart_columns_for_plot(history, visible_count, metric, plot_height, scale)
         };
         let visible_points = stretch_chart_columns(&points, plot_width);
-        // Memory shows what the RAM holds over time: its kinds stacked in each
-        // column, with the pressure grade as a ribbon along the bottom row.
-        let composition = (metric == ChartMetric::Memory && plot_height >= 4)
-            .then(|| self.composition_columns(visible_count, plot_width))
-            .filter(|columns| columns.iter().any(Option::is_some));
-        let stack = composition.is_some();
-        let axis_rows = if stack { plot_height - 1 } else { plot_height };
+        let axis_rows = plot_height;
         let mut cells = vec![
             vec![
                 TraceCell {
@@ -1658,11 +1216,7 @@ impl App {
                 }
             }
         }
-        for (column, point) in visible_points
-            .iter()
-            .enumerate()
-            .filter(|_| !bars && !stack)
-        {
+        for (column, point) in visible_points.iter().enumerate().filter(|_| !bars) {
             let Some(value) = point.value else {
                 previous_point = None;
                 continue;
@@ -1719,18 +1273,7 @@ impl App {
             );
         }
 
-        if stack {
-            // The ribbon: each sample's pressure grade, under its column.
-            for (column, point) in visible_points.iter().enumerate() {
-                if point.value.is_some() {
-                    cells[plot_height - 1][column] = TraceCell {
-                        glyph: '▀',
-                        tone: point.tone,
-                        fill: false,
-                    };
-                }
-            }
-        } else if form == ChartForm::Area {
+        if form == ChartForm::Area {
             // The level's body beneath its line, quiet so a full chart is not
             // a solid block; guides stay visible through it.
             // The line's own cell is filled too, so the line is the area's top
@@ -1746,9 +1289,7 @@ impl App {
 
         let mut lines = Vec::with_capacity(plot_height);
         for (row, row_cells) in cells.iter().enumerate() {
-            let label = if stack && row + 1 == plot_height {
-                String::new()
-            } else if row == 0 && !paging_idle {
+            let label = if row == 0 && !paging_idle {
                 format!("{top_axis} ")
             } else if row + 1 == axis_rows {
                 format!("{} ", chart_axis_label(metric, scale.0))
@@ -1799,25 +1340,15 @@ impl App {
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-        if let Some(columns) = composition {
-            let x = inner.x + label_width as u16;
-            for (column, sizes) in columns.into_iter().enumerate() {
-                if let Some(sizes) = sizes {
-                    memory_composition::paint_column(
-                        frame,
-                        x + column as u16,
-                        inner.y,
-                        axis_rows as u16,
-                        sizes,
-                    );
-                }
-            }
-        }
-        if paging_idle && inner.height >= 4 {
+        // An idle disk panel keeps its baseline: the rows above it say what
+        // the cache holds, and a sentence would cover them.
+        if paging_idle && inner.height >= 4 && metric != ChartMetric::Disk {
             frame.render_widget(
                 Paragraph::new(match (metric, inner.width >= 32) {
                     (ChartMetric::Compression, true) => "No compression in this window",
                     (ChartMetric::Compression, false) => "No compression",
+                    (ChartMetric::Disk, true) => "No disk reads or writes in this window",
+                    (ChartMetric::Disk, false) => "Disk idle",
                     (_, true) => "No paging traffic in this window",
                     (_, false) => "No paging traffic",
                 })
@@ -1828,98 +1359,6 @@ impl App {
         }
     }
 
-    pub(crate) fn draw_signal_log(&self, frame: &mut Frame, area: Rect) {
-        let mut block = panel("RECENT JOURNAL", Tone::Muted).title(
-            Line::from(Span::styled(" 3 full journal ", Style::default().fg(CYAN)))
-                .alignment(Alignment::Right),
-        );
-        if !self.collector.signals.is_empty() {
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {} events ", self.collector.signals.len()),
-                Style::default().fg(MUTED),
-            )));
-        }
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.is_empty() {
-            return;
-        }
-        if self.collector.signals.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No events yet.")
-                    .style(Style::default().fg(MUTED))
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
-            return;
-        }
-        let message_x = inner.x + 24.min(inner.width);
-        let message_width = inner.right().saturating_sub(message_x);
-        let mut y = inner.y;
-        for event in self.collector.signals.iter().rev() {
-            if y >= inner.bottom() || message_width == 0 {
-                break;
-            }
-            let mut lines = Vec::new();
-            let mut line = String::new();
-            for word in event.summary.split_whitespace() {
-                let next = if line.is_empty() {
-                    word.to_owned()
-                } else {
-                    format!("{line} {word}")
-                };
-                if Line::from(next.as_str()).width() > usize::from(message_width)
-                    && !line.is_empty()
-                {
-                    lines.push(std::mem::take(&mut line));
-                    line = compact_label(word, usize::from(message_width));
-                } else {
-                    line = compact_label(&next, usize::from(message_width));
-                }
-            }
-            if !line.is_empty() {
-                lines.push(line);
-            }
-            if lines.is_empty() {
-                lines.push(String::new());
-            }
-            let height = lines.len().min(2).min(usize::from(inner.bottom() - y));
-            if lines.len() > height {
-                lines[height - 1] = format!(
-                    "{}…",
-                    compact_label(
-                        &lines[height - 1],
-                        usize::from(message_width).saturating_sub(1)
-                    )
-                );
-            }
-            frame.render_widget(
-                Paragraph::new(event.time.as_str()).style(Style::default().fg(MUTED)),
-                Rect::new(inner.x, y, 9, 1),
-            );
-            frame.render_widget(
-                Paragraph::new(compact_label(&event.state, 13)).style(
-                    Style::default()
-                        .fg(event.tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Rect::new(inner.x + 10, y, 13, 1),
-            );
-            frame.render_widget(
-                Paragraph::new(
-                    lines
-                        .into_iter()
-                        .take(height)
-                        .map(Line::from)
-                        .collect::<Vec<_>>(),
-                )
-                .style(Style::default().fg(Color::White)),
-                Rect::new(message_x, y, message_width, height as u16),
-            );
-            y += height as u16;
-        }
-    }
-
     pub(crate) fn draw_journal(&self, frame: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -1927,254 +1366,6 @@ impl App {
             .split(area);
         self.draw_journal_header(frame, rows[0]);
         self.draw_journal_events(frame, rows[1]);
-    }
-
-    pub(crate) fn draw_llm_top(&self, frame: &mut Frame, area: Rect) {
-        let details = self.collector.current.llm_details.as_deref();
-        // The table title carries the totals; a panel above it only when the
-        // runtime reports engine details worth reading.
-        let rows = Layout::vertical([
-            Constraint::Length(if details.is_some() { 3 } else { 0 }),
-            Constraint::Min(6),
-            Constraint::Length(7),
-        ])
-        .split(area);
-        let sample = &self.collector.current;
-        let filtered = self.filtered_llm_processes();
-        let total_rss = filtered.iter().map(|p| p.rss).sum::<u64>();
-        let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>();
-        if let Some(text) = details {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {text}"),
-                    Style::default().fg(CYAN),
-                )))
-                .block(panel(
-                    &format!("{} ENGINE", sample.llm_provider),
-                    Tone::Cyan,
-                )),
-                rows[0],
-            );
-        }
-        let selected = self.top_selected.min(filtered.len().saturating_sub(1));
-        let visible = rows[1].height.saturating_sub(3).max(1) as usize;
-        let start = selected
-            .saturating_sub(visible.saturating_sub(1))
-            .min(filtered.len().saturating_sub(visible));
-        let table_mode = if rows[1].width >= 150 {
-            2
-        } else if rows[1].width >= 95 {
-            1
-        } else {
-            0
-        };
-        let (headers, widths): (Vec<&str>, Vec<Constraint>) = match table_mode {
-            2 => (
-                vec![
-                    "PID", "PROCESS", "CPU", "MEM%", "RSS", "PAGEIN/s", "OS STATE", "PROVIDER",
-                    "COMMAND",
-                ],
-                vec![
-                    Constraint::Length(8),
-                    Constraint::Length(20),
-                    Constraint::Length(8),
-                    Constraint::Length(10),
-                    Constraint::Length(13),
-                    Constraint::Length(11),
-                    Constraint::Length(9),
-                    Constraint::Length(12),
-                    Constraint::Min(20),
-                ],
-            ),
-            1 => (
-                vec![
-                    "PID", "PROCESS", "CPU", "RSS", "PAGEIN/s", "OS STATE", "PROVIDER",
-                ],
-                vec![
-                    Constraint::Length(7),
-                    Constraint::Min(20),
-                    Constraint::Length(8),
-                    Constraint::Length(12),
-                    Constraint::Length(10),
-                    Constraint::Length(9),
-                    Constraint::Length(12),
-                ],
-            ),
-            _ => (
-                vec!["PID", "PROCESS", "CPU", "RSS", "OS STATE"],
-                vec![
-                    Constraint::Length(7),
-                    Constraint::Min(22),
-                    Constraint::Length(8),
-                    Constraint::Length(12),
-                    Constraint::Length(9),
-                ],
-            ),
-        };
-        let table_rows = filtered
-            .iter()
-            .skip(start)
-            .take(visible)
-            .map(|process| {
-                let pagein = process
-                    .pagein_rate
-                    .map(|value| format!("{value:.1}"))
-                    .unwrap_or_else(|| "—".into());
-                let state = if process.state == "?" {
-                    "—"
-                } else {
-                    &process.state
-                };
-                let provider =
-                    process_provider(&process.name, &process.command).unwrap_or_else(|| "—".into());
-                let mut cells = vec![
-                    Cell::from(process.pid.to_string()),
-                    Cell::from(process.name.clone()),
-                    Cell::from(format!("{:.1}%", process.cpu)),
-                ];
-                if table_mode == 2 {
-                    // A three-cell meter on a dim track beside the share of RAM.
-                    cells.push(Cell::from(match process.memory_percent {
-                        Some(value) => Line::from(vec![
-                            Span::styled(meter_cells(value, 3), Style::default().fg(CYAN).bg(EDGE)),
-                            Span::raw(format!(" {value:.1}%")),
-                        ]),
-                        None => Line::from("—"),
-                    }));
-                }
-                cells.push(Cell::from(bytes(process.rss)));
-                if table_mode > 0 {
-                    cells.push(Cell::from(pagein));
-                }
-                cells.push(Cell::from(state.to_owned()));
-                if table_mode > 0 {
-                    cells.push(Cell::from(provider));
-                }
-                if table_mode == 2 {
-                    cells.push(Cell::from(process.command.clone()));
-                }
-                Row::new(cells)
-            })
-            .collect::<Vec<_>>();
-        let mut title = format!(
-            "LLM PROCESSES · {} · RSS {} · CPU {:.1}% · sort {}",
-            filtered.len(),
-            bytes(total_rss),
-            total_cpu,
-            self.top_sort.label()
-        );
-        if filtered.len() > visible {
-            title.push_str(&format!(
-                " · {}–{} of {}",
-                start + 1,
-                (start + visible).min(filtered.len()),
-                filtered.len()
-            ));
-        }
-        if !self.top_filter.is_empty() || self.top_filtering {
-            title.push_str(&format!(
-                " · filter /{}{}",
-                self.top_filter,
-                if self.top_filtering {
-                    "▏ · Enter/Esc finish"
-                } else {
-                    ""
-                }
-            ));
-        }
-        let table = Table::new(table_rows, widths)
-            .header(
-                Row::new(headers).style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
-            )
-            .row_highlight_style(
-                Style::default()
-                    .bg(Color::Rgb(35, 48, 67))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▸ ")
-            .block(panel(&title, Tone::Blue));
-        let mut table_state = TableState::default();
-        if !filtered.is_empty() {
-            table_state.select(Some(selected.saturating_sub(start)));
-        }
-        frame.render_stateful_widget(table, rows[1], &mut table_state);
-
-        let Some(process) = filtered.get(selected) else {
-            let message = if self.top_filter.is_empty() {
-                "No local LLM processes detected. Provider telemetry can still be available in Overview."
-            } else {
-                "No processes match this filter. Press c to clear it or / to edit."
-            };
-            frame.render_widget(
-                Paragraph::new(message)
-                    .wrap(Wrap { trim: true })
-                    .block(panel("SELECTED PROCESS", Tone::Muted)),
-                rows[2],
-            );
-            return;
-        };
-        let provider = process_provider(&process.name, &process.command);
-        // The wide table already shows these; narrower ones drop some columns.
-        let mut detail = Vec::new();
-        if table_mode < 2 {
-            detail.push(Line::from(format!(
-                "CPU {:.1}% · RSS {} · RAM {} · OS {} · PAGEIN {} pages/s",
-                process.cpu,
-                bytes(process.rss),
-                process
-                    .memory_percent
-                    .map(|v| format!("{v:.1}%"))
-                    .unwrap_or_else(|| "—".into()),
-                process.state,
-                process
-                    .pagein_rate
-                    .map(|v| format!("{v:.1}"))
-                    .unwrap_or_else(|| "—".into())
-            )));
-        }
-        if sample
-            .process_memory
-            .as_ref()
-            .is_some_and(|reading| reading.pid == process.pid)
-        {
-            detail.push(Line::from(format!(
-                "OS footprint {} · {}",
-                bytes(sample.process_memory.as_ref().unwrap().footprint),
-                process_memory::detail(sample)
-            )));
-        }
-        // Provider telemetry is runtime-wide; never attribute it to every PID.
-        if provider.as_deref() == Some(sample.llm_provider.as_str()) {
-            detail.push(Line::from(Span::styled(
-                format!(
-                    "RUNTIME {} · {} · {} · {}",
-                    sample.llm_provider,
-                    sample.llm_model,
-                    sample.llm_status.to_uppercase(),
-                    telemetry_source(sample)
-                ),
-                Style::default().fg(CYAN),
-            )));
-        } else {
-            detail.push(Line::from(Span::styled(
-                format!(
-                    "RUNTIME {} · model/state unavailable",
-                    provider.as_deref().unwrap_or("unknown")
-                ),
-                Style::default().fg(MUTED),
-            )));
-        }
-        detail.push(Line::from(format!("COMMAND {}", process.command)));
-        frame.render_widget(
-            Paragraph::new(detail)
-                .wrap(Wrap { trim: true })
-                .block(panel(
-                    &format!("SELECTED PROCESS · PID {} · {}", process.pid, process.name),
-                    Tone::Cyan,
-                )),
-            rows[2],
-        );
     }
 
     /// One line: how many events, which filter, and how recent the last one
@@ -2208,267 +1399,6 @@ impl App {
         );
     }
 
-    pub(crate) fn draw_journal_events(&self, frame: &mut Frame, area: Rect) {
-        let capacity = area.height.saturating_sub(2) as usize;
-        let filtered_events = self.filtered_journal_events();
-        let max_scroll = filtered_events.len().saturating_sub(capacity);
-        let scroll = self.journal_scroll.min(max_scroll);
-        let lines = filtered_events
-            .iter()
-            .rev()
-            .skip(scroll)
-            .take(capacity)
-            .map(|event| {
-                Line::from(vec![
-                    Span::styled(format!(" {} ", event.time), Style::default().fg(DIM)),
-                    Span::styled(
-                        format!("{:<16}", compact_label(&event.state, 16)),
-                        Style::default()
-                            .fg(event.tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  │  ", Style::default().fg(DIM)),
-                    Span::styled(&event.summary, Style::default().fg(Color::White)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        let text = if lines.is_empty() {
-            Text::from(Line::from(Span::styled(
-                " No events yet.",
-                Style::default().fg(MUTED),
-            )))
-        } else {
-            Text::from(lines)
-        };
-        let title = format!(
-            "EVENTS · {} · {}–{} of {}",
-            self.journal_filter.label(),
-            if filtered_events.is_empty() {
-                0
-            } else {
-                scroll + 1
-            },
-            (scroll + capacity).min(filtered_events.len()),
-            filtered_events.len()
-        );
-        frame.render_widget(
-            Paragraph::new(text)
-                .block(panel(&title, Tone::Blue))
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-        if filtered_events.len() > capacity {
-            let mut scrollbar_state = ScrollbarState::new(filtered_events.len()).position(scroll);
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .thumb_style(Style::default().fg(CYAN))
-                    .track_style(Style::default().fg(DIM)),
-                area,
-                &mut scrollbar_state,
-            );
-        }
-    }
-
-    pub(crate) fn draw_controls(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(PANEL_RAISED)),
-            area,
-        );
-        let help = Line::from(vec![
-            Span::styled(
-                " d",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                if self.diagnostics_open {
-                    " close "
-                } else {
-                    " diagnostics "
-                },
-                Style::default().fg(MUTED),
-            ),
-            Span::styled(
-                " ?",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" help ", Style::default().fg(MUTED)),
-            Span::styled(
-                "q",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" quit ", Style::default().fg(MUTED)),
-        ]);
-        let available = usize::from(area.width).saturating_sub(help.width());
-        let mut line = Line::from(Span::styled(
-            if self.diagnostics_open {
-                " Diagnostics ".into()
-            } else if self.tab == 0 {
-                format!(
-                    " {} · {}× ",
-                    self.charts.focused.label(),
-                    self.charts.zoom(self.charts.focused)
-                )
-            } else if self.tab == 1 {
-                " Processes ".into()
-            } else if self.tab == 2 {
-                " Journal ".into()
-            } else {
-                " Settings ".into()
-            },
-            Style::default().fg(CYAN),
-        ));
-        let hints = if self.diagnostics_open {
-            vec![
-                ("↑↓", "scroll"),
-                ("PgUp/Dn", "page"),
-                ("Tab", "view"),
-                ("p", if self.paused { "resume" } else { "pause" }),
-            ]
-        } else {
-            match self.tab {
-                0 => vec![
-                    (
-                        "Enter",
-                        if self.charts.expanded {
-                            "restore"
-                        } else {
-                            "expand"
-                        },
-                    ),
-                    ("↑↓←→", "chart"),
-                    ("+/−", "zoom"),
-                    ("Tab", "view"),
-                    ("p", if self.paused { "resume" } else { "pause" }),
-                    ("Shift+↑↓", "requests"),
-                    ("{ / }", "interval"),
-                ],
-                1 => vec![
-                    ("↑↓", "select"),
-                    ("s", "sort"),
-                    ("/", "filter"),
-                    ("Tab", "view"),
-                    ("p", "pause"),
-                ],
-                2 => vec![
-                    ("↑↓", "scroll"),
-                    ("f", "filter"),
-                    ("Tab", "view"),
-                    ("r", "reset"),
-                    ("p", "pause"),
-                ],
-                _ if self.settings.editing.is_some() => {
-                    vec![("Enter", "save"), ("Esc", "cancel")]
-                }
-                _ => vec![
-                    ("↑↓", "select"),
-                    ("Enter", "edit"),
-                    ("x", "default"),
-                    ("Tab", "view"),
-                ],
-            }
-        };
-        for (key, label) in hints {
-            let key = Span::styled(
-                format!(" {key}"),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            );
-            let label = Span::styled(format!(" {label} "), Style::default().fg(MUTED));
-            if line.width() + key.width() + label.width() <= available {
-                line.spans.extend([key, label]);
-            }
-        }
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(area.x, area.y, available as u16, 1),
-        );
-        frame.render_widget(
-            Paragraph::new(help),
-            Rect::new(
-                area.x + available as u16,
-                area.y,
-                area.width - available as u16,
-                1,
-            ),
-        );
-    }
-
-    pub(crate) fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let popup = if area.width < 120 || area.height < 36 {
-            centered_rect(94, 88, area)
-        } else {
-            centered_rect(60, 58, area)
-        };
-        frame.render_widget(Clear, popup);
-        let mut text = vec![
-            Line::from(Span::styled(
-                "CONTROLS",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from("1 / 2 / 3 / 4   Overview / Processes / Journal / Settings"),
-            Line::from("d               diagnostics and runtime setup"),
-            Line::from("Tab / Shift-Tab next / previous view"),
-            Line::from("p / Space       pause or resume"),
-            Line::from("r               reset history, chart zoom and alarm"),
-            Line::from("{ / }           change refresh interval (1–60s)"),
-            Line::from("a               acknowledge critical system alarm"),
-            Line::from("q / Ctrl-C      quit; Esc asks first · ? / h closes help"),
-            Line::from(""),
-        ];
-        text.extend(match self.tab {
-            0 => vec![
-                Line::from("Arrow keys      select a neighboring chart"),
-                Line::from("+ / - / wheel   zoom (time series linked); 0 reset"),
-                Line::from("Enter / Esc     enlarge / restore chart"),
-                Line::from("Mouse click     select chart; double / right-click enlarge"),
-                Line::from("Shift-↑↓        newer / older prompt"),
-                Line::from("Home / End      newest / oldest prompt"),
-                Line::from("PgUp / PgDn     move by ten requests"),
-                Line::from(if self.collector.current.has_discrete_gpus() {
-                    "[ / ] GPUs      select previous / next GPU card"
-                } else {
-                    ""
-                }),
-            ],
-            1 => vec![
-                Line::from("↑↓ / PgUp/PgDn  select process / move ten rows"),
-                Line::from("Home / End      first / last process"),
-                Line::from("s               cycle RSS / CPU / PID / name sort"),
-                Line::from("f or /          filter processes; c clears filter"),
-            ],
-            3 => vec![
-                Line::from("↑↓ / Home / End select a setting"),
-                Line::from("Enter           edit, or toggle on / off"),
-                Line::from("x / Delete      reset to the default"),
-                Line::from("Esc             cancel an edit"),
-            ],
-            _ => vec![
-                Line::from("↑↓ / PgUp/PgDn  newer / older events"),
-                Line::from("Home / End      newest / oldest event"),
-                Line::from("f / [ / ]       cycle event filters"),
-            ],
-        });
-        frame.render_widget(
-            Paragraph::new(text).wrap(Wrap { trim: true }).block(
-                Block::default()
-                    .title(" HELP ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(CYAN))
-                    .style(Style::default().bg(PANEL)),
-            ),
-            popup,
-        );
-    }
-
     pub(crate) fn draw_compact_warning(&self, frame: &mut Frame, area: Rect) {
         let text = vec![
             Line::from(Span::styled(
@@ -2493,7 +1423,7 @@ impl App {
 }
 
 /// Requests generating now, from the runtime's request list.
-fn generating_requests(sample: &crate::domain::Sample) -> usize {
+pub(crate) fn generating_requests(sample: &crate::domain::Sample) -> usize {
     sample
         .llm_requests
         .iter()
