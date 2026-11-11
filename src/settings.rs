@@ -153,7 +153,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "omx.port",
         section: "oMLX server",
         label: "Port",
-        help: "oMLX server port. Unset, mlxtop reads ~/.config/omlx-coding/server.env, then uses 8080.",
+        help: "oMLX server port. Unset, mlxtop reads ~/.config/omlx-coding/server.env, OMLX_PORT, then ~/.omlx/settings.json, then uses 8000.",
         kind: Kind::Port,
     },
     Field {

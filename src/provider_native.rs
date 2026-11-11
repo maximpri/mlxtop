@@ -148,10 +148,17 @@ pub(super) fn lm_studio(value: &Value) -> Option<LlmTelemetry> {
     let mut names = Vec::new();
     let mut contexts = Vec::new();
     for model in models {
-        let instances = model.get("loaded_instances")?.as_array()?;
-        if model.get("type").and_then(Value::as_str) == Some("embedding") {
+        // Embedding and decision models are not language models; a model
+        // without `loaded_instances` is simply not loaded.
+        if matches!(
+            model.get("type").and_then(Value::as_str),
+            Some("embedding" | "decision")
+        ) {
             continue;
         }
+        let Some(instances) = model.get("loaded_instances").and_then(Value::as_array) else {
+            continue;
+        };
         for instance in instances {
             names.push(identifier(instance, "id").or_else(|| identifier(model, "key"))?);
             contexts.push(counter(instance, &["config", "context_length"]));
@@ -549,8 +556,8 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
             "kv_cache_usage_ratio",
             None,
         ),
-        // Strata serves vLLM's gauge names on /metrics/prometheus and adds its
-        // own live-rate gauges under `strata:`.
+        // Strata serves vLLM's gauge names on /metrics?format=prometheus and adds
+        // its own live-rate gauges under `strata:`.
         "Strata" => (
             "vllm",
             "num_requests_running",
@@ -608,6 +615,21 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
         series.hits = key("prompt_tokens_cached_total");
         series.queries = key("prompt_tokens_total");
     }
+    if provider == "SGLang" {
+        // SGLang counts the prompt tokens served from its cache, not lookups.
+        series.hits = key("cached_tokens_total");
+        series.queries = key("prompt_tokens_total");
+    }
+    if provider == "vLLM"
+        && !metrics.values.contains_key(&series.queries)
+        && metrics
+            .values
+            .contains_key("vllm:gpu_prefix_cache_queries_total")
+    {
+        // vLLM 0.9.1 and earlier name the prefix-cache counters `gpu_prefix_cache_*`.
+        series.hits = key("gpu_prefix_cache_hits_total");
+        series.queries = key("gpu_prefix_cache_queries_total");
+    }
     if provider == "Strata" {
         series.live_generation = "strata:live_tok_s".into();
         series.live_prefill = "strata:live_prefill_tok_s_mean".into();
@@ -615,7 +637,8 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
     if let Some(namespace) = native {
         // Tokens generated so far by running requests, tokens prefilled so far by the
         // request in flight, and the tokens restored from the prefix cache (over all
-        // prompt tokens). vLLM's counters only move at request completion.
+        // prompt tokens). These are the server's own series; it publishes no
+        // vLLM-named token counters.
         series.generation = format!("{namespace}:generation_tokens_live");
         series.prompt = format!("{namespace}:prefill_tokens_live");
         series.hits = format!("{namespace}:prefix_cache_tokens_total");
@@ -801,13 +824,23 @@ impl MetricsHistory {
             // Completion bursts do not measure the speed of an in-flight request.
             result.generation_tps_live = false;
             result.prefill_tps_live = false;
-            result.model_memory = metrics.count("tensorfold:device_memory_bytes");
+            // Device memory is reported on CUDA only; on a Mac the process footprint
+            // holds the model.
+            result.model_memory = metrics
+                .count("tensorfold:device_memory_bytes")
+                .or_else(|| metrics.count("tensorfold:process_footprint_bytes"));
             result.total_prompt_tokens = metrics.count(&series.queries);
             result.total_cached_tokens = metrics.count(&series.hits).filter(|hits| {
                 result
                     .total_prompt_tokens
                     .is_some_and(|prompt| *hits <= prompt)
             });
+            details[0] = "throughput: completed-request token deltas".into();
+        }
+        if provider == "SGLang" {
+            // SGLang adds a request's tokens to its counters when it finishes.
+            result.generation_tps_live = false;
+            result.prefill_tps_live = false;
             details[0] = "throughput: completed-request token deltas".into();
         }
         if provider == "Strata" {

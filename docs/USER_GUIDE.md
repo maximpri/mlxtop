@@ -188,12 +188,16 @@ generation before it has a usual speed to compare with.
 
 ## oMLX telemetry
 
-The oMLX adapter checks `http://127.0.0.1:8080/health` by default and discovers
-the configured host, port and optional API key from:
+The oMLX adapter checks `http://127.0.0.1:8000/health` by default, oMLX's own
+default port. It discovers the host, port and optional API key from:
 
 ```text
 ~/.config/omlx-coding/server.env
 ```
+
+Without that file, it takes the port from `OMLX_PORT`, then from `server.port`
+(and `server.host`) in oMLX's `settings.json`, found in `OMLX_BASE_PATH` or by
+default `~/.omlx`.
 
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
@@ -539,7 +543,7 @@ you leave out keeps its built-in default.
   "history": 500,
   "omx": {
     "host": "127.0.0.1",
-    "port": 8080
+    "port": 8000
   },
   "memory_warn_load": 70,
   "memory_critical_load": 85,
@@ -562,7 +566,7 @@ you leave out keeps its built-in default.
 | `interval` | integer | 1 | Refresh interval in seconds (1–60) |
 | `history` | integer | 300 | Chart/journal history size (20–3600) |
 | `omx.host` | string | "127.0.0.1" | oMLX server host |
-| `omx.port` | integer | 8080 | oMLX server port |
+| `omx.port` | integer | 8000 | oMLX server port; unset, discovered as described in [oMLX telemetry](#omlx-telemetry) |
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `gpu_warn_load` | integer | 75 | GPU load (%) that turns "GPU BUSY" on, shown in yellow |
@@ -592,7 +596,8 @@ memory pressure are always recorded.
 - **CLI arguments override config file values.** `--interval` and `--history` win
   over `interval` and `history`.
 - **Explicit endpoint settings override discovery.** mlxtop reads
-  `~/.config/omlx-coding/server.env` to find a running oMLX server, but a host or
+  `~/.config/omlx-coding/server.env`, `OMLX_PORT` and oMLX's `settings.json` to
+  find a running oMLX server, but a host or
   port you set under `omx` always wins. Each field resolves on its own, so setting
   only `omx.port` keeps the discovered host.
 - **Out-of-range `interval` or `history` in the file falls back to the default**
@@ -799,7 +804,10 @@ existing usage JSONL envelope:
 ```
 
 `output_tokens_per_second` is an optional finite, nonnegative completed-request
-output average. It does not change the live generation chart.
+output average. It does not change the live generation chart. A `llama.cpp`
+record may instead carry llama-server's own `timings` as the client received
+them: `predicted_per_second` is read as the output speed and `cache_n` as the
+cached prompt tokens.
 
 Use a nonnegative integer measured from request dispatch to the first generated
 token. Add this field alongside `provider`, `request_id`, `observed_at` and
@@ -844,14 +852,14 @@ sessions to monitor independent endpoints concurrently.
 | `lmstudio` or `llmster` | 1234 | `/api/v1/models`, fallback `/api/v0/models`, then `/v1/models` |
 | `vllm` | 8000 | `/metrics` |
 | `sglang` | 30000 | `/metrics` (requires `--enable-metrics`) |
-| `llama.cpp` | 8080 | `/slots`, `/metrics` (requires `--metrics`) |
+| `llama.cpp` | 9931, then 8080 | `/slots`, `/metrics` (requires `--metrics`); builds from October 2026 listen on 9931 |
 | `koboldcpp` | 5001 | `/api/extra/perf` |
 | `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
 | `splash` | 8000 | `/status` |
 | `tensorfold` | 8080 | `/metrics`, `/v1/models` |
-| `strata` | 8080 | `/metrics/prometheus`, `/v1/models` |
+| `strata` | 8080, then 8095 | `/metrics?format=prometheus`, `/v1/models`; 8095 is a bare `strata serve` |
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
-| `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
+| `jan` | 1337, then 6767 | `/v1/models`; the desktop app serves on 1337, `jan serve` on 6767 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
 
 ```sh
@@ -921,8 +929,11 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   server-wide generation/prompt-token rates from successive counter samples.
   These are sampled server rates, not per-request averages. The first sample,
   counter resets, changed series and gaps longer than five seconds produce no
-  rate. vLLM also supplies interval and cumulative prefix-token cache reuse;
-  SGLang supplies prefix hit rate when a single series is unambiguous.
+  rate. vLLM supplies interval and cumulative prefix-token cache reuse (from
+  `gpu_prefix_cache_*` on vLLM 0.9.1 and earlier). SGLang's reuse is its cached
+  prompt tokens over all prompt tokens. SGLang adds a request's tokens to its
+  counters only when it finishes, so its rates are averages, kept out of live
+  rate charts and slowdown detection.
   Processes shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
@@ -971,7 +982,8 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
 - **TensorFold:** detected by the `tensorfold` or `tensorfold-native` executable,
   or selected with `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
-  completion-counter throughput, prefix-cache reuse, KV occupancy and device memory;
+  completion-counter throughput, prefix-cache reuse, KV occupancy and model memory
+  (device memory on CUDA, the process footprint on a Mac);
   `/v1/models` supplies model names. Throughput needs two samples and advances when
   requests finish; these rates are labeled as averages and excluded from live throughput
   charts and slowdown alarms. Request history and individual
@@ -987,7 +999,7 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
   root URL (without `/v1`). The existing remote-auth restrictions also apply.
 - **Strata:** detected by the `strata` or `strata-engine` executable,
-  or selected with `MLXTOP_PROVIDER=strata`. Reads `/metrics/prometheus` for active and waiting
+  or selected with `MLXTOP_PROVIDER=strata`. Reads `/metrics?format=prometheus` for active and waiting
   queues, KV occupancy, prefix-cache reuse, mean first-token time and engine GPU memory;
   `/v1/models` supplies model names beside the metric labels. Strata's own `strata:live_tok_s`
   and `strata:live_prefill_tok_s_mean` gauges drive live decode and prefill speeds; without
@@ -1122,7 +1134,7 @@ mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
-supported adapters. The application does not contain analytics, upload
+supported adapters. The application does not track how it is used, upload
 collected metrics, modify model state or send synthetic inference requests.
 
 Provider credentials are read only when needed and are never displayed. See

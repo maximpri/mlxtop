@@ -903,6 +903,57 @@ fn omlx_endpoint_discovery_reads_server_env_and_honors_config() {
 }
 
 #[test]
+fn a_stock_omlx_is_found_from_its_own_settings_and_port_variable() {
+    assert_eq!(DEFAULT_OMLX_PORT, 8000, "oMLX's own default");
+    let home = TempDir::new("omlx-settings");
+    home.write(
+        ".omlx/settings.json",
+        r#"{"server":{"host":"0.0.0.0","port":8123}}"#,
+    );
+    let found = discover_omlx_endpoint(Some(&home.0), None, None);
+    assert_eq!(found.port, Some(8123));
+    assert_eq!(
+        found.host, None,
+        "a wildcard bind is not an address to call"
+    );
+    assert_eq!(
+        discover_omlx_endpoint(Some(&home.0), None, Some("8200")).port,
+        Some(8200),
+        "OMLX_PORT overrides the settings file"
+    );
+    let base = TempDir::new("omlx-base");
+    base.write(
+        "settings.json",
+        r#"{"server":{"host":"10.0.0.7","port":8300}}"#,
+    );
+    let moved = discover_omlx_endpoint(Some(&home.0), Some(&base.0), Some("bad"));
+    assert_eq!(moved.port, Some(8300));
+    assert_eq!(moved.host.as_deref(), Some("10.0.0.7"));
+    home.write(
+        ".config/omlx-coding/server.env",
+        "PORT=8080
+",
+    );
+    assert_eq!(
+        discover_omlx_endpoint(Some(&home.0), None, Some("8200")).port,
+        Some(8080),
+        "a server.env written for oMLX wins"
+    );
+    assert_eq!(
+        parse_omlx_settings("not json"),
+        DiscoveredEndpoint::default()
+    );
+    assert_eq!(
+        parse_omlx_settings(r#"{"server":{"port":70000}}"#).port,
+        None
+    );
+    assert_eq!(
+        discover_omlx_endpoint(None, None, None),
+        DiscoveredEndpoint::default()
+    );
+}
+
+#[test]
 fn completion_logs_pick_the_newest_parsable_result() {
     assert_eq!(read_llm_stats(None).model, None);
     let home = TempDir::new("omlx-logs");

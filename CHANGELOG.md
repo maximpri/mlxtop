@@ -76,6 +76,31 @@
   and cached share, `DONE` with the tokens produced. GPU busy and idle flips
   are no longer journaled.
 
+### Runtimes
+
+- **oMLX is found at its own default port, 8000**, and from its own
+  settings: `OMLX_PORT`, then `server.port` in `~/.omlx/settings.json` (or
+  `OMLX_BASE_PATH`). A `~/.config/omlx-coding/server.env` still comes first.
+- **Strata's metrics are read again.** mlxtop polled `/metrics/prometheus`,
+  which holds llama-server's names, so every Strata series was empty; it now
+  reads `/metrics?format=prometheus`. A bare `strata serve` on 8095 is found
+  as well as the launcher on 8080.
+- **llama-server is looked for on 9931, its default since October 2026,**
+  then on 8080, and the Jan desktop app on 1337, then `jan serve` on 6767.
+  The port that answered is kept until a poll fails.
+- **SGLang shows a cache hit rate**: cached prompt tokens over all prompt
+  tokens. The counter names mlxtop read do not exist in SGLang. Its rates
+  move only when a request finishes, so they are now averages, not live.
+- **TensorFold shows model memory on a Mac**, from the process footprint;
+  device memory is reported on CUDA only.
+- **vLLM 0.9.1 and earlier show a cache hit rate**, from the older
+  `gpu_prefix_cache_*` names.
+- **llama.cpp usage records keep their speed and cache:** a record carrying
+  llama-server's own timings is read for `predicted_per_second` and
+  `cache_n`.
+- **LM Studio's `decision` models are not counted as chat models**, and a
+  model listed without loaded instances no longer empties the model list.
+
 ### Changed
 
 - `--once` prints `SLOWDOWN`, `UNUSUAL` and `USUAL SPEED` where it printed

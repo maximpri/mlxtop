@@ -2,9 +2,9 @@
 //! Read-only provider adapters. Only counters and identifiers cross into samples.
 use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
 use crate::json::{json_value, request_rate};
-use crate::runtime_diagnostics::{default_port, ProbeIssue, RuntimeReport};
+use crate::runtime_diagnostics::{default_port, default_ports, ProbeIssue, RuntimeReport};
 use serde_json::Value;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -303,6 +303,7 @@ pub(super) struct Adapter {
     backoff: Duration,
     kobold_uptime: Option<f64>,
     kobold_session: u64,
+    answered: Cell<Option<u16>>,
     llama: LlamaRate,
     endpoint: native::Endpoint,
     metrics: native::MetricsHistory,
@@ -326,6 +327,7 @@ impl Adapter {
             backoff: Duration::from_secs(1),
             kobold_uptime: None,
             kobold_session: 0,
+            answered: Cell::default(),
             llama: LlamaRate::default(),
             endpoint: native::Endpoint::from_env(),
             metrics: native::MetricsHistory::default(),
@@ -354,6 +356,7 @@ impl Adapter {
             self.next_poll = Instant::now();
             self.backoff = Duration::from_secs(1);
             self.kobold_uptime = None;
+            self.answered.set(None);
             self.llama = LlamaRate::default();
             self.metrics = native::MetricsHistory::default();
             self.splash = splash::SplashHistory::default();
@@ -440,12 +443,14 @@ impl Adapter {
                     result
                 }
                 Some("Strata") => {
-                    // /metrics answers with JSON unless the scraper asks for the
-                    // text format; /metrics/prometheus always serves it.
+                    // /metrics answers with JSON unless asked for the text format;
+                    // /metrics/prometheus holds llama-server's names, not vLLM's.
+                    // The launcher listens on 8080, a bare `strata serve` on 8095.
+                    let port = self.answering_port("Strata", "/v1/models");
                     let mut result = self
-                        .get(8080, "/metrics/prometheus")
+                        .get(port, "/metrics?format=prometheus")
                         .and_then(|body| self.metrics.observe("Strata", &body, now));
-                    let models = self.poll_models("Strata", 8080);
+                    let models = self.poll_models("Strata", port);
                     if let Some(result) = &mut result {
                         // The catalogue wins, but a failed catalogue poll never
                         // erases the name the metric labels carried.
@@ -474,12 +479,20 @@ impl Adapter {
                     .or_else(|| self.poll_models("LM Studio", 1234)),
                 Some("mlx-lm") => self.poll_models("mlx-lm", 8080),
                 Some("LocalAI") => self.poll_models("LocalAI", 8080),
-                Some("Jan") => self.poll_models("Jan", 6767),
+                Some("Jan") => {
+                    // The desktop app serves on 1337; `jan serve` on 6767.
+                    let port = self.answering_port("Jan", "/v1/models");
+                    self.poll_models("Jan", port)
+                }
                 Some("GPT4All") => self.poll_models("GPT4All", 4891),
                 _ => None,
             }
         };
         self.diagnostics.borrow_mut().finish(result.is_some());
+        if result.is_none() {
+            // The runtime may have moved to another of its ports.
+            self.answered.set(None);
+        }
         if let Some(mut result) = result {
             // A successful poll does not make KoboldCpp's last completion new.
             if result.provider.as_deref() == Some("KoboldCpp") {
@@ -532,6 +545,32 @@ impl Adapter {
         self.diagnostics
             .borrow_mut()
             .record(path, self.endpoint.get(self.port.unwrap_or(port), path))
+    }
+
+    /// The first of a runtime's default ports that answers `path`, remembered
+    /// until a poll fails. A configured port or URL is used as given.
+    fn answering_port(&self, provider: &str, path: &str) -> u16 {
+        let ports = default_ports(Some(provider));
+        if self.port.is_some() || self.endpoint.url.is_some() || ports.len() < 2 {
+            return default_port(Some(provider));
+        }
+        let port = self
+            .answered
+            .get()
+            .filter(|port| ports.contains(port))
+            .unwrap_or_else(|| {
+                let port = ports
+                    .iter()
+                    .copied()
+                    .find(|port| self.endpoint.get(*port, path).is_ok())
+                    .unwrap_or(ports[0]);
+                self.answered.set(Some(port));
+                port
+            });
+        if let Ok(url) = self.endpoint.base_url(port) {
+            self.diagnostics.borrow_mut().endpoint = url;
+        }
+        port
     }
 
     fn get_json(&self, port: u16, path: &str) -> Option<Value> {
@@ -601,15 +640,18 @@ impl Adapter {
     }
 
     fn poll_llama(&mut self, now: Instant) -> Option<LlmTelemetry> {
+        // Builds from 2026-10 listen on 9931 by default, older ones on 8080.
+        // /health answers whichever monitoring endpoints are disabled.
+        let port = self.answering_port("llama.cpp", "/health");
         // Either monitoring endpoint may be disabled independently.
         let slots = self
-            .get(8080, "/slots")
+            .get(port, "/slots")
             .and_then(|body| serde_json::from_str::<Value>(&body).ok());
         let live = self
             .llama
             .observe(slots.as_ref().and_then(llama_progress), now);
         let slots = slots.and_then(|slots| parse_llama_slots(&slots));
-        let metrics = self.get(8080, "/metrics");
+        let metrics = self.get(port, "/metrics");
         let mut result = merge_llama_metrics(slots, metrics.as_deref());
         // The server's own rates average finished requests and stay at zero
         // through a long first answer; a live rate replaces them while requests run.
@@ -860,13 +902,25 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .or_else(|| counter(usage, &["input_tokens_details", "cached_tokens"]))
         .or_else(|| counter(usage, &["cached_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_cached_count"]))
+        .or_else(|| {
+            (provider == "llama.cpp")
+                .then(|| counter(record, &["timings", "cache_n"]))
+                .flatten()
+        })
         .filter(|n| *n <= prompt);
     let model = identifier(record, "model")
         .or_else(|| identifier(record, "model_instance_id"))
         .unwrap_or_else(|| "unknown".into());
     let output_tps = record
         .get("timings")
-        .and_then(|timings| request_rate(timings, &["output_tokens_per_second"]))
+        .and_then(|timings| {
+            request_rate(timings, &["output_tokens_per_second"]).or_else(|| {
+                // llama-server's own completion timings.
+                (provider == "llama.cpp")
+                    .then(|| request_rate(timings, &["predicted_per_second"]))
+                    .flatten()
+            })
+        })
         .or_else(|| {
             (provider == "LM Studio")
                 .then(|| request_rate(usage, &["tokens_per_second"]))

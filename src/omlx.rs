@@ -330,7 +330,8 @@ impl LlmTelemetryClient {
 }
 
 /**
- * Endpoint values discovered from `~/.config/omlx-coding/server.env`.
+ * Endpoint values discovered from `~/.config/omlx-coding/server.env` or
+ * oMLX's own settings.
  *
  * `None` means the file said nothing usable about that field, which keeps
  * "absent" distinct from "explicitly set to the built-in default".
@@ -389,12 +390,62 @@ pub(crate) fn resolve_omlx_endpoint(
     (host, port)
 }
 
-pub(crate) fn read_omlx_endpoint(config: &Config, home: Option<&Path>) -> (String, u16) {
-    let discovered = home
+/// The endpoint a stock oMLX keeps in `settings.json`: `server.host` and
+/// `server.port`.
+pub(crate) fn parse_omlx_settings(text: &str) -> DiscoveredEndpoint {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return DiscoveredEndpoint::default();
+    };
+    let server = value.get("server");
+    DiscoveredEndpoint {
+        host: server
+            .and_then(|server| server.get("host"))
+            .and_then(Value::as_str)
+            .filter(|host| !host.is_empty() && *host != "0.0.0.0")
+            .map(str::to_owned),
+        port: server
+            .and_then(|server| server.get("port"))
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port > 0),
+    }
+}
+
+/**
+ * Where oMLX says it listens. A `server.env` written for oMLX wins; then
+ * oMLX's own `OMLX_PORT`, then `settings.json` in `OMLX_BASE_PATH` (by
+ * default `~/.omlx`). Each field is taken from the first source that has it.
+ */
+pub(crate) fn discover_omlx_endpoint(
+    home: Option<&Path>,
+    base_path: Option<&Path>,
+    env_port: Option<&str>,
+) -> DiscoveredEndpoint {
+    let server_env = home
         .map(|home| home.join(".config/omlx-coding/server.env"))
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|text| parse_omlx_server_env(&text))
         .unwrap_or_default();
+    let settings = base_path
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(|home| home.join(".omlx")))
+        .map(|base| base.join("settings.json"))
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|text| parse_omlx_settings(&text))
+        .unwrap_or_default();
+    let env_port = env_port
+        .and_then(|port| port.trim().parse::<u16>().ok())
+        .filter(|port| *port > 0);
+    DiscoveredEndpoint {
+        host: server_env.host.or(settings.host),
+        port: server_env.port.or(env_port).or(settings.port),
+    }
+}
+
+pub(crate) fn read_omlx_endpoint(config: &Config, home: Option<&Path>) -> (String, u16) {
+    let base_path = std::env::var_os("OMLX_BASE_PATH").map(std::path::PathBuf::from);
+    let env_port = std::env::var("OMLX_PORT").ok();
+    let discovered = discover_omlx_endpoint(home, base_path.as_deref(), env_port.as_deref());
     let (host, port) = resolve_omlx_endpoint(&discovered, config);
     if discovered
         .host

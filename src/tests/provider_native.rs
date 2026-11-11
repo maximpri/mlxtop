@@ -43,13 +43,17 @@ fn inventories_distinguish_loaded_models_from_catalogues_and_capacity() {
     let lm = lm_studio(&json!({"models":[
         {"key":"downloaded", "loaded_instances":[], "size_bytes":99999},
         {"key":"loaded", "loaded_instances":[{"id":"instance", "config":{"context_length":4096}}]},
-        {"type":"embedding", "loaded_instances":[{"id":"embedding"}]}
+        {"type":"embedding", "loaded_instances":[{"id":"embedding"}]},
+        {"type":"decision", "loaded_instances":[{"id":"decision"}]},
+        {"key":"listed without instances"}
     ]}))
     .unwrap();
     assert_eq!(lm.model.as_deref(), Some("instance"));
     assert_eq!(lm.model_memory, None);
     assert!(lm.details.unwrap().contains("4096"));
-    assert!(lm_studio(&json!({"models":[{}]})).is_none());
+    // A model without `loaded_instances` is not loaded, not a broken reply.
+    let none = lm_studio(&json!({"models":[{}]})).unwrap();
+    assert_eq!(none.model.as_deref(), Some("none"));
     assert!(lm_studio(&json!({"models":[{"loaded_instances":[{}]}]})).is_none());
     let legacy = lm_studio_legacy(
         &json!({"data":[{"id":"loaded", "state":"loaded"}, {"state":"not-loaded"}]}),
@@ -1064,4 +1068,70 @@ fn strata_metrics_report_live_gauges_queues_cache_and_memory() {
     assert_eq!(reset.prefill_tps, None);
     assert_eq!(reset.prefix_hit_rate, None);
     assert!(history.observe("Strata", "unrelated 1\n", now).is_none());
+}
+
+#[test]
+fn tensorfold_on_a_mac_reports_model_memory_from_the_process_footprint() {
+    let body = "tensorfold:requests_running 0\n\
+                tensorfold:requests_waiting 0\n\
+                tensorfold:process_footprint_bytes 2048\n";
+    let result = MetricsHistory::default()
+        .observe("TensorFold", body, Instant::now())
+        .unwrap();
+    assert_eq!(result.model_memory, Some(2048));
+    let both = format!("{body}tensorfold:device_memory_bytes 1024\n");
+    let result = MetricsHistory::default()
+        .observe("TensorFold", &both, Instant::now())
+        .unwrap();
+    assert_eq!(result.model_memory, Some(1024), "CUDA device memory wins");
+}
+
+#[test]
+fn sglang_hit_rate_is_cached_over_prompt_tokens_and_its_rates_are_not_live() {
+    let body = |output, prompt, cached| {
+        format!(
+            "sglang:num_running_reqs{{dp=\"0\"}} 1\n\
+             sglang:num_running_reqs{{dp=\"1\"}} 0\n\
+             sglang:num_queue_reqs 0\n\
+             sglang:generation_tokens_total {output}\n\
+             sglang:prompt_tokens_total {prompt}\n\
+             sglang:cached_tokens_total {cached}\n"
+        )
+    };
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let first = history.observe("SGLang", &body(10, 200, 50), now).unwrap();
+    assert_eq!(first.prefix_hit_rate, Some(25.0));
+    let next = history
+        .observe("SGLang", &body(50, 400, 150), now + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(next.generation_tps, Some(20.0));
+    assert_eq!(next.cache_interval_efficiency, Some(50.0));
+    assert!(
+        !next.generation_tps_live,
+        "SGLang counts tokens at completion"
+    );
+    assert!(!next.prefill_tps_live);
+    assert!(next
+        .details
+        .unwrap()
+        .starts_with("throughput: completed-request"));
+}
+
+#[test]
+fn vllm_0_9_and_earlier_report_a_hit_rate_from_the_gpu_prefix_cache_names() {
+    let old = "vllm:num_requests_running 1\n\
+               vllm:num_requests_waiting 0\n\
+               vllm:gpu_prefix_cache_hits_total 30\n\
+               vllm:gpu_prefix_cache_queries_total 120\n";
+    let result = MetricsHistory::default()
+        .observe("vLLM", old, Instant::now())
+        .unwrap();
+    assert_eq!(result.prefix_hit_rate, Some(25.0));
+    let both =
+        format!("{old}vllm:prefix_cache_hits_total 10\nvllm:prefix_cache_queries_total 100\n");
+    let result = MetricsHistory::default()
+        .observe("vLLM", &both, Instant::now())
+        .unwrap();
+    assert_eq!(result.prefix_hit_rate, Some(10.0), "current names win");
 }

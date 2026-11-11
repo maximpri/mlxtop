@@ -83,6 +83,7 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -146,6 +147,7 @@ fn llama_http_polls_metrics_even_when_slots_are_disabled() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -345,6 +347,28 @@ fn completed_request_speeds_use_decode_timing_and_reject_missing_or_invalid_data
     );
     value["timings"] = json!({"output_tokens_per_second":-1});
     assert_eq!(parse_usage(&value).unwrap().requests[0].output_tps, None);
+    // llama-server's own completion timings, written as the client received them.
+    value["timings"] = json!({"predicted_per_second":41.5, "cache_n":60});
+    let request = parse_usage(&value).unwrap().requests.remove(0);
+    assert_eq!(
+        request.output_tps, None,
+        "only llama.cpp records use its names"
+    );
+    assert_eq!(request.cached, None);
+    let mut value = record(
+        "llama.cpp",
+        json!({"prompt_tokens":100,"completion_tokens":80}),
+    );
+    value["timings"] = json!({"predicted_per_second":41.5, "cache_n":60});
+    let request = parse_usage(&value).unwrap().requests.remove(0);
+    assert_eq!(request.output_tps, Some(41.5));
+    assert_eq!(request.cached, Some(60));
+    value["timings"] = json!({"predicted_per_second":41.5, "cache_n":600});
+    assert_eq!(
+        parse_usage(&value).unwrap().requests[0].cached,
+        None,
+        "more cached than prompted is not believed"
+    );
 }
 
 /// An oMLX 0.7 distributed model as `_build_active_models_data` renders it:
@@ -492,6 +516,7 @@ fn kobold_restart_does_not_reuse_request_identity() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -572,6 +597,7 @@ fn provider_switch_drops_cached_counts() {
         backoff: Duration::from_secs(30),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -621,6 +647,7 @@ fn native_poll_uses_get_and_preserves_last_result_age() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -804,6 +831,16 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
                 ("/v1/models", r#"{"data":[{"id":"local-glm"}]}"#),
             ],
         ),
+        (
+            "Strata",
+            vec![
+                (
+                    "/metrics?format=prometheus",
+                    "vllm:num_requests_running 1\n",
+                ),
+                ("/v1/models", r#"{"data":[{"id":"strata-model"}]}"#),
+            ],
+        ),
         ("vLLM", vec![("/metrics", "vllm:num_requests_running 1\n")]),
         ("SGLang", vec![("/metrics", "sglang:num_running_reqs 1\n")]),
     ] {
@@ -837,6 +874,7 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
             backoff: Duration::from_secs(1),
             kobold_uptime: None,
             kobold_session: 0,
+            answered: Default::default(),
             llama: LlamaRate::default(),
             endpoint: native::Endpoint::default(),
             metrics: native::MetricsHistory::default(),
@@ -894,6 +932,7 @@ fn diagnostic_adapter(provider: &str, port: u16) -> Adapter {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -1033,6 +1072,7 @@ fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        answered: Default::default(),
         llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
@@ -1153,4 +1193,33 @@ fn llama_live_rate_resets_on_gaps_and_failed_reads() {
         rate.observe(Some(vec![]), start + Duration::from_secs(64)),
         None
     );
+}
+
+#[test]
+fn runtimes_with_two_default_ports_use_the_one_that_answered() {
+    use crate::runtime_diagnostics::default_ports;
+    assert_eq!(default_ports(Some("llama.cpp")), &[9931, 8080]);
+    assert_eq!(default_ports(Some("Jan")), &[1337, 6767]);
+    assert_eq!(default_ports(Some("Strata")), &[8080, 8095]);
+    assert!(default_ports(Some("Ollama")).is_empty());
+    let mut adapter = diagnostic_adapter("Jan", 1);
+    adapter.port = None;
+    adapter.answered.set(Some(6767));
+    assert_eq!(adapter.answering_port("Jan", "/v1/models"), 6767);
+    assert!(adapter.diagnostics.borrow().endpoint.ends_with(":6767"));
+    // A port the runtime never uses is not remembered for it.
+    adapter.answered.set(Some(5001));
+    adapter.endpoint.url = Some("http://127.0.0.1:1".into());
+    assert_eq!(
+        adapter.answering_port("Jan", "/v1/models"),
+        1337,
+        "a configured URL is used as given"
+    );
+    assert_eq!(adapter.answering_port("Ollama", "/api/ps"), 11434);
+    let configured = diagnostic_adapter("llama.cpp", 4242);
+    assert_eq!(configured.answering_port("llama.cpp", "/health"), 9931);
+    adapter.answered.set(Some(1337));
+    adapter.configured = None;
+    adapter.selected(Some("Ollama"));
+    assert_eq!(adapter.answered.get(), None, "a new runtime probes again");
 }
