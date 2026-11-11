@@ -421,3 +421,39 @@ fn details_lead_with_problems_then_latency_memory_and_capacity() {
         "zero is not a problem"
     );
 }
+
+#[test]
+fn draft_acceptance_is_measured_between_polls_not_over_the_engines_life() {
+    let mut history = SplashHistory::default();
+    let now = Instant::now();
+    let decoding = json!([request(1, "decode", 100, 100, 10)]);
+    let with_drafts = |drafted: u64, accepted: u64| {
+        let mut value = status(1000 + drafted, 6000, 3000.0, decoding.clone());
+        value["metrics"]["drafted_tokens"] = json!(drafted);
+        value["metrics"]["accepted_draft_tokens"] = json!(accepted);
+        value
+    };
+    let first = history.observe(&with_drafts(400, 300), now).unwrap();
+    assert_eq!(first.draft_acceptance, None, "one poll has no interval");
+    // 100 drafted since, 40 accepted: 40% now, though 68% over its life.
+    let next = history
+        .observe(&with_drafts(500, 340), now + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(next.draft_acceptance, Some(0.4));
+    // Nothing drafted in the interval: no reading.
+    let idle = history
+        .observe(&with_drafts(500, 340), now + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(idle.draft_acceptance, None);
+    // A model without a draft never reports one.
+    let mut plain = status(2000, 6000, 3000.0, decoding.clone());
+    plain["metrics"]
+        .as_object_mut()
+        .unwrap()
+        .retain(|key, _| !key.contains("draft"));
+    history.observe(&plain, now + Duration::from_secs(3));
+    let later = history
+        .observe(&plain, now + Duration::from_secs(4))
+        .unwrap();
+    assert_eq!(later.draft_acceptance, None);
+}

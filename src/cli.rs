@@ -82,7 +82,7 @@ pub(crate) fn help_text(platform: Platform) -> String {
          -h, --help         show help\n\
          Config file: {}\n\
          Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
-         Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · d diagnostics · ? help",
+         Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · d diagnostics · u session summary · ? help",
         if platform == Platform::Windows {
             r"%USERPROFILE%\.config\mlxtop\config.json"
         } else {
@@ -299,6 +299,13 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     terminal.show_cursor()?;
     terminal_guard.disarm();
+    // What the session amounted to stays in the terminal after it closes.
+    if app.collector.session.generating + app.collector.session.prefilling > 0.0 {
+        println!("mlxtop session summary");
+        for line in app.summary_lines() {
+            println!("  {line}");
+        }
+    }
     drop(app);
     result
 }

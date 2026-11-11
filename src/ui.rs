@@ -111,6 +111,9 @@ impl App {
         if self.diagnostics_open {
             self.draw_diagnostics(frame, outer[1]);
         }
+        if self.summary_open {
+            self.draw_summary(frame, outer[1]);
+        }
         if self.help {
             self.draw_help(frame, area);
         }
@@ -1020,11 +1023,16 @@ impl App {
             // oMLX and Splash report generation summed over running requests;
             // say so when there are several, since each gets only its share.
             ChartMetric::Generation => {
-                let unit = match generating_requests(sample) {
+                let mut unit = match generating_requests(sample) {
                     n if n > 1 && area.width >= 38 => format!("tok/s · total of {n} requests"),
                     n if n > 1 => format!("tok/s · {n} req"),
                     _ => "tok/s".into(),
                 };
+                // What speculative decoding earns: often the largest reason
+                // one answer runs faster than another on a healthy machine.
+                if let Some(share) = sample.llm_draft_acceptance {
+                    unit.push_str(&format!(" · draft {:.0}%", share * 100.0));
+                }
                 // What the dashed line is: the speed slowdowns are judged
                 // against. It gives way before the unit does.
                 // With the work it is for, when it is for one kind of work.
@@ -2452,6 +2460,50 @@ impl App {
         );
     }
 
+    /// The session's lines: what it amounted to, the change worth making first.
+    pub(crate) fn summary_lines(&self) -> Vec<String> {
+        let sample = &self.collector.current;
+        let saved = sample.llm_watched_cached_tokens.and_then(|cached| {
+            cache_impact::saved_seconds(
+                cached,
+                cache_impact::prefill_speed(&self.collector.prefill_history, sample),
+            )
+        });
+        crate::session::lines(
+            &self.collector.session,
+            &self.collector.request_history,
+            sample,
+            saved,
+        )
+    }
+
+    pub(crate) fn draw_summary(&self, frame: &mut Frame, area: Rect) {
+        let popup = if area.width < 100 {
+            centered_rect(96, 80, area)
+        } else {
+            centered_rect(70, 60, area)
+        };
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Session summary ")
+            .title_bottom(" any key closes ")
+            .border_style(Style::default().fg(CYAN))
+            .style(Style::default().bg(PANEL));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        frame.render_widget(
+            Paragraph::new(
+                self.summary_lines()
+                    .into_iter()
+                    .map(Line::from)
+                    .collect::<Vec<_>>(),
+            )
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+    }
+
     pub(crate) fn draw_help(&self, frame: &mut Frame, area: Rect) {
         let popup = if area.width < 120 || area.height < 36 {
             centered_rect(94, 88, area)
@@ -2468,6 +2520,7 @@ impl App {
             )),
             Line::from("1 / 2 / 3 / 4   Overview / Processes / Journal / Settings"),
             Line::from("d               diagnostics and runtime setup"),
+            Line::from("u               session summary: time lost, where requests' time went"),
             Line::from("Tab / Shift-Tab next / previous view"),
             Line::from("p / Space       pause or resume"),
             Line::from("r               reset history, chart zoom and alarm"),

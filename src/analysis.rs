@@ -68,6 +68,8 @@ pub(crate) struct CorrelationObservation {
     pub(crate) ssd_full: bool,
     /// CPU the runtime's processes use, in percent of one core.
     pub(crate) cpu: Option<f64>,
+    /// The share of draft tokens accepted since the last poll.
+    pub(crate) draft_acceptance: Option<f64>,
     /// Tokens held by the requests writing an answer (prompt and output so
     /// far, together), when the runtime lists its requests.
     pub(crate) context: Option<u64>,
@@ -129,13 +131,14 @@ pub(crate) enum Signal {
     ModelMemory,
     MetalMemory,
     Cpu,
+    DraftRejection,
     GpuIdle,
 }
 
 /// Every signal, the host's limits before the workload: when several are
 /// unusual at once, the first is named as the reason. An idle GPU comes
 /// last: it is what a slowdown looks like, and a reason only by itself.
-pub(crate) const SIGNALS: [Signal; 11] = [
+pub(crate) const SIGNALS: [Signal; 12] = [
     Signal::Thermal,
     Signal::Pressure,
     Signal::Paging,
@@ -146,6 +149,7 @@ pub(crate) const SIGNALS: [Signal; 11] = [
     Signal::ModelMemory,
     Signal::MetalMemory,
     Signal::Cpu,
+    Signal::DraftRejection,
     Signal::GpuIdle,
 ];
 
@@ -186,6 +190,7 @@ impl Signal {
             Self::ModelMemory => CorrelationCause::ModelMemory,
             Self::MetalMemory => CorrelationCause::MetalMemory,
             Self::Cpu => CorrelationCause::Cpu,
+            Self::DraftRejection => CorrelationCause::DraftAcceptance,
             Self::GpuIdle => CorrelationCause::GpuIdle,
         }
     }
@@ -215,6 +220,9 @@ impl Signal {
             Self::ModelMemory => fraction(o.model_memory, o.model_memory_max),
             Self::MetalMemory => fraction(o.metal_in_use, o.metal_alloc),
             Self::Cpu => o.cpu,
+            // Judged as the share of draft tokens rejected, so that it is
+            // unusual when it rises.
+            Self::DraftRejection => o.draft_acceptance.map(|share| 1.0 - share),
             // Judged as the share of the GPU left idle, so that like every
             // other signal it is unusual when it rises.
             Self::GpuIdle => o.gpu_util.map(|gpu| 100.0 - f64::from(gpu.min(100))),
@@ -231,6 +239,8 @@ impl Signal {
             Self::ModelMemory | Self::MetalMemory => (0.90, 0.0, 0.02),
             // Half a core, and half as much again as usual.
             Self::Cpu => (50.0, 0.5, 50.0),
+            // Under 70% accepted, and fifteen points fewer than usual.
+            Self::DraftRejection => (0.30, 0.0, 0.15),
             // A GPU under 70% busy, and twenty points idler than usual.
             Self::GpuIdle => (30.0, 0.0, 20.0),
         };
@@ -277,6 +287,11 @@ impl Signal {
             Self::Cpu => format!(
                 "runtime CPU {:.0}% (usual {usual:.0}%)",
                 o.cpu.unwrap_or_default()
+            ),
+            Self::DraftRejection => format!(
+                "draft acceptance {:.0}% (usual {:.0}%)",
+                o.draft_acceptance.unwrap_or_default() * 100.0,
+                (1.0 - usual) * 100.0
             ),
             Self::GpuIdle => format!(
                 "GPU {}% (usual {:.0}%)",
@@ -1314,6 +1329,7 @@ impl CorrelationObservation {
             disk: sample.disk,
             ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
             cpu: (sample.llm_count > 0).then_some(sample.llm_cpu),
+            draft_acceptance: sample.llm_draft_acceptance,
             context: (!generating.is_empty()).then(|| {
                 generating
                     .iter()

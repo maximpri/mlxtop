@@ -1,56 +1,100 @@
 // SPDX-License-Identifier: MIT
 //! Separate measured problems from high resource use during normal work.
 use crate::domain::{CorrelationCause, Sample, TelemetrySource, ThroughputDirection, Tone};
-use crate::formatting::{count, llm_generation_rate_label, percent_u8, pressure_state_label, rate};
+use crate::formatting::{
+    bytes, count, llm_generation_rate_label, percent_u8, pressure_state_label, rate,
+};
 use std::time::{Duration, SystemTime};
 
 pub(super) struct Finding {
     pub title: String,
     pub evidence: String,
     pub context: String,
-    pub next: &'static str,
+    pub next: String,
     pub actionable: bool,
     pub tone: Tone,
 }
 
-/// What to check for a measured slowdown, by its cause.
-pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
+/// What to change for a measured slowdown, by its cause, with the readings
+/// that make it worth changing: advice a person can act on, not a category.
+pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
+    let lead = &sample.correlation.lead;
+    // What RAM has left, when the OS reports it: ` (4.3 GiB of RAM left)`.
+    let headroom = crate::memory_composition::segments(sample)
+        .map(|sizes| {
+            format!(
+                " ({} of RAM left)",
+                bytes(crate::memory_headroom::left(sizes))
+            )
+        })
+        .unwrap_or_default();
+    let limit = crate::memory_composition::gpu_limit(sample);
     match sample.correlation.cause {
-        CorrelationCause::Paging => "Reduce active models; recheck paging.",
-        CorrelationCause::Compression => "Check whether paging also rises.",
-        CorrelationCause::MemoryPressure
-        | CorrelationCause::ModelMemory
-        | CorrelationCause::MetalMemory => "Free memory; recheck generation speed.",
-        CorrelationCause::Thermal => "Reduce concurrency; recheck thermals.",
+        CorrelationCause::Paging => format!(
+            "The model no longer fits beside everything else{headroom}: close other apps or models, or load a smaller quantisation."
+        ),
+        CorrelationCause::Compression => {
+            "macOS is compressing memory to make room: free memory before paging starts.".into()
+        }
+        CorrelationCause::MemoryPressure => format!(
+            "Memory is under pressure{headroom}: close other apps or models, or shorten the context."
+        ),
+        CorrelationCause::ModelMemory | CorrelationCause::MetalMemory => match limit {
+            Some(limit) if sample.wired.saturating_mul(10) >= limit.saturating_mul(9) => format!(
+                "Wired memory is {} of the {} GPU limit: raise it (sudo sysctl iogpu.wired_limit_mb=…) or shorten the context.",
+                bytes(sample.wired),
+                bytes(limit)
+            ),
+            _ => "The model's memory is near its ceiling: shorten the context or lower concurrency.".into(),
+        },
+        CorrelationCause::Thermal => match sample.system_power_mw {
+            Some(milliwatts) => format!(
+                "macOS is limiting speed for heat at {:.0} W: improve airflow, or run fewer requests at once.",
+                milliwatts as f64 / 1000.0
+            ),
+            None => "macOS is limiting speed for heat: improve airflow, or run fewer requests at once.".into(),
+        },
         // The engine stopped with nothing on the host to show for it:
         // the reason is inside the runtime, in its log at this time.
         // Any disk work beside a stall is the runtime's own prompt cache.
-        CorrelationCause::Stall | CorrelationCause::DiskIo
-            if sample.correlation.lead.contains("SSD cache full") =>
-        {
-            "SSD cache is full and evicting; enlarge it or free the disk."
+        CorrelationCause::Stall | CorrelationCause::DiskIo if lead.contains("SSD cache full") => {
+            "The SSD prompt cache is evicting to make room as it reads: a faster disk, or a larger cache, keeps prefixes ready.".into()
         }
         CorrelationCause::Stall | CorrelationCause::DiskIo
-            if sample.correlation.lead.contains("disk ")
-                || sample.correlation.lead.contains("SSD cache") =>
+            if lead.contains("disk ") || lead.contains("SSD cache") =>
         {
-            "Runtime waited on its disk cache; check that disk's speed."
+            format!("The runtime waited on its disk ({lead}): put its cache on a faster disk.")
         }
-        CorrelationCause::DiskIo => "Runtime used its disk mid-answer; check its cache disk.",
-        CorrelationCause::Stall
-            if sample.correlation.lead.contains("GPU idle")
-                && !sample.correlation.lead.contains("paging") =>
-        {
-            "Runtime idle mid-answer; check its log at this time."
+        CorrelationCause::DiskIo => format!(
+            "The runtime used its disk mid-answer ({lead}): check what it reads, and that disk's speed."
+        ),
+        CorrelationCause::Stall if lead.contains("GPU idle") && !lead.contains("paging") => {
+            "The runtime stopped with the machine idle: the cause is inside it; check its log at this time.".into()
         }
-        CorrelationCause::Stall => "Check the signals beside the stall; recheck after it resumes.",
+        CorrelationCause::Stall => format!("Generation stopped beside {lead}: start there."),
         CorrelationCause::ConcurrentPrefill => {
-            "Expected while the prompt prefills; recheck after it finishes."
+            "A prompt is being read beside this answer: expected; it recovers when the prompt is read.".into()
         }
-        CorrelationCause::Queueing => "Compare speed with one active request.",
-        CorrelationCause::Cpu => "Runtime is busy on the CPU; check what it is doing there.",
-        CorrelationCause::GpuIdle => "GPU is waiting on the runtime; check its CPU and disk work.",
-        CorrelationCause::None => "Check the runtime's log at this time.",
+        CorrelationCause::Queueing => format!(
+            "{} waiting: each answer slows as more run at once; lower the client's concurrency if latency matters more than throughput.",
+            match sample.llm_waiting_requests.filter(|waiting| *waiting > 0) {
+                Some(1) => "A request is".to_owned(),
+                Some(waiting) => format!("{waiting} requests are"),
+                None => "Requests are".to_owned(),
+            }
+        ),
+        CorrelationCause::Cpu => {
+            "The runtime is busy on the CPU: check that the model runs on the GPU, and for tokenizer or sampling work.".into()
+        }
+        CorrelationCause::GpuIdle => {
+            "The GPU is waiting on the runtime: check its CPU and disk work beside it.".into()
+        }
+        CorrelationCause::DraftAcceptance => {
+            "The draft model is guessing worse on this text: the machine is not the limit; a better-matched draft, or none, may be faster.".into()
+        }
+        CorrelationCause::None => {
+            "Nothing on the machine explains it: the text, the draft model or the runtime itself; check the runtime's log at this time.".into()
+        }
     }
 }
 
@@ -63,7 +107,7 @@ pub(super) fn assess(sample: &Sample) -> Finding {
         } else {
             finding.title = format!("Local host: {}", finding.title);
             if !finding.actionable {
-                finding.next = "Remote inference is not correlated with local hardware.";
+                finding.next = "Remote inference is not correlated with local hardware.".into();
             }
         }
     }
@@ -89,7 +133,7 @@ fn assess_observation(sample: &Sample) -> Finding {
             pressure_state_label(sample),
             sample.thermal
         ),
-        next: "Waiting for a live throughput baseline.",
+        next: "Waiting for a live throughput baseline.".into(),
         actionable: false,
         tone: Tone::Muted,
     };
@@ -111,7 +155,7 @@ fn assess_observation(sample: &Sample) -> Finding {
     };
     if let Some(action) = action {
         finding.title = sentence_case(impact);
-        finding.next = action;
+        finding.next = action.into();
         finding.actionable = true;
         finding.tone = if sample.pressure == "RED" {
             Tone::Red
@@ -129,19 +173,19 @@ fn assess_observation(sample: &Sample) -> Finding {
     if let Some(issue) = &sample.gpu_issue {
         finding.title = issue.title();
         finding.evidence = issue.evidence();
-        finding.next = issue.next();
+        finding.next = issue.next().into();
         finding.actionable = true;
         finding.tone = Tone::Yellow;
         return finding;
     }
     if sample.impact == "SAMPLING" || !sample.rate_ready {
         finding.title = "Collecting system baseline".into();
-        finding.next = "Wait for the next sample.";
+        finding.next = "Wait for the next sample.".into();
         return finding;
     }
     if sample.impact == "DATA LIMITED" {
         finding.title = "System counters incomplete".into();
-        finding.next = "Restore missing counters before tuning.";
+        finding.next = "Restore missing counters before tuning.".into();
         finding.actionable = true;
         return finding;
     }
@@ -206,7 +250,7 @@ fn assess_observation(sample: &Sample) -> Finding {
             count(sample.llm_active_requests),
             llm_generation_rate_label(sample)
         );
-        finding.next = "Reduce concurrency; recheck queue length.";
+        finding.next = "Reduce concurrency; recheck queue length.".into();
         finding.actionable = true;
         finding.tone = Tone::Yellow;
         return finding;
@@ -218,10 +262,11 @@ fn assess_observation(sample: &Sample) -> Finding {
     }
     if live && matches!(sample.correlation.direction, ThroughputDirection::Flat) {
         // Nothing to say: an empty note keeps the strip quiet.
-        finding.next = "";
+        finding.next = "".into();
     } else if sample.llm_status == "untracked" {
         finding.next =
-            "GPU busy outside oMLX's request tracking (oMLX benchmark on Splash?) · no live rates.";
+            "GPU busy outside oMLX's request tracking (oMLX benchmark on Splash?) · no live rates."
+                .into();
     } else if !live
         && (matches!(sample.llm_status.as_str(), "idle" | "ready")
             // oMLX reports `healthy` once no model has requests left.
@@ -231,15 +276,15 @@ fn assess_observation(sample: &Sample) -> Finding {
                 && sample.llm_waiting_requests.unwrap_or(0) == 0))
     {
         // The status badge already says idle.
-        finding.next = "";
+        finding.next = "".into();
     } else if matches!(
         sample.llm_status.as_str(),
         "prefilling" | "loading" | "waiting" | "restarting" | "paused"
     ) {
         // No generation rate is expected before the first token.
-        finding.next = "";
+        finding.next = "".into();
     } else if !live {
-        finding.next = "Live generation rate unavailable.";
+        finding.next = "Live generation rate unavailable.".into();
     }
     finding
 }

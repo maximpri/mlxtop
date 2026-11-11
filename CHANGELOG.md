@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.18 — 2026-11-11
+## 3.3.0-rc.19 — 2026-11-11
 
 ### Diagnosis
 
@@ -27,6 +27,17 @@
   the headline reads `Prefill slowed`. Beside an answer being written, a
   prefill stays a reason, not a subject. On one server's log (2,607 prefill
   samples in 235 prefills) the rule found no slowdown.
+- **Advice names the change and the reading behind it**: `Wired memory is
+  31.0 GiB of the 32.0 GiB GPU limit: raise it (sudo sysctl
+  iogpu.wired_limit_mb=…) or shorten the context`, `The model no longer
+  fits beside everything else (2.0 GiB of RAM left)`, `macOS is limiting
+  speed for heat at 92 W`. With nothing on the machine to explain a
+  slowdown, the advice says so and points at the text, the draft model or
+  the runtime.
+- **Speculative decoding's draft acceptance is measured.** With Splash, the
+  share of draft tokens accepted since the last poll is read, shown on the
+  generation chart's edge (`draft 72%`), and named as a slowdown's reason
+  when it falls: the machine is then not the limit. oMLX keeps it private.
 - **A request that starts or ends between two polls is not judged.** Its
   tokens are divided over an interval it wrote for only part of, so its
   speed reads low: a 73-token reply at 130 tok/s read 76 tok/s and was
@@ -155,6 +166,18 @@
   `cache_n`.
 - **LM Studio's `decision` models are not counted as chat models**, and a
   model listed without loaded instances no longer empties the model list.
+
+### Session summary
+
+- **`u` opens what the session amounted to**, and mlxtop prints it on exit:
+  time watched and spent writing and reading prompts; speed lost to each
+  cause, largest first (the share of each interval spent below the usual
+  speed, a stall's whole interval); where the requests' time went (queue,
+  prompt, answer) with the median and slowest time to first token and the
+  three slowest answers; the KV cache hit rate with the prefill time saved
+  while watched; and joules per token written, from the machine's power.
+- **A finished request says where its time went** on its Journal row:
+  `DONE 4c6a… · 700 out · queued 0.4s → prompt 18s → answer 12s`.
 
 ### Recording and replay
 

@@ -250,6 +250,8 @@ pub(crate) enum CorrelationCause {
     Cpu,
     /// The GPU unusually idle while an answer is written: it is waiting.
     GpuIdle,
+    /// Speculative decoding accepting unusually few draft tokens.
+    DraftAcceptance,
 }
 
 impl CorrelationCause {
@@ -268,6 +270,7 @@ impl CorrelationCause {
             Self::DiskIo => "runtime disk I/O",
             Self::Cpu => "runtime CPU",
             Self::GpuIdle => "GPU underused",
+            Self::DraftAcceptance => "draft acceptance",
         }
     }
 
@@ -281,7 +284,8 @@ impl CorrelationCause {
             | Self::ModelMemory
             | Self::DiskIo
             | Self::Cpu
-            | Self::GpuIdle => Tone::Yellow,
+            | Self::GpuIdle
+            | Self::DraftAcceptance => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -359,7 +363,7 @@ pub(crate) struct CorrelationInsight {
 
 /// One slowdown, from the sample where speed first fell to now. The speed
 /// it fell from stays fixed, so a long slowdown is not mistaken for normal.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DropEpisode {
     /// Normal speed before the drop, in tok/s.
     pub(crate) reference: f64,
@@ -519,6 +523,9 @@ impl DiskActivity {
 #[derive(Clone, Default)]
 pub(crate) struct LlmTelemetry {
     pub(crate) ssd_cache: Option<SsdCache>,
+    /// The share of draft tokens accepted since the last poll (speculative
+    /// decoding), 0–1.
+    pub(crate) draft_acceptance: Option<f64>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -640,6 +647,10 @@ pub(crate) struct Sample {
     pub(crate) llm_watched_cached_tokens: Option<u64>,
     pub(crate) llm_cache_interval_efficiency: Option<f64>,
     pub(crate) llm_prefix_hit_rate: Option<f64>,
+    /// The share of draft tokens accepted since the last poll, 0–1: what
+    /// speculative decoding earned. Low acceptance is slow decoding on a
+    /// healthy machine.
+    pub(crate) llm_draft_acceptance: Option<f64>,
     pub(crate) llm_active_requests: Option<u64>,
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
@@ -783,6 +794,7 @@ impl Default for Sample {
             llm_watched_cached_tokens: None,
             llm_cache_interval_efficiency: None,
             llm_prefix_hit_rate: None,
+            llm_draft_acceptance: None,
             llm_active_requests: None,
             llm_waiting_requests: None,
             llm_model_memory: None,

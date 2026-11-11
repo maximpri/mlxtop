@@ -19,8 +19,12 @@ pub(crate) fn chart_of(cause: CorrelationCause) -> Option<Chart> {
         CorrelationCause::DiskIo => Chart::Cache,
         CorrelationCause::ConcurrentPrefill => Chart::Prefill,
         CorrelationCause::Queueing => Chart::Queue,
-        // The runtime's CPU is a figure in the header, not a chart.
-        CorrelationCause::Cpu | CorrelationCause::Stall | CorrelationCause::None => return None,
+        // The runtime's CPU is a figure in the header, and draft acceptance
+        // one on the generation chart's edge: neither has a chart of its own.
+        CorrelationCause::Cpu
+        | CorrelationCause::DraftAcceptance
+        | CorrelationCause::Stall
+        | CorrelationCause::None => return None,
     })
 }
 

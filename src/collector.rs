@@ -67,6 +67,7 @@ pub(crate) struct CollectorView {
     pub(crate) signals: VecDeque<SignalEvent>,
     pub(crate) request_history: request_history::History,
     pub(crate) operator_history: operator_history::History,
+    pub(crate) session: crate::session::Session,
 }
 
 #[derive(Clone)]
@@ -107,6 +108,7 @@ pub(crate) struct Collector {
     pub(crate) signals: VecDeque<SignalEvent>,
     pub(crate) request_history: request_history::History,
     pub(crate) operator_history: operator_history::History,
+    pub(crate) session: crate::session::Session,
     pub(crate) history_limit: usize,
     pub(crate) thresholds: Thresholds,
     /// The `omx` section the oMLX endpoint was resolved from.
@@ -200,6 +202,7 @@ impl Collector {
             previous: None,
             previous_llm_cache: None,
             cached_at_start: None,
+            session: Default::default(),
             current: Sample::default(),
             generation_history: VecDeque::with_capacity(history_limit),
             prefill_history: VecDeque::with_capacity(history_limit),
@@ -517,6 +520,9 @@ impl Collector {
                         .flatten()
                 });
         sample.llm_prefix_hit_rate = llm_stats.and_then(|stats| stats.prefix_hit_rate);
+        sample.llm_draft_acceptance = llm_stats
+            .and_then(|stats| stats.draft_acceptance)
+            .filter(|share| (0.0..=1.0).contains(share));
         sample.ssd_cache = llm_stats.and_then(|stats| stats.ssd_cache);
         sample.disk = disk_activity(
             sample.process_memory.as_ref(),
@@ -664,6 +670,7 @@ impl Collector {
 
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
+        self.session.observe(&sample);
         // What generation was doing, so a log can be replayed against it.
         let generating = crate::analysis::CorrelationObservation::from_sample(&sample);
         crate::recording::write(&sample);
@@ -766,6 +773,7 @@ impl Collector {
             cache_history: self.cache_history.clone(),
             disk_history: self.disk_history.clone(),
             decode_reads: self.decode_reads.clone(),
+            session: self.session.clone(),
             load_history: self.load_history.clone(),
             composition_history: self.composition_history.clone(),
             swap_history: self.swap_history.clone(),
@@ -881,17 +889,18 @@ impl Collector {
                         .iter()
                         .any(|now| now.id == request.id && now.provider == request.provider)
             }) {
-                add(
-                    "DONE",
-                    match done.output.filter(|out| *out > 0) {
-                        Some(out) => format!("{} · {} out", done.id, compact_tokens(out)),
-                        None if done.prefilled.is_some() => {
-                            format!("{} · ended while prefilling", done.id)
-                        }
-                        None => format!("{} · no output", done.id),
-                    },
-                    Tone::Cyan,
-                );
+                let mut summary = match done.output.filter(|out| *out > 0) {
+                    Some(out) => format!("{} · {} out", done.id, compact_tokens(out)),
+                    None if done.prefilled.is_some() => {
+                        format!("{} · ended while prefilling", done.id)
+                    }
+                    None => format!("{} · no output", done.id),
+                };
+                // Where its time went: what to shorten to answer sooner.
+                if let Some(timing) = self.request_history.timing(done) {
+                    summary.push_str(&format!(" · {}", timing_label(&timing)));
+                }
+                add("DONE", summary, Tone::Cyan);
             }
             let lists_requests = lists_requests || !previous.llm_requests.is_empty();
             if (previous_active == 0) != (active == 0) && !lists_requests {
@@ -1147,6 +1156,7 @@ impl Collector {
         self.cache_history.clear();
         self.disk_history.clear();
         self.decode_reads.clear();
+        self.session = Default::default();
         self.load_history.clear();
         self.composition_history.clear();
         self.swap_history.clear();
@@ -1253,6 +1263,28 @@ pub(crate) fn weight_reads(sample: &Sample) -> u64 {
         }
         _ => 0,
     }
+}
+
+/// A request's time in order: `queued 2s → prompt 18s → answer 12s`. Parts
+/// it spent no time in are left out.
+pub(crate) fn timing_label(timing: &crate::request_history::Timing) -> String {
+    let seconds = |value: f64| {
+        if value < 10.0 {
+            format!("{value:.1}s")
+        } else {
+            crate::formatting::duration_label(value)
+        }
+    };
+    [
+        ("queued", timing.queued),
+        ("prompt", timing.prefill),
+        ("answer", timing.decode),
+    ]
+    .into_iter()
+    .filter(|(_, value)| *value > 0.0)
+    .map(|(name, value)| format!("{name} {}", seconds(value)))
+    .collect::<Vec<_>>()
+    .join(" → ")
 }
 
 /// Cached tokens since mlxtop first saw `runtime`'s total. A new runtime,

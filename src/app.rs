@@ -178,6 +178,8 @@ pub(crate) struct App {
     pub(crate) charts: chart_navigation::Navigation,
     pub(crate) gpu_selected: usize,
     pub(crate) help: bool,
+    /// The session summary overlay.
+    pub(crate) summary_open: bool,
     pub(crate) diagnostics_open: bool,
     pub(crate) diagnostics_scroll: u16,
     pub(crate) diagnostics_max_scroll: std::cell::Cell<u16>,
@@ -220,6 +222,7 @@ impl App {
                 cache_history: VecDeque::new(),
                 disk_history: VecDeque::new(),
                 decode_reads: VecDeque::new(),
+                session: Default::default(),
                 load_history: VecDeque::new(),
                 composition_history: VecDeque::new(),
                 swap_history: VecDeque::new(),
@@ -244,6 +247,7 @@ impl App {
             charts: chart_navigation::Navigation::default(),
             gpu_selected: 0,
             help: false,
+            summary_open: false,
             diagnostics_open: false,
             diagnostics_scroll: 0,
             diagnostics_max_scroll: Default::default(),
@@ -402,6 +406,16 @@ impl App {
                 KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('h')
             ) {
                 self.help = false;
+            }
+            return;
+        }
+        if self.summary_open {
+            match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.quit = true
+                }
+                KeyCode::Char('q') => self.quit = true,
+                _ => self.summary_open = false,
             }
             return;
         }
@@ -653,6 +667,7 @@ impl App {
                 self.diagnostics_open = true;
                 self.diagnostics_scroll = 0;
             }
+            KeyCode::Char('u') => self.summary_open = true,
             KeyCode::Char('q') => self.quit = true,
             // Esc backs out of whatever is open; with nothing open it asks first.
             KeyCode::Esc => self.quit_prompt = true,

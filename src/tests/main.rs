@@ -88,6 +88,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             cache_history: VecDeque::new(),
             disk_history: VecDeque::new(),
             decode_reads: Default::default(),
+            session: Default::default(),
             load_history: VecDeque::new(),
             composition_history: VecDeque::new(),
             swap_history: VecDeque::new(),
@@ -116,6 +117,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         charts: chart_navigation::Navigation::default(),
         gpu_selected: 0,
         help: false,
+        summary_open: false,
         diagnostics_open: false,
         diagnostics_scroll: 0,
         diagnostics_max_scroll: Default::default(),
@@ -148,6 +150,7 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         cache_history: VecDeque::new(),
         disk_history: VecDeque::new(),
         decode_reads: Default::default(),
+        session: Default::default(),
         load_history: VecDeque::new(),
         composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),
@@ -5192,7 +5195,7 @@ fn a_stall_is_named_with_what_the_host_was_doing_and_journaled_with_its_end() {
         vec![
             (
                 "STALL".to_owned(),
-                "no new token for 2s at 1.7k out · GPU idle → Runtime idle mid-answer; check its log at this time.".to_owned()
+                "no new token for 2s at 1.7k out · GPU idle → The runtime stopped with the machine idle: the cause is inside it; check its log at this time.".to_owned()
             ),
             (
                 "RESUMED".to_owned(),
@@ -5416,27 +5419,29 @@ fn a_stall_beside_cache_reads_names_the_disk_and_points_at_it() {
         stall.lead,
         "no new token for 2s at 1.7k out · GPU idle · disk read 850.0 MiB/s · 38 SSD cache blocks loaded · SSD cache full"
     );
-    assert_eq!(
-        crate::diagnosis::slowdown_next_step(&samples[18]),
-        "SSD cache is full and evicting; enlarge it or free the disk."
-    );
+    assert!(crate::diagnosis::slowdown_next_step(&samples[18])
+        .starts_with("The SSD prompt cache is evicting"));
     let mut not_full = samples[18].clone();
     not_full.correlation.lead = "no new token for 2s · disk read 850.0 MiB/s".into();
     assert_eq!(
         crate::diagnosis::slowdown_next_step(&not_full),
-        "Runtime waited on its disk cache; check that disk's speed."
+        format!(
+            "The runtime waited on its disk ({}): put its cache on a faster disk.",
+            not_full.correlation.lead
+        )
     );
     not_full.correlation.cause = CorrelationCause::DiskIo;
     not_full.correlation.lead = "1 SSD cache block saved".into();
     assert_eq!(
         crate::diagnosis::slowdown_next_step(&not_full),
-        "Runtime waited on its disk cache; check that disk's speed."
+        format!(
+            "The runtime waited on its disk ({}): put its cache on a faster disk.",
+            not_full.correlation.lead
+        )
     );
     not_full.correlation.lead = "x".into();
-    assert_eq!(
-        crate::diagnosis::slowdown_next_step(&not_full),
-        "Runtime used its disk mid-answer; check its cache disk."
-    );
+    assert!(crate::diagnosis::slowdown_next_step(&not_full)
+        .starts_with("The runtime used its disk mid-answer (x)"));
 }
 
 #[test]
@@ -6142,7 +6147,7 @@ fn a_slowdown_is_three_slow_samples_and_ends_after_three_usual_ones() {
             (
                 "SLOWDOWN".to_owned(),
                 format!(
-                    "GEN ↓50.0% (50.0→25.0 tok/s) · {reason} → Reduce active models; recheck paging."
+                    "GEN ↓50.0% (50.0→25.0 tok/s) · {reason} → The model no longer fits beside everything else: close other apps or models, or load a smaller quantisation."
                 )
             ),
             (
@@ -6219,7 +6224,7 @@ fn a_slowdown_with_nothing_else_unusual_becomes_the_usual_speed_after_thirty_sec
         vec![
             (
                 "SLOWDOWN".to_owned(),
-                "GEN ↓40.0% (50.0→30.0 tok/s) · nothing else unusual → Check the runtime's log at this time.".to_owned()
+                "GEN ↓40.0% (50.0→30.0 tok/s) · nothing else unusual → Nothing on the machine explains it: the text, the draft model or the runtime itself; check the runtime's log at this time.".to_owned()
             ),
             (
                 "SETTLED".to_owned(),
@@ -7412,4 +7417,72 @@ fn a_slow_prefill_is_found_named_and_drawn_like_a_slow_answer() {
         engine.observe(&both, defaults()).phase,
         domain::Phase::Generation
     );
+}
+
+/// Speculative decoding earning less is a slowdown on a healthy machine: it
+/// is named as the reason, with the machine said not to be the limit.
+#[test]
+fn a_slowdown_from_fewer_draft_tokens_accepted_says_so() {
+    let with_drafts = |second: u64, tps: f64, acceptance: f64| {
+        let mut sample = paging(second, tps, 0);
+        sample.llm_draft_acceptance = Some(acceptance);
+        sample
+    };
+    let mut samples: Vec<Sample> = (0..12).map(|s| with_drafts(s, 60.0, 0.8)).collect();
+    samples.extend((12..16).map(|s| with_drafts(s, 30.0, 0.35)));
+    observe_all(&mut CorrelationEngine::default(), &mut samples);
+    let slow = &samples[15].correlation;
+    assert!(slow.is_material_drop());
+    assert_eq!(
+        slow.cause,
+        CorrelationCause::DraftAcceptance,
+        "{}",
+        slow.summary
+    );
+    assert!(
+        slow.lead.contains("draft acceptance 35% (usual 80%)"),
+        "{}",
+        slow.lead
+    );
+    let mut sample = samples[15].clone();
+    sample.llm_source = TelemetrySource::Live;
+    assert!(crate::diagnosis::slowdown_next_step(&sample).contains("draft model"));
+    assert_eq!(
+        crate::drop_marks::chart_of(CorrelationCause::DraftAcceptance),
+        None
+    );
+
+    // The generation chart's edge says what it is earning.
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    app.collector.current.llm_draft_acceptance = Some(0.72);
+    let history = app.collector.generation_history.clone();
+    let screen = render_view(70, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "generation",
+            &history,
+            ChartMetric::Generation,
+        )
+    });
+    assert!(screen.contains("draft 72%"), "{screen}");
+}
+
+#[test]
+fn u_opens_the_session_summary_and_any_key_closes_it() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert!(app.summary_open);
+    let screen = render_app(&app, 120, 40);
+    assert!(screen.contains("Session summary"), "{screen}");
+    assert!(screen.contains("Speed lost: none"), "{screen}");
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(!app.summary_open && !app.quit);
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(app.quit);
+    app.help = true;
+    assert!(render_app(&app, 120, 40).contains("u               session summary"));
 }

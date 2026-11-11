@@ -404,7 +404,7 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
     // What happened, what else was unusual, and what to do, in one row.
     assert!(has(
         "SLOWDOWN",
-        "throughput fell · thermal limit → Reduce concurrency; recheck thermals."
+        "throughput fell · thermal limit → macOS is limiting speed for heat"
     ));
     assert!(has("PAGING", "cleared"));
     assert!(has("THERMAL", "limited 80%"));
