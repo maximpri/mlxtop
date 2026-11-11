@@ -442,7 +442,14 @@ fn queue_history(
             ])
         };
         if area.height >= 3 {
-            lines.push(row("active", active, '●', CYAN));
+            // Unusually many beside a slowdown: the anomaly colour.
+            let unusual = last.is_some_and(|point| point.unusual);
+            lines.push(row(
+                "active",
+                active,
+                '●',
+                if unusual { Tone::Unusual.color() } else { CYAN },
+            ));
         }
         if area.height >= 4 {
             lines.push(row("waiting", waiting, '○', queued_color));
@@ -634,6 +641,18 @@ fn queue_history(
             frame.buffer_mut()[(x, y)]
                 .set_symbol(&glyph.to_string())
                 .set_fg(if equal { Color::White } else { MUTED });
+        }
+    }
+    // Samples whose counts were unusual beside a slowdown take the anomaly
+    // colour, as on every other chart.
+    for (column, index) in indices.iter().enumerate() {
+        if index.is_some_and(|index| history.points[index].unusual) {
+            for y in graph.y..graph.bottom() {
+                let cell = &mut frame.buffer_mut()[(graph.x + column as u16, y)];
+                if cell.symbol() != " " && cell.fg != DIM {
+                    cell.set_fg(Tone::Unusual.color());
+                }
+            }
         }
     }
     if active_values

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! A dense system strip: runtime identity, workload and host facts share one border.
 use crate::chart_render::meter_cells;
-use crate::domain::Sample;
+use crate::domain::{CorrelationCause, Sample, Tone};
 use crate::formatting::{
     activity_frame, bytes, compact_label, compact_tokens, compressed_memory_label,
     llm_context_label, llm_is_working, llm_runtime_label, optional_tokens, process_count_label,
@@ -225,16 +225,31 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
 fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     let muted = |text: String| vec![Span::styled(text, Style::default().fg(MUTED))];
     let mut fields: Vec<Vec<Span<'static>>> = vec![muted(hardware_parts(sample).join(" · "))];
+    // A reading that is unusual beside a slowdown takes the anomaly colour
+    // here, where it is shown, with its usual value.
+    let insight = &sample.correlation;
     if let Some(thermal) = thermal_note(sample) {
-        fields.push(vec![Span::styled(thermal, Style::default().fg(YELLOW))]);
+        let color = if insight.note(CorrelationCause::Thermal).is_some() {
+            Tone::Unusual.color()
+        } else {
+            YELLOW
+        };
+        fields.push(vec![Span::styled(thermal, Style::default().fg(color))]);
     }
     fields.extend(gpu_memory_meter(sample));
     if sample.llm_count > 0 {
-        fields.push(muted(format!(
-            "LLM {} · CPU {:.0}%",
-            bytes(sample.llm_rss),
-            sample.llm_cpu
-        )));
+        let mut field = muted(format!("LLM {} · ", bytes(sample.llm_rss)));
+        field.push(match insight.note(CorrelationCause::Cpu) {
+            Some(note) => Span::styled(
+                note.trim_start_matches("runtime ").to_owned(),
+                Style::default().fg(Tone::Unusual.color()),
+            ),
+            None => Span::styled(
+                format!("CPU {:.0}%", sample.llm_cpu),
+                Style::default().fg(MUTED),
+            ),
+        });
+        fields.push(field);
     }
     let mut line = Line::default();
     for field in fields {

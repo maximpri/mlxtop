@@ -219,7 +219,9 @@ colors in time-series history instead of recoloring old samples on refresh.
   by the same rule against its own usual value: thermal limiting, memory
   pressure, paging, the runtime's disk work, a prompt prefilling beside the
   answer, requests running, prompt size, compression, the queue, model and
-  Metal memory. The host's limits come first when several are unusual. Each
+  Metal memory, the runtime's CPU, and a GPU left idle. The host's limits
+  come first when several are unusual; an idle GPU comes last, because it is
+  what a slowdown looks like and a reason only by itself. Each
   is said beside its usual value (`paging 96.0 MiB/s (usual 2.0 MiB/s)`,
   `2 requests running (usual 1)`). A signal at its usual level is not the
   reason, however high that level is. With nothing else unusual, say so
@@ -241,6 +243,13 @@ colors in time-series history instead of recoloring old samples on refresh.
   `▲ slowed GEN ↓50%` (`▲ stalled GEN`), shortened to `▼ GEN` on a narrow
   panel. A bottom summary that would run into the tag gives way to it.
   The assessment says how long a slowdown has lasted from 5 s.
+- Anomalies live where their signal is already shown; they get no view of
+  their own. A reading with no chart turns magenta in place with its usual
+  value: the header's `CPU 380% (usual 95%)` and its `THERMAL` note, the
+  queue's active count and the samples of its history. An expanded
+  generation chart and Diagnostics say what a slowdown is judged against
+  (`usual 50.0 · slow below 40.0`), and Diagnostics lists everything unusual
+  beside the current one.
 - Journal gives a request one row as it starts (`PROMPT id · 67.8k prompt ·
   99% cached`) and one as it ends (`DONE id · 1.2k out`). The runtime and
   model are in the header, not on every row. While the runtime lists its

@@ -184,6 +184,12 @@ pub(crate) fn write_static(
             writeln!(out, "UNUSUAL       {}", sample.correlation.details)?;
         }
     }
+    if let Some((usual, slow_below)) = sample.correlation.usual_speed {
+        writeln!(
+            out,
+            "USUAL SPEED   {usual:.1} tok/s · slow below {slow_below:.1}"
+        )?;
+    }
     let finding = diagnosis::assess(sample);
     writeln!(out, "DIAGNOSIS    {}", finding.title)?;
     writeln!(
@@ -217,6 +223,16 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
             if finding.actionable { "Check" } else { "Note" },
             finding.next
         ));
+    }
+    // What a slowdown is judged against, and everything unusual beside one.
+    let insight = &sample.correlation;
+    if let Some((usual, slow_below)) = insight.usual_speed {
+        lines.push(format!(
+            "Usual generation speed {usual:.1} tok/s · slow below {slow_below:.1}"
+        ));
+    }
+    if insight.is_material_drop() {
+        lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
     }
     lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));

@@ -776,3 +776,76 @@ fn first_token_bars_are_solid_with_eighth_block_tops() {
         "no striped glyph cells"
     );
 }
+
+#[test]
+fn the_queue_colours_samples_that_were_unusual_beside_a_slowdown() {
+    let mut history = History::default();
+    let mut sample = live();
+    sample.llm_active_requests = Some(1);
+    for _ in 0..6 {
+        history.observe(&sample, 60);
+    }
+    // Two requests where one is usual, as generation slows: known at the
+    // slowdown's third sample, so the two before it are marked too.
+    sample.llm_active_requests = Some(2);
+    history.observe(&sample, 60);
+    history.observe(&sample, 60);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Concurrency,
+        unusual: vec![CorrelationCause::Concurrency],
+        notes: vec!["2 requests running (usual 1)".into()],
+        episode: Some(DropEpisode {
+            reference: 50.0,
+            low: 25.0,
+            seconds: 2.0,
+            samples: 3,
+        }),
+        ..CorrelationInsight::default()
+    };
+    history.observe(&sample, 60);
+    let marked: Vec<bool> = history.points.iter().map(|point| point.unusual).collect();
+    assert_eq!(
+        marked,
+        [false, false, false, false, false, false, true, true, true]
+    );
+    // A slowdown with another reason leaves the queue alone.
+    sample.correlation.unusual = vec![CorrelationCause::Paging];
+    history.observe(&sample, 60);
+    assert!(!history.points.back().unwrap().unusual);
+
+    let buffer_of = |history: &History, width: u16, height: u16| {
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                queue(
+                    frame,
+                    frame.area(),
+                    history,
+                    Duration::from_secs(1),
+                    1,
+                    None,
+                )
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    };
+    // The history plot: the stroke over the marked samples, and only there.
+    let plot = buffer_of(&history, 60, 9);
+    let unusual: Vec<u16> = (0..60)
+        .filter(|x| (1..8).any(|y| plot[(*x, y)].fg == Tone::Unusual.color()))
+        .collect();
+    assert!(!unusual.is_empty(), "the marked samples are drawn");
+    let (first, last) = (unusual[0], *unusual.last().unwrap());
+    assert_eq!(unusual.len() as u16, last - first + 1, "one run of columns");
+    assert!(first > 30 && last < 58, "{unusual:?}");
+    assert!((1..8).any(|y| plot[(first - 2, y)].fg == CYAN));
+
+    // The compact panel: its active row, while the latest sample is marked.
+    let compact = buffer_of(&history, 40, 4);
+    assert_ne!(compact[(1, 1)].fg, Tone::Unusual.color());
+    history.points.back_mut().unwrap().unusual = true;
+    let compact = buffer_of(&history, 40, 4);
+    assert_eq!(compact[(1, 1)].fg, Tone::Unusual.color());
+}

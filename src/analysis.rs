@@ -8,7 +8,7 @@ use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
-    Sample, TelemetrySource, ThroughputDirection, Tone, MIB,
+    Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
 };
 use crate::formatting::{
     bytes, compact_tokens, llm_generation_rate_label, llm_prefill_rate_label, percent, rate,
@@ -28,9 +28,6 @@ pub(crate) const DISK_ACTIVE_RATE: u64 = 16 * MIB;
 /// by at least this share of it and this many tok/s.
 pub(crate) const SLOW_SHARE: f64 = 0.20;
 pub(crate) const SLOW_MIN_TPS: f64 = 2.0;
-/// Slow samples in a row that begin a slowdown, and samples back at the
-/// usual speed that end one: a single jumpy poll does neither.
-pub(crate) const SLOW_SAMPLES: usize = 3;
 /// A slowdown with nothing else unusual becomes the usual speed after this
 /// long, and one whose request has been idle this long is over.
 pub(crate) const SETTLE_SECONDS: f64 = 30.0;
@@ -71,6 +68,8 @@ pub(crate) struct CorrelationObservation {
     /// blocks it loaded, saved and evicted since the previous sample.
     pub(crate) disk: DiskActivity,
     pub(crate) ssd_full: bool,
+    /// CPU the runtime's processes use, in percent of one core.
+    pub(crate) cpu: Option<f64>,
 }
 
 impl CorrelationObservation {
@@ -127,11 +126,14 @@ pub(crate) enum Signal {
     Queue,
     ModelMemory,
     MetalMemory,
+    Cpu,
+    GpuIdle,
 }
 
 /// Every signal, the host's limits before the workload: when several are
-/// unusual at once, the first is named as the reason.
-pub(crate) const SIGNALS: [Signal; 11] = [
+/// unusual at once, the first is named as the reason. An idle GPU comes
+/// last: it is what a slowdown looks like, and a reason only by itself.
+pub(crate) const SIGNALS: [Signal; 13] = [
     Signal::Thermal,
     Signal::Pressure,
     Signal::Paging,
@@ -143,6 +145,8 @@ pub(crate) const SIGNALS: [Signal; 11] = [
     Signal::Queue,
     Signal::ModelMemory,
     Signal::MetalMemory,
+    Signal::Cpu,
+    Signal::GpuIdle,
 ];
 
 /// When a signal's value matters: the level it must reach at all, and how
@@ -176,6 +180,8 @@ impl Signal {
             Self::Queue => CorrelationCause::Queueing,
             Self::ModelMemory => CorrelationCause::ModelMemory,
             Self::MetalMemory => CorrelationCause::MetalMemory,
+            Self::Cpu => CorrelationCause::Cpu,
+            Self::GpuIdle => CorrelationCause::GpuIdle,
         }
     }
 
@@ -205,6 +211,10 @@ impl Signal {
             Self::Queue => o.waiting_requests.map(|waiting| waiting as f64),
             Self::ModelMemory => fraction(o.model_memory, o.model_memory_max),
             Self::MetalMemory => fraction(o.metal_in_use, o.metal_alloc),
+            Self::Cpu => o.cpu,
+            // Judged as the share of the GPU left idle, so that like every
+            // other signal it is unusual when it rises.
+            Self::GpuIdle => o.gpu_util.map(|gpu| 100.0 - f64::from(gpu.min(100))),
         }
     }
 
@@ -221,6 +231,10 @@ impl Signal {
             ),
             Self::Compression => (thresholds.compression_warn_rate as f64, 0.5, 0.0),
             Self::ModelMemory | Self::MetalMemory => (0.90, 0.0, 0.02),
+            // Half a core, and half as much again as usual.
+            Self::Cpu => (50.0, 0.5, 50.0),
+            // A GPU under 70% busy, and twenty points idler than usual.
+            Self::GpuIdle => (30.0, 0.0, 20.0),
         };
         Limits { from, share, least }
     }
@@ -267,6 +281,15 @@ impl Signal {
                 "Metal MEM {:.0}% (usual {:.0}%)",
                 fraction(o.metal_in_use, o.metal_alloc).unwrap_or_default() * 100.0,
                 usual * 100.0
+            ),
+            Self::Cpu => format!(
+                "runtime CPU {:.0}% (usual {usual:.0}%)",
+                o.cpu.unwrap_or_default()
+            ),
+            Self::GpuIdle => format!(
+                "GPU {}% (usual {:.0}%)",
+                o.gpu_util.unwrap_or_default(),
+                100.0 - usual
             ),
         }
     }
@@ -606,6 +629,13 @@ pub(crate) fn llm_is_observed(sample: &Sample) -> bool {
         || sample.llm_model != "not detected"
 }
 
+/// The usual generation speed, and the speed below which it is slow.
+fn slow_range(speed: &Usual) -> Option<(f64, f64)> {
+    speed
+        .range(SLOW_SHARE, SLOW_MIN_TPS)
+        .map(|(usual, margin)| (usual, (usual - margin).max(0.0)))
+}
+
 #[derive(Default)]
 pub(crate) struct CorrelationEngine {
     /// The provider and model the usual values belong to.
@@ -682,20 +712,21 @@ impl CorrelationEngine {
         // A request that has just gone quiet may be about to stall: its
         // near-zero speed is neither slow nor usual until that is known.
         let quiet = current.stalled_for.is_some_and(|idle| idle >= 0.5);
-        let usual = self.speed.level();
+        let usual = slow_range(&self.speed);
         let low = self
             .speed
             .below(speed, SLOW_SHARE, SLOW_MIN_TPS)
             .filter(|_| !quiet);
-        let steady = |usual: Option<f64>| CorrelationInsight {
+        let steady = |usual: Option<(f64, f64)>| CorrelationInsight {
             direction: if usual.is_some() {
                 ThroughputDirection::Flat
             } else {
                 ThroughputDirection::Unknown
             },
             delta_percent: usual
-                .filter(|usual| *usual > 0.0)
-                .map(|usual| (speed - usual) / usual * 100.0),
+                .filter(|(usual, _)| *usual > 0.0)
+                .map(|(usual, _)| (speed - usual) / usual * 100.0),
+            usual_speed: usual,
             ..CorrelationInsight::default()
         };
 
@@ -792,7 +823,7 @@ impl CorrelationEngine {
             }
             return CorrelationInsight {
                 ended: ended(true, &open),
-                ..steady(self.speed.level())
+                ..steady(slow_range(&self.speed))
             };
         }
 
@@ -869,6 +900,8 @@ impl CorrelationEngine {
             repeat,
             slow: low.is_some(),
             unusual: findings.iter().map(|found| found.signal.cause()).collect(),
+            notes: texts.iter().map(|text| (*text).to_owned()).collect(),
+            usual_speed: usual,
         };
         self.episode = Some(open);
         insight
@@ -988,6 +1021,8 @@ impl CorrelationEngine {
             repeat: false,
             slow: true,
             unusual: Vec::new(),
+            notes: Vec::new(),
+            usual_speed: slow_range(&self.speed),
         }
     }
 
@@ -1048,6 +1083,7 @@ impl CorrelationObservation {
             },
             disk: sample.disk,
             ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
+            cpu: (sample.llm_count > 0).then_some(sample.llm_cpu),
         }
     }
 }

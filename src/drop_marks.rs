@@ -15,12 +15,13 @@ pub(crate) fn chart_of(cause: CorrelationCause) -> Option<Chart> {
         CorrelationCause::MemoryPressure
         | CorrelationCause::ModelMemory
         | CorrelationCause::MetalMemory => Chart::Memory,
-        CorrelationCause::Thermal => Chart::Gpu,
+        CorrelationCause::Thermal | CorrelationCause::GpuIdle => Chart::Gpu,
         CorrelationCause::DiskIo => Chart::Cache,
         CorrelationCause::ConcurrentPrefill => Chart::Prefill,
         CorrelationCause::Concurrency | CorrelationCause::Queueing => Chart::Queue,
         CorrelationCause::ContextGrowth => Chart::Prompt,
-        CorrelationCause::Stall | CorrelationCause::None => return None,
+        // The runtime's CPU is a figure in the header, not a chart.
+        CorrelationCause::Cpu | CorrelationCause::Stall | CorrelationCause::None => return None,
     })
 }
 

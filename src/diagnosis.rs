@@ -51,6 +51,8 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> &'static str {
             "Compare speed with one active request."
         }
         CorrelationCause::ContextGrowth => "Compare a request with a shorter prompt.",
+        CorrelationCause::Cpu => "Runtime is busy on the CPU; check what it is doing there.",
+        CorrelationCause::GpuIdle => "GPU is waiting on the runtime; check its CPU and disk work.",
         CorrelationCause::None => "Compare prompt size and runtime settings.",
     }
 }

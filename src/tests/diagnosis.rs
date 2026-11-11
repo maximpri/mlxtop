@@ -206,6 +206,14 @@ fn slowdown_findings_recommend_a_check_for_each_cause() {
             "Compare a request with a shorter prompt.",
         ),
         (
+            CorrelationCause::Cpu,
+            "Runtime is busy on the CPU; check what it is doing there.",
+        ),
+        (
+            CorrelationCause::GpuIdle,
+            "GPU is waiting on the runtime; check its CPU and disk work.",
+        ),
+        (
             CorrelationCause::None,
             "Compare prompt size and runtime settings.",
         ),

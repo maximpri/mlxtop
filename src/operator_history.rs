@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Bounded OS/queue samples and explicitly reported request latency.
-use crate::domain::{Sample, TelemetrySource};
+use crate::domain::{CorrelationCause, Sample, TelemetrySource};
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
 
@@ -9,6 +9,8 @@ pub(crate) struct Point {
     pub(crate) active: Option<u64>,
     pub(crate) waiting: Option<u64>,
     pub(crate) provider: String,
+    /// The requests running or waiting were unusual beside a slowdown.
+    pub(crate) unusual: bool,
 }
 
 /// Where a request is in the server: reading its prompt, writing its answer,
@@ -60,7 +62,19 @@ impl History {
             active: fresh.then_some(sample.llm_active_requests).flatten(),
             waiting: fresh.then_some(sample.llm_waiting_requests).flatten(),
             provider: sample.llm_provider.clone(),
+            unusual: false,
         });
+        // A slowdown with unusually many requests running or waiting marks
+        // its samples here too, back to its first slow one.
+        let insight = &sample.correlation;
+        if [CorrelationCause::Concurrency, CorrelationCause::Queueing]
+            .iter()
+            .any(|cause| insight.note(*cause).is_some())
+        {
+            for point in self.points.iter_mut().rev().take(insight.marked_samples()) {
+                point.unusual = true;
+            }
+        }
         while self.points.len() > limit {
             self.points.pop_front();
         }

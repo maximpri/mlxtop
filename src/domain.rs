@@ -245,6 +245,10 @@ pub(crate) enum CorrelationCause {
     ModelMemory,
     /// The runtime reading or writing its disk (prompt cache) mid-answer.
     DiskIo,
+    /// The runtime's processes unusually busy on the CPU.
+    Cpu,
+    /// The GPU unusually idle while an answer is written: it is waiting.
+    GpuIdle,
 }
 
 impl CorrelationCause {
@@ -263,6 +267,8 @@ impl CorrelationCause {
             Self::ContextGrowth => "context/KV growth",
             Self::ModelMemory => "model memory growth",
             Self::DiskIo => "runtime disk I/O",
+            Self::Cpu => "runtime CPU",
+            Self::GpuIdle => "GPU underused",
         }
     }
 
@@ -276,7 +282,9 @@ impl CorrelationCause {
             | Self::Concurrency
             | Self::ContextGrowth
             | Self::ModelMemory
-            | Self::DiskIo => Tone::Yellow,
+            | Self::DiskIo
+            | Self::Cpu
+            | Self::GpuIdle => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -309,8 +317,12 @@ pub(crate) struct CorrelationInsight {
     pub(crate) repeat: bool,
     /// This sample's own speed is unusually low (or it is a stall).
     pub(crate) slow: bool,
-    /// Every signal that is unusual in this sample, the reason first.
+    /// Every signal that is unusual in this sample, the reason first, and
+    /// each in words beside its usual value.
     pub(crate) unusual: Vec<CorrelationCause>,
+    pub(crate) notes: Vec<String>,
+    /// The usual generation speed, and the speed below which it is slow.
+    pub(crate) usual_speed: Option<(f64, f64)>,
 }
 
 /// One slowdown, from the sample where speed first fell to now. The speed
@@ -341,6 +353,10 @@ pub(crate) struct DropEnd {
 pub(crate) const CACHE_GOOD_PERCENT: u64 = 50;
 pub(crate) const CACHE_LOW_PERCENT: u64 = 20;
 
+/// Slow samples in a row that begin a slowdown, and samples back at the
+/// usual speed that end one: a single jumpy poll does neither.
+pub(crate) const SLOW_SAMPLES: usize = 3;
+
 /// A drop this far below the usual speed is critical on its own.
 pub(crate) const THROUGHPUT_CRITICAL_DROP_PERCENT: f64 = 30.0;
 
@@ -352,6 +368,28 @@ impl CorrelationInsight {
 
     pub(crate) fn is_material_drop(&self) -> bool {
         self.direction == ThroughputDirection::Down
+    }
+
+    /// What `cause`'s signal is doing, when it is unusual beside a slowdown.
+    pub(crate) fn note(&self, cause: CorrelationCause) -> Option<&str> {
+        let index = self.unusual.iter().position(|found| *found == cause)?;
+        self.is_material_drop()
+            .then(|| self.notes.get(index).map(String::as_str))
+            .flatten()
+    }
+
+    /// Samples this finding colours, newest last. A slowdown is known at
+    /// its third slow sample, so the two before it are coloured then.
+    pub(crate) fn marked_samples(&self) -> usize {
+        let began = self.stall_seconds.is_none()
+            && self
+                .episode
+                .is_some_and(|episode| episode.samples as usize == SLOW_SAMPLES);
+        if began {
+            SLOW_SAMPLES
+        } else {
+            1
+        }
     }
 
     pub(crate) fn tone(&self) -> Tone {

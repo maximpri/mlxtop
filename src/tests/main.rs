@@ -5798,6 +5798,9 @@ fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
         (CorrelationCause::ModelMemory, "x", Some(Chart::Memory)),
         (CorrelationCause::MetalMemory, "x", Some(Chart::Memory)),
         (CorrelationCause::Thermal, "x", Some(Chart::Gpu)),
+        (CorrelationCause::GpuIdle, "x", Some(Chart::Gpu)),
+        // The runtime's CPU is a figure in the header, not a chart.
+        (CorrelationCause::Cpu, "x", None),
         (CorrelationCause::DiskIo, "x", Some(Chart::Cache)),
         (
             CorrelationCause::ConcurrentPrefill,
@@ -6068,6 +6071,8 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
         sample.llm_waiting_requests = Some(0);
         sample.llm_model_memory = Some(80);
         sample.llm_model_memory_max = Some(100);
+        sample.llm_count = 1;
+        sample.llm_cpu = 95.0;
         sample
     };
     let slowed = |change: &dyn Fn(Sample) -> Sample| {
@@ -6169,12 +6174,32 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
                 s
             }),
         ),
+        (
+            CorrelationCause::Cpu,
+            "runtime CPU 380% (usual 95%)".into(),
+            Box::new(|mut s| {
+                s.llm_cpu = 380.0;
+                s
+            }),
+        ),
+        (
+            CorrelationCause::GpuIdle,
+            "GPU 40% (usual 99%)".into(),
+            Box::new(|mut s| {
+                s.gpu_util = Some(40);
+                s
+            }),
+        ),
     ];
     for (cause, lead, change) in &cases {
         let insight = slowed(change.as_ref());
         assert_eq!(insight.cause, *cause, "{}", insight.summary);
         assert_eq!(&insight.lead, lead);
         assert_eq!(insight.unusual, vec![*cause]);
+        assert_eq!(insight.notes, vec![lead.clone()]);
+        assert_eq!(insight.note(*cause), Some(lead.as_str()));
+        // What it is judged against: slow from a fifth below the usual 50.
+        assert_eq!(insight.usual_speed, Some((50.0, 40.0)));
         assert_eq!(
             insight.event_key,
             Some(CorrelationKey {
@@ -6184,8 +6209,11 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
         );
     }
     // A change short of mattering is not named: memory a point higher, a
-    // prompt a few tokens longer, compression under its warning rate.
+    // prompt a few tokens longer, compression under its warning rate, a
+    // little more CPU, a GPU still mostly busy.
     let quiet = slowed(&|mut s| {
+        s.llm_cpu = 130.0;
+        s.gpu_util = Some(85);
         s.llm_model_memory = Some(81);
         s.llm_requests[0].prompt += 500;
         s.compress = compression / 4;
@@ -6200,6 +6228,29 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
         s.llm_waiting_requests = Some(2);
         beside(s, 9_000, false)
     });
+    assert_eq!(
+        both.note(CorrelationCause::Queueing),
+        Some("2 waiting (usual 0)")
+    );
+    assert_eq!(both.note(CorrelationCause::Paging), None);
+    // An idle GPU is what a slowdown looks like: it is named last.
+    let starved = slowed(&|mut s| {
+        s.gpu_util = Some(40);
+        s.llm_cpu = 380.0;
+        s
+    });
+    assert_eq!(
+        starved.unusual,
+        vec![CorrelationCause::Cpu, CorrelationCause::GpuIdle]
+    );
+    // Outside a slowdown nothing is unusual, whatever the lists hold.
+    let mut over = starved.clone();
+    over.direction = ThroughputDirection::Flat;
+    assert_eq!(over.note(CorrelationCause::Cpu), None);
+    assert_eq!(starved.marked_samples(), 3, "known at its third sample");
+    let mut later = starved.clone();
+    later.episode.as_mut().unwrap().samples = 4;
+    assert_eq!(later.marked_samples(), 1);
     assert_eq!(both.cause, CorrelationCause::Thermal);
     assert_eq!(
         both.summary,
@@ -6522,4 +6573,78 @@ fn a_stall_names_everything_the_host_was_doing_beside_it() {
     );
     // No usual speed is needed to see a stall, and none is learned from it.
     assert!(insight.episode.is_none());
+}
+
+#[test]
+fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
+    let mut sample = slowed_by_paging();
+    sample.llm_observed_at = Some(SystemTime::now());
+    sample.correlation.notes = vec![
+        "paging 2.0 MiB/s (usual none)".into(),
+        "GPU 40% (usual 99%)".into(),
+    ];
+    sample.correlation.unusual = vec![CorrelationCause::Paging, CorrelationCause::GpuIdle];
+    sample.correlation.usual_speed = Some((50.0, 40.0));
+    let lines = crate::report::diagnostic_lines(&sample);
+    let at = |text: &str| lines.iter().position(|line| line == text);
+    assert!(at("Usual generation speed 50.0 tok/s · slow below 40.0").is_some());
+    assert!(
+        at("Unusual: paging 2.0 MiB/s (usual none)") < at("Unusual: GPU 40% (usual 99%)"),
+        "{lines:?}"
+    );
+    assert!(at("Unusual: GPU 40% (usual 99%)") < at("CONNECTION"));
+    let mut report = Vec::new();
+    crate::report::write_static(&mut report, &sample, 2, defaults(), Platform::MacOs).unwrap();
+    let report = String::from_utf8(report).unwrap();
+    assert!(
+        report.contains("USUAL SPEED   50.0 tok/s · slow below 40.0"),
+        "{report}"
+    );
+
+    // An expanded generation chart names the same two figures in its title.
+    let mut app = test_app(0);
+    app.collector.current = sample.clone();
+    app.charts.expanded = true;
+    let generation = history_with_drop(500, 250, Tone::Unusual);
+    let top = buffer_rows(&chart_buffer(
+        &app,
+        140,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ))
+    .remove(0);
+    assert!(top.contains("usual 50.0 · slow below 40.0"), "{top}");
+    assert!(top.contains("slow 12s · low 25.0"), "{top}");
+    // No other chart claims it, and neither does the Overview's compact one.
+    let paging_chart = buffer_rows(&chart_buffer(
+        &app,
+        110,
+        10,
+        "paging / I/O",
+        &generation,
+        ChartMetric::Swap,
+    ))
+    .remove(0);
+    assert!(!paging_chart.contains("usual"), "{paging_chart}");
+    app.charts.expanded = false;
+    let compact = buffer_rows(&chart_buffer(
+        &app,
+        110,
+        10,
+        "generation",
+        &generation,
+        ChartMetric::Generation,
+    ))
+    .remove(0);
+    assert!(!compact.contains("usual"), "{compact}");
+
+    // Once usual again, the figures stay and the list of what was unusual goes.
+    sample.correlation.direction = ThroughputDirection::Flat;
+    let lines = crate::report::diagnostic_lines(&sample);
+    assert!(lines
+        .iter()
+        .any(|line| line.starts_with("Usual generation speed")));
+    assert!(!lines.iter().any(|line| line.starts_with("Unusual:")));
 }

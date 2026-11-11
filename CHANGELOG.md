@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.3.0-rc.6 — 2026-11-10
+
+### Diagnosis
+
+- **Two more signals can explain a slowdown:** the runtime's CPU
+  (`runtime CPU 380% (usual 95%)`) and a GPU left idle while an answer is
+  written (`GPU 40% (usual 99%)`).
+
+### Dashboards
+
+- **Anomalies show where their signal already is**, with no new view. Beside
+  a slowdown the header's CPU figure and `THERMAL` note turn magenta, the CPU
+  with its usual value; the queue's active count and the samples of its
+  history do too; the GPU chart is marked when the GPU sat idle.
+- **What a slowdown is judged against is visible:** an expanded generation
+  chart and Diagnostics read `usual 50.0 · slow below 40.0`, Diagnostics
+  lists everything unusual beside the current slowdown, and `--once` prints
+  `USUAL SPEED`.
+
 ## 3.3.0-rc.5 — 2026-11-10
 
 ### Diagnosis

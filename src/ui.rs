@@ -936,6 +936,13 @@ impl App {
                 format!("peak {}", chart_stat_label(metric, peak)),
             ]);
         }
+        // What this chart's slowdowns are judged against.
+        if let Some((usual, slow_below)) = insight
+            .usual_speed
+            .filter(|_| metric == ChartMetric::Generation)
+        {
+            details.push(format!("usual {usual:.1} · slow below {slow_below:.1}"));
+        }
         if let Some(episode) = insight.episode.filter(|_| normal.is_some()) {
             details.push(format!(
                 "slow {:.0}s · low {:.1}",

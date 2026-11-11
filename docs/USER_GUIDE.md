@@ -130,7 +130,8 @@ Generation is **slow** when its speed is unusually low (and at least a fifth
 below usual) for three samples in a row. The reason given is whatever else is
 unusual at the same time: thermal limiting, memory pressure, paging, the
 runtime's disk work, a prompt prefilling beside the answer, the number of
-requests running, prompt size, compression, the queue, model or Metal memory.
+requests running, prompt size, compression, the queue, model or Metal memory,
+the runtime's CPU, or a GPU left idle.
 A signal at its usual level is never the reason, however high that level is.
 
 On the Overview, magenta means unusual and nothing else:
@@ -138,7 +139,13 @@ On the Overview, magenta means unusual and nothing else:
 - the slow samples on the generation chart, with a dashed line at the usual
   speed and the reason under the bars;
 - the samples of each unusual signal on its own chart, in the same columns;
-- the border of the panel that shows the reason, tagged `▲ slowed GEN ↓50%`.
+- the border of the panel that shows the reason, tagged `▲ slowed GEN ↓50%`;
+- readings without a chart, in place: the header's `CPU 380% (usual 95%)` and
+  `THERMAL` note, and the queue's active count and history.
+
+An expanded generation chart (`Enter`) and Diagnostics (`d`) show what a
+slowdown is judged against, for example `usual 50.0 · slow below 40.0`;
+Diagnostics also lists everything unusual beside the current slowdown.
 
 The Journal writes one row when a slowdown begins and one when it ends:
 

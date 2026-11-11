@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Combine host and provider observations into bounded histories and snapshots.
 use crate::analysis::threshold_with_hysteresis;
-use crate::analysis::{classify, signal_summary, CorrelationEngine, SLOW_SAMPLES};
+use crate::analysis::{classify, signal_summary, CorrelationEngine};
 use crate::chart_navigation::Chart;
 use crate::completion_log::read_llm_stats;
 use crate::config::{Config, JournalConfig, OmxConfig, Thresholds};
@@ -661,11 +661,7 @@ impl Collector {
         if !insight.is_material_drop() {
             return;
         }
-        let began = insight.stall_seconds.is_none()
-            && insight
-                .episode
-                .is_some_and(|episode| episode.samples as usize == SLOW_SAMPLES);
-        let span = if began { SLOW_SAMPLES } else { 1 };
+        let span = insight.marked_samples();
         let mut charts: Vec<Chart> = insight
             .unusual
             .iter()
