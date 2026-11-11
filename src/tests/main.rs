@@ -744,5 +744,7 @@ mod detection;
 mod journal;
 #[path = "main_other.rs"]
 mod other;
+#[path = "main_qa.rs"]
+mod qa;
 #[path = "main_runtimes.rs"]
 mod runtimes;

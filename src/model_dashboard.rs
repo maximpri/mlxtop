@@ -174,11 +174,14 @@ fn plain(value: String, color: Color) -> Line<'static> {
 }
 
 fn identity(sample: &Sample, width: usize) -> Line<'static> {
+    // With no runtime found, one statement, not "not detected" twice.
+    let text = if sample.llm_provider == "not detected" {
+        "No LLM runtime detected".to_owned()
+    } else {
+        format!("{} · {}", llm_runtime_label(sample), sample.llm_model)
+    };
     Line::from(Span::styled(
-        compact_label(
-            &format!("{} · {}", llm_runtime_label(sample), sample.llm_model),
-            width,
-        ),
+        compact_label(&text, width),
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),

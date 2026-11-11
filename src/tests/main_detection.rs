@@ -540,7 +540,7 @@ fn the_panel_behind_a_slowdown_is_tagged_in_the_anomaly_colour() {
     // The border takes the anomaly colour; the summary keeps its own.
     assert_eq!(buffer[(0, 0)].fg, UNUSUAL);
     assert_eq!(buffer[(59, 5)].fg, UNUSUAL);
-    assert!(rows[9].contains("page-in"), "{}", rows[9]);
+    assert!(rows[9].contains("swapping: memory is short"), "{}", rows[9]);
     // A summary that would run into the tag gives way to it.
     let narrow = chart_buffer(
         &app,

@@ -167,10 +167,12 @@ pub(crate) fn lines(
     if let Some(hit) = sample.llm_cache_efficiency {
         lines.push(match saved {
             Some(seconds) if seconds >= 1.0 => format!(
-                "KV cache: hit {hit:.0}% · ≈{} of prefill saved while watched",
+                "KV cache: {hit:.0}% of prompt tokens served from cache since the runtime started · ≈{} of prefill saved while watched",
                 duration_label(seconds)
             ),
-            _ => format!("KV cache: hit {hit:.0}%"),
+            _ => format!(
+                "KV cache: {hit:.0}% of prompt tokens served from cache since the runtime started"
+            ),
         });
     }
     if let Some(joules) = session.joules_per_token() {

@@ -105,10 +105,16 @@ pub(crate) fn draw(
     let bottom = area.bottom();
     let row = |y: u16| Rect::new(area.x, y, area.width, 1);
     if let Some(limit) = limit {
-        let color = gpu_color(sample.wired, limit);
-        let bar = meter(frame, row(y), "GPU", &of_total(sample.wired, limit), color);
-        let filled = (u128::from(sample.wired.min(limit)) * u128::from(bar.width)
-            / u128::from(limit)) as u16;
+        // What the GPU holds: Metal's own count where the OS gives it (the
+        // header reads the same), else wired memory, which bounds it.
+        let (used, what) = match sample.gpu_in_use {
+            Some(in_use) => (in_use, "GPU memory in use"),
+            None => (sample.wired, "wired"),
+        };
+        let color = gpu_color(used, limit);
+        let bar = meter(frame, row(y), "GPU", &of_total(used, limit), color);
+        let filled =
+            (u128::from(used.min(limit)) * u128::from(bar.width) / u128::from(limit)) as u16;
         for x in 0..bar.width {
             frame.buffer_mut()[(bar.x + x, bar.y)]
                 .set_symbol(" ")
@@ -116,19 +122,19 @@ pub(crate) fn draw(
         }
         y += 1;
         if detailed && y < bottom {
-            let (note, room) = if sample.wired > limit {
-                ("wired over the GPU limit", "0 B left".to_owned())
+            let (note, room) = if used > limit {
+                (format!("{what} over the GPU limit"), "0 B left".to_owned())
             } else {
                 (
-                    "wired, against the GPU limit",
-                    format!("{} left", bytes(limit - sample.wired)),
+                    format!("{what}, against the GPU limit"),
+                    format!("{} left", bytes(limit - used)),
                 )
             };
             let muted = |text: String| vec![Span::styled(text, Style::default().fg(MUTED))];
             text(
                 frame,
                 row(y),
-                vec![muted(format!("{:<5}{note}", "")), muted(note.to_owned())],
+                vec![muted(format!("{:<5}{note}", "")), muted(note.clone())],
                 Span::styled(room, Style::default().fg(color)),
             );
             y += 1;
@@ -169,6 +175,44 @@ pub(crate) fn draw(
                 format!("{} left", bytes(left(sizes))),
                 Style::default().fg(tone),
             ),
+        );
+        y += 1;
+    }
+    // A tall panel (the enlarged view) has room for each kind's size too.
+    if area.height >= 14 && y < bottom {
+        // One unit for the row when every size shares it; kinds that do not
+        // fit are dropped whole, never cut.
+        let shown: Vec<(&str, String)> = ["wired", "app", "comp", "cache", "free"]
+            .into_iter()
+            .zip(sizes)
+            .map(|(name, size)| (name, bytes(size)))
+            .collect();
+        let unit = shown[0].1.rsplit_once(' ').map(|(_, unit)| unit.to_owned());
+        let shared = unit
+            .as_deref()
+            .filter(|unit| shown.iter().all(|(_, size)| size.ends_with(unit)));
+        let room = usize::from(area.width.saturating_sub(PREFIX));
+        let line = (1..=shown.len())
+            .rev()
+            .map(|count| {
+                let parts: Vec<String> = shown[..count]
+                    .iter()
+                    .map(|(name, size)| match shared {
+                        Some(unit) => format!("{name} {}", size.trim_end_matches(unit).trim_end()),
+                        None => format!("{name} {size}"),
+                    })
+                    .collect();
+                let mut text = parts.join(" · ");
+                if let Some(unit) = shared {
+                    text.push_str(&format!(" {unit}"));
+                }
+                text
+            })
+            .find(|text| Line::from(text.as_str()).width() <= room)
+            .unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(format!("{:<5}{line}", "")).style(Style::default().fg(MUTED).bg(PANEL)),
+            row(y),
         );
         y += 1;
     }

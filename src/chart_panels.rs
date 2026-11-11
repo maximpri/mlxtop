@@ -251,25 +251,22 @@ impl App {
                 .find(fits)
                 .or_else(|| Some(format!("comp {compress}")))
             }
+            // What the paging means for the model, in words; the title has
+            // the rate and the chart how it moved.
             ChartMetric::Swap => {
-                // All disk paging, as plotted: swap plus file page-ins/outs.
-                let (swap_in, swap_out) = if sample.rate_ready && !sample.paging_unavailable {
-                    (
-                        rate(sample.swap_in.saturating_add(sample.page_in)),
-                        rate(sample.swap_out.saturating_add(sample.page_out)),
-                    )
-                } else {
-                    ("—".into(), "—".into())
-                };
-                let spaced = format!("page-in {swap_in} · page-out {swap_out}");
+                if !sample.rate_ready || sample.paging_unavailable {
+                    return Some("paging unavailable".into());
+                }
+                let swapping = sample.swap_in.saturating_add(sample.swap_out) > 0;
+                let files = sample.page_in.saturating_add(sample.page_out) > 0;
                 Some(
-                    if Line::from(spaced.as_str()).width() + 2
-                        <= usize::from(area.width.saturating_sub(2))
-                    {
-                        spaced
-                    } else {
-                        format!("in {swap_in} · out {swap_out}")
-                    },
+                    match (swapping, files, sample.memory_tight()) {
+                        (true, _, _) => "swapping: memory is short",
+                        (false, true, true) => "reading files back: memory is tight",
+                        (false, true, false) => "reading files · memory not tight",
+                        (false, false, _) => "no paging",
+                    }
+                    .into(),
                 )
             }
             // What the SSD tier is doing, in words; the chart shows how much.

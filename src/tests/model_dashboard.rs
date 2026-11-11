@@ -278,3 +278,11 @@ fn gpu_memory_reads_against_the_limit_and_thermal_and_power_always_show() {
     sample.system_power_mw = Some(90_000);
     assert!(render(&sample, &history, 160, 6).contains("THERMAL serious · 90 W"));
 }
+
+#[test]
+fn with_no_runtime_the_header_says_so_once() {
+    let sample = Sample::default();
+    let screen = render(&sample, &request_history::History::default(), 120, 3);
+    assert!(screen.contains("No LLM runtime detected"), "{screen}");
+    assert!(!screen.contains("not detected · not detected"), "{screen}");
+}

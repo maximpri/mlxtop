@@ -239,7 +239,7 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
             ChartMetric::Memory,
         )
     });
-    for label in ["3.2 / 27.0 GiB", "17.2 / 36.0 GiB"] {
+    for label in ["18.0 / 27.0 GiB", "17.2 / 36.0 GiB"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(!screen.contains("50%"), "no percentage axis\n{screen}");
@@ -2227,6 +2227,8 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
         sample.compressor = 2 * gib;
         sample.file_backed = 4 * gib;
         sample.metal.resource_limit = Some(32 * gib);
+        // No Metal count: the meter reads wired memory, which bounds it.
+        sample.gpu_in_use = None;
         sample.pressure_tone = Tone::Yellow;
     }
     let draw = |app: &App, width: u16, height: u16| {
@@ -2285,6 +2287,18 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
     assert_eq!(buffer[(57, 18)].fg, YELLOW);
     assert_eq!(buffer[(30, 18)].fg, GREEN);
 
+    // With Metal's own count, the meter reads it, as the header does.
+    app.collector.current.gpu_in_use = Some(24 * gib);
+    let buffer = draw(&app, 60, 20);
+    let text: String = (0..20)
+        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+        .collect();
+    assert!(text.contains("24.0 / 32.0 GiB"), "{text}");
+    assert!(
+        text.contains("GPU memory in use, against the GPU limit"),
+        "{text}"
+    );
+    app.collector.current.gpu_in_use = None;
     // Wired past the limit says so, in red.
     app.collector.current.wired = 33 * gib;
     let buffer = draw(&app, 60, 20);
@@ -2759,4 +2773,78 @@ fn u_opens_the_session_summary_and_any_key_closes_it() {
     assert!(app.quit);
     app.help = true;
     assert!(render_app(&app, 120, 40).contains("u               session summary"));
+}
+
+#[test]
+fn the_paging_edge_says_what_paging_means_not_its_rate_again() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let edge = |app: &App| {
+        let history = app.collector.swap_history.clone();
+        let screen = render_view(60, 8, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "paging / I/O",
+                &history,
+                ChartMetric::Swap,
+            )
+        });
+        screen.lines().last().unwrap_or_default().to_owned()
+    };
+    let sample = &mut app.collector.current;
+    sample.rate_ready = true;
+    sample.paging_unavailable = false;
+    (
+        sample.swap_in,
+        sample.swap_out,
+        sample.page_in,
+        sample.page_out,
+    ) = (0, 0, 0, 0);
+    assert!(edge(&app).contains("no paging"));
+    app.collector.current.page_in = 140 * 1024;
+    app.collector.current.pressure = "GREEN".into();
+    app.collector.current.availability = Some(40);
+    assert!(edge(&app).contains("reading files · memory not tight"));
+    app.collector.current.pressure = "YELLOW".into();
+    assert!(edge(&app).contains("reading files back: memory is tight"));
+    app.collector.current.swap_out = MIB;
+    assert!(edge(&app).contains("swapping: memory is short"));
+    assert!(
+        !edge(&app).contains("page-in"),
+        "no rate repeated on the edge"
+    );
+    app.collector.current.paging_unavailable = true;
+    assert!(edge(&app).contains("paging unavailable"));
+}
+
+#[test]
+fn the_enlarged_memory_view_gives_each_kinds_size() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let history = app.collector.load_history.clone();
+    let render = |height| {
+        render_view(90, height, |frame| {
+            app.render_indicator_chart(frame, frame.area(), "memory", &history, ChartMetric::Memory)
+        })
+    };
+    let tall = render(20);
+    // One unit for the row, and no kind cut off.
+    assert!(tall.contains("wired 3.2 · app"), "{tall}");
+    assert!(tall.contains("· free") && tall.contains(" GiB"), "{tall}");
+    let narrow = render_view(40, 20, |frame| {
+        app.render_indicator_chart(frame, frame.area(), "memory", &history, ChartMetric::Memory)
+    });
+    let sizes = narrow
+        .lines()
+        .find(|l| l.contains("wired 3.2"))
+        .unwrap_or_default();
+    assert!(
+        sizes.trim_end_matches('│').trim_end().ends_with("GiB"),
+        "{narrow}"
+    );
+    assert!(
+        !render(10).contains("wired 3.2 ·"),
+        "the Overview panel keeps to its meters"
+    );
 }

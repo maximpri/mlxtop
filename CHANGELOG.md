@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.20 — 2026-11-11
+## 3.3.0-rc.21 — 2026-11-11
 
 ### Diagnosis
 
@@ -97,6 +97,17 @@
   external KV cache is meant to fill, so the fill bar is gone: `SSD 120.0 GiB
   · 1.5k blocks loaded · 1.3k saved · 327 evicted` this session. A full,
   evicting cache is no longer shown as a warning.
+- **The paging panel says what paging means**: `no paging`, `reading files
+  · memory not tight`, `reading files back: memory is tight` or `swapping:
+  memory is short`, where it repeated the title's rate as `page-in … ·
+  page-out …`.
+- **The memory panel's GPU meter reads what the header reads**: Metal's
+  count of GPU memory in use against the GPU limit, where the OS gives it,
+  else wired memory. They disagreed (18.0 and 3.2 GiB on one screen).
+- With no runtime found, the header says `No LLM runtime detected` once,
+  not `not detected · not detected`.
+- **The enlarged memory view gives each kind's size** (wired, app,
+  compressed, cache, free) under its meters.
 - **KV cache and compression swap places.** The cache sits in the host row
   between memory and paging; compression stacks above the queue. On Linux,
   with no compressor counters, the queue takes that column.
@@ -178,6 +189,18 @@
   while watched; and joules per token written, from the machine's power.
 - **A finished request says where its time went** on its Journal row:
   `DONE 4c6a… · 700 out · queued 0.4s → prompt 18s → answer 12s`.
+
+### Quality
+
+- **A QA judge checks every screen.** The test suite renders mlxtop in
+  each state that matters (idle, healthy, prefilling, Linux, a slowdown, a
+  stall, the session summary, Diagnostics) at five terminal sizes, from
+  80×24 to 200×60, and fails on the anomaly colour with nothing slowed, a
+  slowdown no chart shows, a noise phrase coming back, a broken value, a
+  missing panel, a broken border or a key bar that lost `q quit`.
+  `scripts/qa_judge.py` has a model review the same screens against the UX
+  rules on any OpenAI-compatible local server, and fails on a blocker; the
+  release steps run both.
 
 ### Recording and replay
 
