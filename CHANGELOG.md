@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0-rc.11 — 2026-11-11
+## 3.3.0-rc.12 — 2026-11-11
 
 ### Diagnosis
 
@@ -51,15 +51,15 @@
   the generation chart at once; an unusual reading of the host is magenta on
   its own chart or in the header. A host reading that stays unusual for 30
   seconds at the usual speed becomes its usual value.
-- **Disk I/O shows weights streamed from disk.** For engines that load MoE
+- **The KV cache panel shows weights streamed from disk.** For engines that load MoE
   experts from disk, such as Splash and Strata, what the runtime reads while
   it decodes, with no prompt prefilling and no prompt-cache block loaded,
   counts as weights. Those samples are blue on the chart, a `weights` bar
   gives the share of decoding that read from disk, with the decode speed
   then and from memory (`25% of decode from disk · 18 vs 42 tok/s`), and the
-  bottom edge reads `streaming weights from disk`. The panel is now titled
-  `disk I/O`.
-- **Disk I/O leads with the KV cache hit rate**: `KV hit 91% · ≈1h 25m
+  bottom edge reads `streaming weights from disk`. The cache panel is
+  now titled `KV cache`.
+- **KV cache leads with its hit rate**: `KV hit 91% · ≈1h 25m
   saved`, the share of the session's prompt tokens served from cache and
   the prefill time that saved at the measured prefill speed. Where the cache
   tier counts its own hits (oMLX with Splash), one bar splits them: green
@@ -71,7 +71,7 @@
   external KV cache is meant to fill, so the fill bar is gone: `SSD 120.0 GiB
   · 1.5k blocks loaded · 1.3k saved · 327 evicted` this session. A full,
   evicting cache is no longer shown as a warning.
-- **Disk I/O and compression swap places.** The cache sits in the host row
+- **KV cache and compression swap places.** The cache sits in the host row
   between memory and paging; compression stacks above the queue. On Linux,
   with no compressor counters, the queue takes that column.
 - **The header reads GPU memory against the GPU limit** the memory legend
@@ -89,8 +89,6 @@
   what it did instead: `▲ slowed GEN ↓50%` or `▲ stalled GEN`.
 - **Generation and prefill bars are green.** They were graded yellow and red
   against a rolling baseline, which flickered with every swing in speed.
-- **The cache panel shows the disk.** `cache I/O` plots the runtime's disk
-  reads and writes, the session's reuse, and the SSD cache's fill.
 - **Queue shows what each request is doing**: `◐ PREFILL` with a progress
   bar, `● GEN` with tokens out and tok/s, `○ QUEUED` with its prompt size.
 - **Prefill progress counts new tokens** and never reads 100% before it

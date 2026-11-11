@@ -5398,7 +5398,7 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     // Without disk readings the panel keeps each interval's reuse.
-    assert_eq!(app.cache_panel().0, "cache");
+    assert_eq!(app.cache_panel().0, "KV cache");
     app.collector.current.ssd_cache = Some(domain::SsdCache {
         used: 120 * 1024 * MIB,
         capacity: 120 * 1024 * MIB,
@@ -5444,7 +5444,7 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
         app.render_indicator_chart(frame, frame.area(), name, history, metric)
     });
     for label in [
-        "disk I/O",
+        "KV cache",
         "KV hit 90% · ≈1h 30m saved",
         "session",
         "90% of 1.2M · ≈1h 30m saved",
@@ -5463,10 +5463,10 @@ fn the_cache_panel_shows_what_the_cache_saved_over_its_disk_traffic() {
     assert!(short.contains("SSD"), "{short}");
     // The Overview and the enlarged view both use it.
     let screen = render_app(&app, 180, 50);
-    assert!(screen.contains("disk I/O"), "{screen}");
+    assert!(screen.contains("KV cache"), "{screen}");
     app.charts.focused = Chart::Cache;
     app.charts.expanded = true;
-    assert!(render_app(&app, 120, 40).contains("disk I/O"));
+    assert!(render_app(&app, 120, 40).contains("KV cache"));
 }
 
 #[test]
@@ -7203,7 +7203,7 @@ fn decode_time_reads_are_weights_and_the_disk_panel_shows_their_cost() {
         app.render_indicator_chart(frame, frame.area(), name, &history, metric)
     });
     for label in [
-        "disk I/O",
+        "KV cache",
         "streaming weights",
         "weights",
         "25% of decode from disk · 18 vs 42 tok/s",
