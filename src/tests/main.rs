@@ -9,7 +9,6 @@ impl ChartPoint {
             value,
             tone,
             observed_at: SystemTime::now(),
-            usual: None,
         }
     }
 }

@@ -146,12 +146,11 @@ left idle. Request count and prompt size are never the reason: the usual
 speed already allows for them. A signal at its usual level is never the
 reason, however high that level is.
 
-The generation chart always shows what it judges against: a dashed line at
-each sample's usual speed, for the work it was doing. The line steps up or
-down as requests join and leave and contexts grow, and runs through bars
-that pass it. The bottom edge says what the latest is for, for example
-`┄ usual 30.0 for 2 requests · 131.2k context`. The line is grey while all is
-well.
+The generation chart's bottom edge says what speed it judges against, for
+the work being done, for example `usual 30.0 for 2 requests · 131.2k
+context`. During a slowdown a solid yellow line marks that usual speed on
+the chart, so the gap under it is the drop; while all is well there is no
+line.
 
 Yellow means impact and nothing else. It appears only while the model is
 slowed or stalled:

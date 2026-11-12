@@ -143,9 +143,9 @@ are green. Yellow marks impact on any time chart and is used for nothing
 else: on the generation chart, the samples of a slowdown or stall; on another
 chart, the samples whose reading was unusual beside it. A reading that is
 unusual while the model keeps its speed keeps its ordinary colour. The generation chart's
-dashed reference line is each sample's usual speed for the work it was doing
-(requests writing and their context), drawn column by column and cut through
-bars that pass it: grey ordinarily, yellow over slow samples. Prompt CACHED shares below 4,096 tokens stay
+reference line is the usual speed, drawn only during a slowdown as one solid
+yellow line (`━`) with its value on the axis; otherwise the chart keeps the
+grey midline every chart has. Prompt CACHED shares below 4,096 tokens stay
 neutral cyan.
 
 Chart colors agree with the assessment where both grade the same signal:

@@ -631,19 +631,12 @@ impl Collector {
         }
         // Generation has no threshold either: a sample is its usual speed
         // or, marked below, unusually slow.
-        // Each sample keeps the usual speed for the work it was doing, so
-        // the chart's dashed line follows the work.
         if let Some(point) = self.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
                 Tone::Muted
             } else {
                 Tone::Green
             };
-            point.usual = point
-                .value
-                .filter(|_| sample.correlation.phase == crate::domain::Phase::Generation)
-                .and(sample.correlation.usual_speed)
-                .map(|(usual, _)| (usual * 10.0).round() as u64);
         }
         push_history_with_tone(
             &mut self.load_history,

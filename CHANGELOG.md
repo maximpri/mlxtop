@@ -82,10 +82,10 @@
 - **Memory's history has an axis like every other chart's.** It topped out
   at its own peak, so steady headroom filled the plot to the top and read as
   horizontal stripes. It now rounds up past the peak, as the rate charts do.
-- **The generation chart draws its usual speed** as a dashed line, column by
-  column: it steps when a request joins or leaves and runs through bars that
-  pass it. It is grey while speed is usual and yellow during a slowdown. The
-  bottom edge, Diagnostics and `--once` say what it is for: `usual 30.0 for
+- **The generation chart draws its usual speed only while slow**: one solid
+  yellow line, its value on the axis, so the gap under it is the drop. A
+  healthy chart keeps the plain midline every chart has. The bottom edge,
+  Diagnostics and `--once` say what the usual speed is for: `usual 30.0 for
   2 requests · 131.2k context`.
 - **Yellow means impact, and nothing else.** During a slowdown or stall its
   samples are yellow on the generation chart, and what was unusual beside
