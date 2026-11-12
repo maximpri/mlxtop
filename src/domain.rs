@@ -132,10 +132,6 @@ pub(crate) struct ChartPoint {
     pub(crate) value: Option<u64>,
     pub(crate) tone: Tone,
     pub(crate) observed_at: SystemTime,
-    /// What the value usually is for the work at the time, in the same
-    /// units: drawn as a dashed line, so that a change explained by the
-    /// work shows the line moving with it.
-    pub(crate) usual: Option<u64>,
 }
 
 #[derive(Default)]

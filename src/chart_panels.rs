@@ -186,21 +186,33 @@ impl App {
                 if let Some(share) = sample.llm_draft_acceptance {
                     unit.push_str(&format!(" · draft {:.0}%", share * 100.0));
                 }
-                // What the dashed line is: the speed slowdowns are judged
-                // against. It gives way before the unit does.
-                // With the work it is for, when it is for one kind of work.
+                // The speed slowdowns are judged against, and the work it is
+                // for. While slow, the solid line on the chart is that speed.
+                // It gives way before the unit does.
+                let slow = insight
+                    .episode
+                    .filter(|_| insight.concerns(metric) && insight.is_material_drop());
                 let usual = insight
                     .usual_speed
                     .filter(|_| insight.concerns(metric))
                     .and_then(|(usual, _)| {
                         let mut texts = Vec::new();
-                        if !insight.usual_for.is_empty() {
+                        if let Some(episode) = slow {
+                            let reference = episode.reference;
                             texts.push(format!(
-                                "{unit} · ┄ usual {usual:.1} for {}",
-                                insight.usual_for
+                                "{unit} · ━ usual {reference:.1} · slow {:.0}s, low {:.1}",
+                                episode.seconds, episode.low
                             ));
+                            texts.push(format!("{unit} · ━ usual {reference:.1}"));
+                        } else {
+                            if !insight.usual_for.is_empty() {
+                                texts.push(format!(
+                                    "{unit} · usual {usual:.1} for {}",
+                                    insight.usual_for
+                                ));
+                            }
+                            texts.push(format!("{unit} · usual {usual:.1}"));
                         }
-                        texts.push(format!("{unit} · ┄ usual {usual:.1}"));
                         texts.into_iter().find(|text| {
                             Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
                         })

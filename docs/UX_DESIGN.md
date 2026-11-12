@@ -258,15 +258,12 @@ colors in time-series history instead of recoloring old samples on refresh.
 - Journal writes a slowdown's start once, each further reason once, and its
   end. A slowdown that repeats the last one's reason within a minute is the
   same story: no new rows.
-- Anomaly detection is visible all the time, not only when something is
-  wrong. The generation chart draws each sample's usual speed, for the work
-  it was doing, as a quiet dashed line: it steps up or down as requests join
-  or leave and contexts grow, so the correlation is on the chart, and a bar
-  falling short of its own column's line is the anomaly. The line runs
-  through bars that pass it, cut into them. Its bottom edge says what the
-  latest is for (`tok/s · ┄ usual 30.0 for 2 requests · 131.2k context`). A screen that looks the same
-  healthy as it did before the detector existed gives no reason to trust
-  it.
+- Anomaly detection is visible all the time, but drawn only when it
+  matters. A healthy generation chart's bottom edge says what it judges
+  against (`tok/s · usual 30.0 for 2 requests · 131.2k context`); the chart
+  itself stays plain. During a slowdown one solid yellow line marks the
+  usual speed, so the gap under it is the drop. A per-sample dashed line
+  that stepped with the work was tried in 3.3.0 RCs and read as stray dots.
 - Performance is the prompt read as well as the answer written. With no
   answer being written, prefill speed is judged by the same rule against
   earlier prefills of similar prompts, with its own usual values, and a slow

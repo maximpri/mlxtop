@@ -2872,7 +2872,6 @@ fn one_moment_sits_at_the_same_place_on_every_chart() {
         value: Some(value),
         tone,
         observed_at: now,
-        usual: None,
     };
     let collector = &mut app.collector;
     collector.generation_history.clear();

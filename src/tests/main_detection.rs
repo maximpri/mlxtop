@@ -559,11 +559,11 @@ fn a_slowdown_draws_its_usual_speed_and_its_samples_in_the_anomaly_colour() {
         .map(|byte| bottom[..byte].chars().count())
         .unwrap() as u16;
     assert_eq!(buffer[(x, 9)].fg, UNUSUAL);
-    // The usual speed is a dashed line with its value on the axis, visible
+    // The usual speed is a solid line with its value on the axis, visible
     // exactly where the bars fall short of it.
     let usual = rows
         .iter()
-        .position(|row| row.contains('┄'))
+        .position(|row| row.contains('━'))
         .expect("a line at the usual speed");
     assert!(
         rows[usual]
@@ -573,7 +573,7 @@ fn a_slowdown_draws_its_usual_speed_and_its_samples_in_the_anomaly_colour() {
         "{text}"
     );
     let dashes: Vec<u16> = (0..60)
-        .filter(|x| buffer[(*x, usual as u16)].symbol() == "┄")
+        .filter(|x| buffer[(*x, usual as u16)].symbol() == "━")
         .collect();
     assert!(dashes
         .iter()
@@ -624,8 +624,7 @@ fn a_slowdown_draws_its_usual_speed_and_its_samples_in_the_anomaly_colour() {
     );
     let text = buffer_rows(&buffer).join("\n");
     assert!(!text.contains('▼'), "{text}");
-    assert!((0..60)
-        .all(|x| (0..10).all(|y| buffer[(x, y)].symbol() != "┄" || buffer[(x, y)].fg != UNUSUAL)));
+    assert!((0..60).all(|x| (0..10).all(|y| buffer[(x, y)].symbol() != "━")));
     assert!((53..59).all(|x| buffer[(x, 8)].fg == UNUSUAL));
 }
 
@@ -1499,7 +1498,7 @@ fn outside_a_slowdown_a_sample_still_says_what_is_unusual_in_it() {
 }
 
 #[test]
-fn the_generation_chart_always_draws_its_usual_speed_quietly() {
+fn a_healthy_generation_chart_names_its_usual_speed_without_drawing_it() {
     let mut app = test_app(0);
     let mut sample = paging(30, 50.0, 0);
     sample.correlation = CorrelationInsight {
@@ -1521,28 +1520,22 @@ fn the_generation_chart_always_draws_its_usual_speed_quietly() {
     );
     let rows = buffer_rows(&buffer);
     let text = rows.join("\n");
-    // The dashed line sits at the usual speed, with its value on the axis,
-    // and is quiet: nothing is wrong.
-    let usual = rows
+    // Nothing is slow, so no usual-speed line: the chart keeps the plain
+    // midline every chart has, with round numbers on the axis.
+    assert!(!text.contains('━'), "{text}");
+    let midline = rows
         .iter()
         .position(|row| row.contains('┄'))
-        .expect("a line at the usual speed") as u16;
-    assert!(
-        rows[usize::from(usual)]
-            .trim_start_matches('│')
-            .trim_start()
-            .starts_with("50 "),
-        "{text}"
-    );
-    let dashes: Vec<u16> = (1..59)
-        .filter(|x| buffer[(*x, usual)].symbol() == "┄")
-        .collect();
-    assert!(dashes.contains(&55), "{dashes:?}\n{text}");
-    assert!(dashes
-        .iter()
-        .all(|x| buffer[(*x, usual)].fg == Tone::Muted.color()));
-    // The border says what the line is. No reason is given: nothing slowed.
-    assert!(rows[9].contains("tok/s · ┄ usual 50.0"), "{text}");
+        .expect("the midline");
+    let label = rows[midline].trim_start_matches('│').trim_start();
+    assert!(!label.starts_with("50 "), "{text}");
+    assert!((1..59)
+        .filter(|x| buffer[(*x, midline as u16)].symbol() == "┄")
+        .all(|x| buffer[(x, midline as u16)].fg == Tone::Muted.color()));
+    // The border says what the usual speed is, in words. No reason is
+    // given: nothing slowed.
+    assert!(rows[9].contains("tok/s · usual 50.0"), "{text}");
+    assert!(!rows[9].contains('┄'), "{text}");
     assert!(!text.contains('▼'), "{text}");
     // The slow sample alone is in the anomaly colour.
     assert_eq!(buffer[(55, 8)].fg, UNUSUAL);
@@ -1553,7 +1546,7 @@ fn the_generation_chart_always_draws_its_usual_speed_quietly() {
     // A narrow panel keeps the unit and lets the usual value go.
     let narrow = buffer_rows(&chart_buffer(
         &app,
-        22,
+        18,
         10,
         "generation",
         &generation,
@@ -1786,106 +1779,6 @@ fn speed_is_judged_against_earlier_samples_of_similar_work() {
     assert_eq!(
         slowdown.summary,
         "GEN ↓60.0% (30.0→12.0 tok/s) · nothing else unusual"
-    );
-}
-
-#[test]
-fn the_usual_speed_line_follows_the_work_column_by_column() {
-    let mut app = test_app(0);
-    let mut sample = paging(30, 30.0, 0);
-    sample.correlation = CorrelationInsight {
-        direction: ThroughputDirection::Flat,
-        usual_speed: Some((30.0, 24.0)),
-        usual_for: "2 requests · 128.5k context".into(),
-        ..CorrelationInsight::default()
-    };
-    app.collector.current = sample;
-    // Eight samples alone at a usual 50 tok/s, then eight beside another
-    // request at a usual 30: every bar is at its own usual speed.
-    let mut generation: VecDeque<ChartPoint> = (0..16)
-        .map(|index| {
-            let usual = if index < 8 { 500 } else { 300 };
-            let mut point = ChartPoint::new(Some(usual * 4 / 5), Tone::Green);
-            point.usual = Some(usual);
-            point
-        })
-        .collect();
-    let buffer = chart_buffer(
-        &app,
-        68,
-        12,
-        "generation",
-        &generation,
-        ChartMetric::Generation,
-    );
-    let rows = buffer_rows(&buffer);
-    let text = rows.join("\n");
-    // Each column's line row, left to right.
-    let lines: Vec<(u16, u16)> = (1..67)
-        .filter_map(|x| {
-            (1..11)
-                .find(|y| buffer[(x, *y)].symbol() == "┄")
-                .map(|y| (x, y))
-        })
-        .collect();
-    let rows_seen: Vec<u16> = lines.iter().map(|(_, y)| *y).collect();
-    // The line steps down once, where the work got heavier, and is grey:
-    // nothing is unusual about a speed that matches its work.
-    let (first, last) = (lines[0], lines[lines.len() - 1]);
-    assert!(first.1 < last.1, "{lines:?}\n{text}");
-    assert!(
-        rows_seen.windows(2).all(|pair| pair[0] <= pair[1]),
-        "{text}"
-    );
-    assert_eq!(buffer[last].fg, Tone::Muted.color());
-    // The border names the work the latest usual speed is for.
-    assert!(
-        rows[11].contains("tok/s · ┄ usual 30.0 for 2 requests · 128.5k context"),
-        "{text}"
-    );
-
-    // Bars past their usual speed have the line cut through them, so it
-    // reads across the whole chart.
-    let tall: VecDeque<ChartPoint> = generation
-        .iter()
-        .map(|point| ChartPoint {
-            value: point.usual.map(|usual| usual * 6 / 5),
-            ..*point
-        })
-        .collect();
-    let crossed = chart_buffer(&app, 68, 12, "generation", &tall, ChartMetric::Generation);
-    let through: Vec<u16> = (1..67)
-        .filter(|x| {
-            (1..11).any(|y| {
-                let cell = &crossed[(*x, y)];
-                cell.symbol() == "┄" && cell.bg == GREEN && cell.fg == PANEL
-            })
-        })
-        .collect();
-    assert!(
-        through.len() >= 16,
-        "{through:?}\n{}",
-        buffer_rows(&crossed).join("\n")
-    );
-
-    // A slow sample shows as a bar short of its own column's line, and the
-    // line over it takes the anomaly colour.
-    let newest = generation.back_mut().unwrap();
-    newest.value = Some(100);
-    newest.tone = Tone::Unusual;
-    let buffer = chart_buffer(
-        &app,
-        68,
-        12,
-        "generation",
-        &generation,
-        ChartMetric::Generation,
-    );
-    assert_eq!(
-        buffer[last].fg,
-        UNUSUAL,
-        "{}",
-        buffer_rows(&buffer).join("\n")
     );
 }
 
