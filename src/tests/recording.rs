@@ -108,12 +108,27 @@ fn recording_writes_one_line_per_sample_and_replay_needs_samples() {
     assert!(start(&path).is_err(), "one recording per process");
     write(&decoding(1, 50.0, 0));
     write(&decoding(2, 50.0, 0));
+    // The sink is process-wide and other tests sample too: check that both
+    // of these lines are there, not that nothing else is.
     let text = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(text.lines().count(), 2);
+    assert!(
+        text.contains("\"12:00:01\"") && text.contains("\"12:00:02\""),
+        "{text}"
+    );
+    assert!(
+        !text.contains("\"12:00:00\""),
+        "written before recording started"
+    );
     let thresholds = Thresholds::from_config(&Config::default());
     let mut out = Vec::new();
     run(&path, thresholds, &mut out).unwrap();
-    assert!(String::from_utf8(out).unwrap().contains("SAMPLES     2"));
+    let report = String::from_utf8(out).unwrap();
+    let samples: usize = report
+        .lines()
+        .find_map(|line| line.strip_prefix("SAMPLES"))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap();
+    assert!(samples >= 2, "{report}");
 
     let empty = dir.join("empty.jsonl");
     std::fs::write(&empty, "").unwrap();

@@ -635,7 +635,7 @@ fn remote_endpoints_are_distinguished_from_loopback() {
         ("http://127.0.0.1:8000", false),
         ("http://localhost:8000", false),
         ("https://inference.example.net", true),
-        ("http://192.168.50.132:8000", true),
+        ("http://192.0.2.10:8000", true),
     ] {
         assert_eq!(
             Endpoint {
@@ -679,18 +679,17 @@ fn cache_interval_uses_fresh_token_deltas_and_never_turns_capacity_into_reuse() 
 
 #[test]
 fn remote_credentials_require_the_existing_explicit_opt_in() {
-    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
+    // The policy error itself: on macOS 127.0.0.2 reaches nothing, so any
+    // error would pass while the guard was gone.
     let endpoint = Endpoint {
-        url: Some(format!(
-            "http://127.0.0.2:{}",
-            listener.local_addr().unwrap().port()
-        )),
+        url: Some("http://192.0.2.10:8080".into()),
         api_key: Some("test-token".into()),
         allow_remote_auth: false,
     };
-    assert!(endpoint.get(1, "/models").is_err());
-    assert!(listener.accept().is_err(), "no request or credentials sent");
+    assert_eq!(
+        endpoint.get(1, "/models"),
+        Err(ProbeIssue::RemoteAuthBlocked)
+    );
 }
 
 #[test]

@@ -360,14 +360,12 @@ impl App {
                 (unit == total_unit).then(|| format!("{used}/{total} {unit}"))
             });
             let mut line = Line::from(Span::styled(usage.clone(), Style::default().fg(MUTED)));
-            if let Some(value) = current {
+            if current.is_some() {
+                // Used and total only: a "% resident" figure sits near 99% on a
+                // healthy Mac and was removed from the other layouts as noise.
                 let candidates = [
-                    (usage, format!(" · {value}% resident")),
-                    (
-                        compact_usage.clone().unwrap_or_default(),
-                        format!(" · {value}% resident"),
-                    ),
-                    (compact_usage.unwrap_or_default(), format!(" · {value}%")),
+                    (usage, String::new()),
+                    (compact_usage.unwrap_or_default(), String::new()),
                 ];
                 if let Some((text, resident)) = candidates.into_iter().find(|(text, resident)| {
                     !text.is_empty()

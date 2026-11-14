@@ -98,6 +98,58 @@ fn cases() -> Vec<Case> {
     summary.summary_open = true;
     let mut diagnostics = healthy();
     diagnostics.diagnostics_open = true;
+    // Every other view, the empty ones, Help, a discrete-GPU host, Windows.
+    let on_tab = |tab: usize| {
+        let mut app = healthy();
+        app.tab = tab;
+        app
+    };
+    let mut help = healthy();
+    help.help = true;
+    let mut windows = healthy();
+    windows.collector.platform = Platform::Windows;
+    let more = vec![
+        Case {
+            name: "processes",
+            impact: false,
+            app: on_tab(1),
+        },
+        Case {
+            name: "journal",
+            impact: false,
+            app: on_tab(2),
+        },
+        Case {
+            name: "settings",
+            impact: false,
+            app: on_tab(3),
+        },
+        Case {
+            name: "processes-empty",
+            impact: false,
+            app: test_app(1),
+        },
+        Case {
+            name: "journal-empty",
+            impact: false,
+            app: test_app(2),
+        },
+        Case {
+            name: "help",
+            impact: false,
+            app: help,
+        },
+        Case {
+            name: "nvidia",
+            impact: false,
+            app: nvidia_app(2),
+        },
+        Case {
+            name: "windows",
+            impact: false,
+            app: windows,
+        },
+    ];
     // A slowdown while a host state is active: the slowdown leads.
     let mut paging_slowdown = slowed(
         healthy(),
@@ -161,6 +213,9 @@ fn cases() -> Vec<Case> {
             ),
         },
     ]
+    .into_iter()
+    .chain(more)
+    .collect()
 }
 
 fn draw(app: &App, width: u16, height: u16) -> Buffer {
@@ -208,7 +263,7 @@ fn judge(case: &Case, width: u16, height: u16) -> Vec<String> {
         }
     }
     // Every panel the Overview promises is there, with its border whole.
-    let overlay = case.app.summary_open || case.app.diagnostics_open;
+    let overlay = case.app.summary_open || case.app.diagnostics_open || case.app.help;
     if case.app.tab == 0 && !overlay && width >= 100 {
         let mut titles = vec![
             "memory",

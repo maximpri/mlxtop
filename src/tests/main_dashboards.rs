@@ -105,13 +105,10 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
         let at = headline.find(&pressure).unwrap();
         let column = headline[..at].chars().count() as u16;
         assert_eq!(buffer[(column, 0)].fg, tone.color());
-        let resident_label = format!("{resident}% resident");
-        assert!(reading.contains(&resident_label), "{reading}");
-        let at = reading.find(&resident_label).unwrap();
-        assert_eq!(
-            buffer[(reading[..at].chars().count() as u16, 1)].fg,
-            CYAN,
-            "resident percentage is occupancy; pressure has a separate severity label"
+        // Used and total, no "% resident" figure: it was removed as noise.
+        assert!(
+            !reading.contains(&format!("{resident}% resident")),
+            "{reading}"
         );
         assert!(!footer.contains("Includes file cache"), "no filler footer");
         let sample_cells: Vec<_> = buffer
@@ -632,7 +629,8 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
     };
     let mut history = VecDeque::from([ChartPoint::new(Some(0), Tone::Green)]);
     let idle = draw(&history);
-    assert!(idle.contains("No paging traffic in this window"));
+    // The idle paging panel keeps its baseline; no sentence repeats it.
+    assert!(!idle.contains("No paging traffic in this window"));
     assert!(!idle.contains("1 B/s"));
     assert!(idle.contains("0 B/s"));
     // A measured zero marks the baseline in its grade; the empty guide is muted.
@@ -671,7 +669,7 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
         ChartPoint::new(Some(0), Tone::Green),
         100,
     ));
-    assert!(draw(&history).contains("No paging traffic in this window"));
+    assert!(!draw(&history).contains("No paging traffic in this window"));
 }
 
 #[test]

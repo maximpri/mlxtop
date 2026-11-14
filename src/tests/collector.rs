@@ -1755,3 +1755,24 @@ fn an_unread_view_channel_holds_one_snapshot() {
     let waiting = sampler.views.try_iter().count();
     assert!(waiting <= 1, "{waiting} snapshots queued");
 }
+
+#[test]
+fn a_saved_history_length_reaches_the_running_sampler() {
+    let sampler = Sampler::start(Duration::from_millis(20), || {
+        collector(linux_host(), Platform::Linux, None)
+    });
+    let mut view = recv_view(&sampler);
+    while view.load_history.len() < 3 {
+        view = recv_view(&sampler);
+    }
+    sampler.send(SamplerCommand::SetHistory(1));
+    // The next views are trimmed to the new length.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let view = recv_view(&sampler);
+        if view.load_history.len() == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "history was never trimmed");
+    }
+}

@@ -1320,7 +1320,12 @@ impl App {
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
         // An idle disk panel keeps its baseline: the rows above it say what
         // the cache holds, and a sentence would cover them.
-        if paging_idle && inner.height >= 4 && metric != ChartMetric::Disk {
+        // An idle paging panel keeps its baseline too: "no paging" is
+        // already its bottom edge, and a sentence repeating it is noise.
+        if paging_idle
+            && inner.height >= 4
+            && !matches!(metric, ChartMetric::Disk | ChartMetric::Swap)
+        {
             frame.render_widget(
                 Paragraph::new(match (metric, inner.width >= 32) {
                     (ChartMetric::Compression, true) => "No compression in this window",
