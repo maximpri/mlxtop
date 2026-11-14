@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.1-rc.2 — 2026-11-14
+## 3.3.1-rc.3 — 2026-11-14
 
 Fixes from a full review of 3.3.0. **Update with the install script or
 Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS crates this
@@ -90,6 +90,13 @@ release replaces.
 - **Messages name what is wrong:** `mlxtop dcotor` says `unknown command`,
   a `config.json` that does not parse is reported once, and Settings keeps a
   symlinked config linked and private.
+- **The memory panel says what holds memory.** GPU memory splits into the
+  model and the KV cache and everything else, against the GPU limit; RAM's
+  legend gives each kind's size; a line names the runtime's footprint and
+  the largest other app. Under them, RAM by kind over time replaces the
+  trace of what was left, with the GPU limit as a named dashed line, so a
+  model load or a KV cache growing toward the limit shows as a band. The
+  sentence repeating the GPU meter is gone.
 - **A short compression or paging panel keeps a trickle small.** At two
   rows tall the panel scaled to its own peak, so 16 KiB/s of compression
   drew full bars; it now scales against the warning rate, as the taller
