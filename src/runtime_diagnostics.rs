@@ -14,6 +14,9 @@ pub(crate) enum ProbeIssue {
     InvalidCredential,
     RemoteAuthBlocked,
     CredentialsMissing,
+    /// A key is set, but no runtime process was found or chosen: it is not
+    /// sent to whatever answers on the port.
+    NotDetected,
     Timeout,
     Transport,
     Http(u16),
@@ -29,9 +32,10 @@ impl fmt::Display for ProbeIssue {
             Self::InvalidPort => f.write_str("invalid MLXTOP_PROVIDER_PORT; use an integer from 1 to 65535"),
             Self::InvalidCredential => f.write_str("invalid credential; remove empty values and control characters"),
             Self::RemoteAuthBlocked => f.write_str("remote authentication blocked; MLXTOP_ALLOW_REMOTE_AUTH=1 is required to send credentials"),
-            Self::CredentialsMissing => f.write_str("monitoring credentials not configured"),
+            Self::CredentialsMissing => f.write_str("monitoring credentials not configured; set MLXTOP_PROVIDER_API_KEY, or auth.api_key in oMLX's settings"),
+            Self::NotDetected => f.write_str("no oMLX process found; key not sent (set MLXTOP_PROVIDER=omlx to send it)"),
             Self::Timeout => f.write_str("connection timed out; check the server address and reachability"),
-            Self::Transport => f.write_str("connection failed; check reachability and HTTPS certificate trust"),
+            Self::Transport => f.write_str("connection failed; check that the server is running and reachable"),
             Self::Http(401 | 403) => f.write_str("authentication rejected; check monitoring credentials and permissions"),
             Self::Http(status) => write!(f, "HTTP {status}; check that this monitoring endpoint is enabled"),
             Self::InvalidResponse => f.write_str("unrecognized response; check the endpoint and runtime API version"),
@@ -440,7 +444,7 @@ fn capabilities(provider: &str) -> Vec<Capability> {
 
 fn setup(provider: &str) -> &'static [&'static str] {
     match provider {
-        "oMLX" => &["Endpoint: ~/.config/mlxtop/config.json → omx.host / omx.port, or discovered from server.env, OMLX_PORT or ~/.omlx/settings.json (default port 8000).", "Admin statistics require the existing oMLX API key configuration; health alone supplies partial monitoring.", "See docs/USER_GUIDE.md#omlx-telemetry for monitoring credentials."],
+        "oMLX" => &["Endpoint: ~/.config/mlxtop/config.json → omx.host / omx.port, or discovered from server.env, OMLX_PORT or ~/.omlx/settings.json (default port 8000).", "Admin statistics need oMLX's API key: read from MLXTOP_PROVIDER_API_KEY, OMLX_API_KEY, ~/.config/omlx-coding/server.env (API_KEY=) or auth.api_key in ~/.omlx/settings.json. Health alone gives partial monitoring.", "Credentials: https://github.com/maximpri/mlxtop/blob/main/docs/USER_GUIDE.md#omlx-telemetry"],
         "llama.cpp" => &["Enable the server's --metrics endpoint; /slots and /metrics can work independently.", "Select with MLXTOP_PROVIDER=llama.cpp; mlxtop tries port 9931, then 8080. Set MLXTOP_PROVIDER_PORT for a custom port.", "For full request history, integrate the client usage recorder and set MLXTOP_USAGE_FILE to its JSONL file."],
         "vLLM" | "SGLang" => &["Expose /metrics (SGLang requires --enable-metrics); rates need two matching counter samples.", "Set MLXTOP_PROVIDER=vllm or MLXTOP_PROVIDER=sglang and MLXTOP_PROVIDER_URL for a custom server root.", "Aggregate first-token timing is not individual request latency; request history requires client recording."],
         "mlx-serve" => &["Start mlx-serve with --metrics; mlxtop reads /metrics for rates and queues and /metrics.json for running requests. Sushi serves the same endpoints under `sushi:` gauge names and needs no flag.", "Select with MLXTOP_PROVIDER=mlx-serve (default port 11234); set MLXTOP_PROVIDER_PORT for a custom port.", "Bearer keys use MLXTOP_PROVIDER_API_KEY. Sessions that only hold a prefix cache are not listed as requests."],

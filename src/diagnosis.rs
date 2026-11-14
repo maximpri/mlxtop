@@ -304,10 +304,23 @@ fn assess_observation(sample: &Sample) -> Finding {
     ) {
         // No generation rate is expected before the first token.
         finding.next = "".into();
+    } else if !live && omlx_key_missing(sample) {
+        // Connected, but the admin statistics need a key nobody gave.
+        finding.next = "No live rates: oMLX admin key not set · d for setup".into();
     } else if !live {
         finding.next = "Live generation rate unavailable.".into();
     }
     finding
+}
+
+/// oMLX answered its health check, but its statistics were not read because
+/// no admin key was found.
+fn omlx_key_missing(sample: &Sample) -> bool {
+    sample.runtime.provider.as_deref() == Some("oMLX")
+        && sample.runtime.probes.iter().any(|probe| {
+            probe.path == "/admin/api/login"
+                && probe.issue == Some(crate::runtime_diagnostics::ProbeIssue::CredentialsMissing)
+        })
 }
 
 /// Findings share one headline slot, so native state names use sentence case.

@@ -346,3 +346,25 @@ fn a_measured_slowdown_outranks_a_non_critical_host_state() {
     host_only.correlation = CorrelationInsight::default();
     assert_eq!(assess(&host_only).title, "Compression active");
 }
+
+#[test]
+fn a_connected_omlx_without_a_key_says_what_is_missing() {
+    let mut sample = busy_sample();
+    sample.impact = "LLM READY".into();
+    sample.llm_generation_tps_live = false;
+    sample.llm_status = "healthy".into();
+    sample.llm_active_requests = None;
+    sample.runtime.provider = Some("oMLX".into());
+    assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
+    sample
+        .runtime
+        .probes
+        .push(crate::runtime_diagnostics::Probe {
+            path: "/admin/api/login".into(),
+            issue: Some(crate::runtime_diagnostics::ProbeIssue::CredentialsMissing),
+        });
+    assert_eq!(
+        assess(&sample).next,
+        "No live rates: oMLX admin key not set · d for setup"
+    );
+}

@@ -146,7 +146,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "omx.host",
         section: "oMLX server",
         label: "Host",
-        help: "oMLX server host. Unset, mlxtop reads ~/.config/omlx-coding/server.env, then uses 127.0.0.1.",
+        help: "oMLX server host. Unset, mlxtop reads ~/.config/omlx-coding/server.env, then oMLX's settings.json, then uses 127.0.0.1.",
         kind: Kind::Host,
     },
     Field {

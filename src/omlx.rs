@@ -29,6 +29,12 @@ pub(crate) struct LlmTelemetryClient {
     pub(crate) runtime: RuntimeReport,
     using_adapter: bool,
     configured_endpoint: bool,
+    /// Whether this poll may send the admin key: only to an oMLX that was
+    /// detected or chosen, not to whatever answers on the polled port.
+    pub(crate) login_allowed: bool,
+    /// When a login was last refused: a wrong key is retried once a minute,
+    /// not on every poll.
+    login_refused_at: Option<Instant>,
     decode: crate::decode_tracker::DecodeTracker,
 }
 
@@ -49,6 +55,11 @@ impl LlmTelemetryClient {
             retry_backoff: Duration::from_secs(1),
             runtime: RuntimeReport::default(),
             using_adapter: false,
+            login_allowed: config
+                .omx
+                .as_ref()
+                .is_some_and(|omx| omx.host.is_some() || omx.port.is_some()),
+            login_refused_at: None,
             decode: Default::default(),
             configured_endpoint: config
                 .omx
@@ -66,6 +77,9 @@ impl LlmTelemetryClient {
         if now < self.next_poll {
             return self.cached.clone();
         }
+        self.login_allowed = detected_provider == Some("oMLX")
+            || self.configured_endpoint
+            || self.provider_adapter.provider() == Some("oMLX");
         self.runtime.provider = self
             .provider_adapter
             .provider()
@@ -90,7 +104,7 @@ impl LlmTelemetryClient {
             crate::runtime_diagnostics::safe_endpoint(&format!("http://{authority}:{}", self.port))
                 .unwrap_or_else(|| "<invalid endpoint>".into());
         self.runtime.remote = !is_loopback_host(&self.host);
-        self.runtime.credentials_present = read_omlx_api_key(self.home.as_deref()).is_some();
+        self.runtime.credentials_present = omlx_api_key(self.home.as_deref()).is_some();
         self.runtime.begin();
         let telemetry = if self.runtime.endpoint == "<invalid endpoint>" {
             self.runtime
@@ -302,11 +316,26 @@ impl LlmTelemetryClient {
                 .record::<()>("/admin/api/login", Err(ProbeIssue::RemoteAuthBlocked));
             return;
         }
-        let Some(api_key) = read_omlx_api_key(self.home.as_deref()) else {
+        let Some(api_key) = omlx_api_key(self.home.as_deref()) else {
             self.runtime
                 .record::<()>("/admin/api/login", Err(ProbeIssue::CredentialsMissing));
             return;
         };
+        if !self.login_allowed {
+            // Something answers like oMLX on the polled port, but no oMLX
+            // process was found and none was chosen: keep the key.
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::NotDetected));
+            return;
+        }
+        if self
+            .login_refused_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::Http(401)));
+            return;
+        }
         let body = json!({ "api_key": api_key, "remember": true }).to_string();
         let Some(response) = self.request(
             "POST",
@@ -316,6 +345,13 @@ impl LlmTelemetryClient {
         ) else {
             return;
         };
+        if matches!(response.status, 401 | 403) {
+            self.login_refused_at = Some(Instant::now());
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::Http(response.status)));
+            return;
+        }
+        self.login_refused_at = None;
         if response.status == 200 {
             self.session_cookie = response
                 .header("set-cookie")
@@ -345,10 +381,12 @@ pub(crate) struct DiscoveredEndpoint {
 pub(crate) fn parse_omlx_server_env(text: &str) -> DiscoveredEndpoint {
     let mut discovered = DiscoveredEndpoint::default();
     for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let value = value.trim().trim_matches('"');
+        let value = value.trim().trim_matches(['"', '\'']);
         match key.trim() {
             "HOST" | "OMLX_HOST" if !value.is_empty() && value != "0.0.0.0" => {
                 discovered.host = Some(value.to_owned());
@@ -483,9 +521,64 @@ pub(crate) fn read_omlx_api_key(home: Option<&Path>) -> Option<String> {
         .find_map(|line| {
             let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
             let (key, value) = line.split_once('=')?;
-            (key.trim() == "API_KEY").then(|| value.trim().trim_matches('"').to_owned())
+            (key.trim() == "API_KEY").then(|| value.trim().trim_matches(['"', '\'']).to_owned())
         })
         .filter(|value| !value.is_empty())
+}
+
+/// The key a stock oMLX keeps as `auth.api_key` in its own `settings.json`.
+pub(crate) fn read_omlx_settings_api_key(base: &Path) -> Option<String> {
+    let text = fs::read_to_string(base.join("settings.json")).ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("auth")?
+        .get("api_key")?
+        .as_str()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+}
+
+/// The oMLX admin key, from the first source that has one:
+/// `MLXTOP_PROVIDER_API_KEY`, oMLX's own `OMLX_API_KEY`, the wrapper's
+/// `~/.config/omlx-coding/server.env`, then oMLX's `settings.json` (in
+/// `OMLX_BASE_PATH`, by default `~/.omlx`).
+pub(crate) fn omlx_api_key(home: Option<&Path>) -> Option<String> {
+    // Tests read keys from files only, whatever the developer's shell holds.
+    let var = |name: &str| {
+        if cfg!(test) {
+            None
+        } else {
+            env::var(name).ok()
+        }
+    };
+    omlx_api_key_from(
+        var("MLXTOP_PROVIDER_API_KEY"),
+        var("OMLX_API_KEY"),
+        home,
+        env::var_os("OMLX_BASE_PATH").map(PathBuf::from).as_deref(),
+    )
+}
+
+pub(crate) fn omlx_api_key_from(
+    provider_key: Option<String>,
+    omlx_key: Option<String>,
+    home: Option<&Path>,
+    base_path: Option<&Path>,
+) -> Option<String> {
+    let set = |key: Option<String>| {
+        key.map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+    };
+    set(provider_key)
+        .or_else(|| set(omlx_key))
+        .or_else(|| read_omlx_api_key(home))
+        .or_else(|| {
+            let base = base_path
+                .map(Path::to_path_buf)
+                .or_else(|| home.map(|home| home.join(".omlx")))?;
+            read_omlx_settings_api_key(&base)
+        })
 }
 
 pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> LlmTelemetry {

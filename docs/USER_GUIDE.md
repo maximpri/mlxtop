@@ -205,6 +205,15 @@ Without that file, it takes the port from `OMLX_PORT`, then from `server.port`
 (and `server.host`) in oMLX's `settings.json`, found in `OMLX_BASE_PATH` or by
 default `~/.omlx`.
 
+oMLX's admin statistics (speeds, requests, cache) need its API key. mlxtop
+takes the first it finds: `MLXTOP_PROVIDER_API_KEY`, oMLX's own
+`OMLX_API_KEY`, an `API_KEY=` line in `server.env`, then `auth.api_key` in
+oMLX's `settings.json`. It sends the key only to a loopback address (unless
+`MLXTOP_ALLOW_REMOTE_AUTH=1`) and only when an oMLX process was found or oMLX
+was chosen (`MLXTOP_PROVIDER=omlx`, or an `omx` host or port in the config);
+another program answering on the port never receives it. With no key, the
+Overview says `No live rates: oMLX admin key not set`.
+
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
 labels that fallback with its age:

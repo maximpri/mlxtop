@@ -1583,3 +1583,81 @@ fn host_state_flaps_write_one_journal_row_each_way() {
         .collect();
     assert!(rows.len() <= 4, "{rows:?}");
 }
+
+#[test]
+fn a_stock_omlx_login_uses_the_key_in_its_own_settings() {
+    let home = TempDir::new("omlx-stock-key");
+    home.write(
+        ".omlx/settings.json",
+        r#"{"server":{"port":8123},"auth":{"api_key":"from-settings"}}"#,
+    );
+    let key = |provider: Option<&str>, omlx: Option<&str>, base: Option<&Path>| {
+        omlx_api_key_from(
+            provider.map(str::to_owned),
+            omlx.map(str::to_owned),
+            Some(&home.0),
+            base,
+        )
+    };
+    assert_eq!(key(None, None, None).as_deref(), Some("from-settings"));
+    assert_eq!(
+        key(None, Some("from-omlx-env"), None).as_deref(),
+        Some("from-omlx-env")
+    );
+    assert_eq!(
+        key(Some("from-mlxtop"), Some("x"), None).as_deref(),
+        Some("from-mlxtop")
+    );
+    assert_eq!(
+        key(Some("  "), None, None).as_deref(),
+        Some("from-settings")
+    );
+    home.write(".config/omlx-coding/server.env", "API_KEY=from-env\n");
+    assert_eq!(key(None, None, None).as_deref(), Some("from-env"));
+
+    let other = TempDir::new("omlx-base-path");
+    other.write(".omlx/settings.json", r#"{"auth":{"api_key":null}}"#);
+    assert_eq!(read_omlx_settings_api_key(&other.0.join(".omlx")), None);
+    other.write("base/settings.json", r#"{"auth":{"api_key":"from-base"}}"#);
+    let bare = TempDir::new("omlx-no-wrapper");
+    assert_eq!(
+        omlx_api_key_from(None, None, Some(&bare.0), Some(&other.0.join("base"))).as_deref(),
+        Some("from-base")
+    );
+    assert_eq!(omlx_api_key_from(None, None, Some(&bare.0), None), None);
+}
+
+#[test]
+fn omlx_key_is_not_sent_without_a_detected_or_selected_runtime() {
+    let home = TempDir::new("omlx-gate");
+    home.write(".config/omlx-coding/server.env", "API_KEY=secret\n");
+    let mut client = omlx_client(1, Some(home.0.clone()));
+    client.login_allowed = false;
+    client.login();
+    assert!(client.session_cookie.is_none());
+    assert!(client
+        .runtime
+        .probes
+        .iter()
+        .any(|probe| probe.issue == Some(crate::runtime_diagnostics::ProbeIssue::NotDetected)));
+}
+
+#[test]
+fn a_refused_omlx_login_is_retried_once_a_minute_not_every_poll() {
+    let home = TempDir::new("omlx-refused");
+    home.write(".config/omlx-coding/server.env", "API_KEY=wrong\n");
+    let (port, server) = serve(vec![reply("POST /admin/api/login ", 401, "{}")]);
+    let mut client = omlx_client(port, Some(home.0.clone()));
+    client.login();
+    assert_eq!(server.join().unwrap().len(), 1);
+    // The next attempt within a minute sends nothing.
+    client.login();
+    assert!(client.session_cookie.is_none());
+}
+
+#[test]
+fn omlx_server_env_reads_exported_host_and_port() {
+    let found = parse_omlx_server_env("export PORT=9000\nexport HOST='10.0.0.2'\n");
+    assert_eq!(found.port, Some(9000));
+    assert_eq!(found.host.as_deref(), Some("10.0.0.2"));
+}
