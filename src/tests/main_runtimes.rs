@@ -978,3 +978,53 @@ fn an_absurd_idle_age_from_omlx_is_ignored_not_fatal() {
     };
     assert_eq!(request.idle_for, None);
 }
+
+#[test]
+fn unrelated_commands_naming_a_runtime_are_not_runtimes() {
+    for (name, command) in [
+        ("vim", "vim ollama-notes.md"),
+        ("tail", "tail -f /var/log/omlx.log"),
+        ("ssh", "ssh ollama-box"),
+        ("git", "git clone https://github.com/ollama/ollama"),
+        ("less", "less sglang.txt"),
+        ("grep", "grep -r llama.cpp ."),
+    ] {
+        assert_eq!(process_provider(name, command), None, "{command}");
+    }
+    // Runtimes started through an interpreter are still found.
+    assert_eq!(
+        process_provider("Python", "/usr/bin/python3 -m mlx_lm.server --port 8080").as_deref(),
+        Some("mlx-lm")
+    );
+    assert_eq!(
+        process_provider("ollama", "/opt/homebrew/bin/ollama serve").as_deref(),
+        Some("Ollama")
+    );
+}
+
+#[test]
+fn macos_process_names_are_executable_names() {
+    // `ps -axo …,comm=,args=` on macOS: `comm` cut to 16 characters.
+    let listing = "\
+  429  32944  1.9 0.1 Ss 0 /System/Library/ /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console\n\
+ 1076 4186368 30.4 12.5 Us 0 /Applications/Go /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --type=renderer\n\
+  777 2097152  5.0 3.0 S 0 /opt/homebrew/bi /opt/homebrew/bin/ollama serve\n\
+  101 1024  0.1 0.1 Ss 0 /sbin/launchd /sbin/launchd\n";
+    let snapshot = crate::processes::parse_processes(listing);
+    assert_eq!(snapshot.largest_consumer.as_deref(), Some("Google Chrome"));
+    assert_eq!(
+        snapshot.top_llm.as_ref().map(|p| p.name.as_str()),
+        Some("ollama")
+    );
+    assert_eq!(snapshot.provider.as_deref(), Some("Ollama"));
+    assert_eq!(
+        crate::processes::executable_name("/sbin/launchd"),
+        "launchd"
+    );
+    assert_eq!(
+        crate::processes::executable_name(
+            "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console"
+        ),
+        "loginwindow"
+    );
+}

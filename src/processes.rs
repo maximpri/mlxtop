@@ -18,6 +18,28 @@ pub(crate) struct ProcessRow {
     pub command: String,
 }
 
+/// The executable's file name from a full command line: an app bundle's
+/// path may hold spaces (`…/Google Chrome.app/Contents/MacOS/Google Chrome`),
+/// a plain path ends at the first space.
+pub(crate) fn executable_name(command: &str) -> String {
+    let path = if let Some(at) = command.find(".app/Contents/MacOS/") {
+        let start = at + ".app/Contents/MacOS/".len();
+        let rest = &command[start..];
+        // A bundle whose name has a space may have an executable that does
+        // too: read to the first option. Otherwise the name ends at a space.
+        let bundle = command[..at].rsplit('/').next().unwrap_or_default();
+        let end = if bundle.contains(' ') {
+            rest.find(" -").unwrap_or(rest.len())
+        } else {
+            rest.find(' ').unwrap_or(rest.len())
+        };
+        return rest[..end].trim().to_string();
+    } else {
+        command.split_whitespace().next().unwrap_or(command)
+    };
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
 pub(crate) fn parse_processes(text: &str) -> ProcessSnapshot {
     snapshot(text.lines().filter_map(parse_ps_line).collect())
 }
@@ -47,15 +69,26 @@ fn parse_ps_line(line: &str) -> Option<ProcessRow> {
             (None, "?".into(), None, 3, 4)
         };
     let name_field = fields.get(name_index)?;
-    let name = name_field
-        .rsplit('/')
-        .next()
-        .unwrap_or(name_field)
-        .to_string();
     let command = fields
         .get(command_index..)
         .map(|parts| parts.join(" "))
-        .unwrap_or_else(|| name.clone());
+        .unwrap_or_default();
+    // macOS cuts a `comm` column that is not last to 16 characters, so a
+    // path reads `/Applications/Go`. The full path starts the command.
+    let name = if name_field.starts_with('/') && command.starts_with(name_field) {
+        executable_name(&command)
+    } else {
+        name_field
+            .rsplit('/')
+            .next()
+            .unwrap_or(name_field)
+            .to_string()
+    };
+    let command = if command.is_empty() {
+        name.clone()
+    } else {
+        command
+    };
     Some(ProcessRow {
         pid,
         rss: rss_kib * 1024,
@@ -186,8 +219,21 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         .take_while(|token| !token.starts_with("--"))
         .collect::<Vec<_>>();
     let prefix = command_tokens.join(" ").to_ascii_lowercase();
+    // Arguments name the runtime only when the executable runs other code
+    // (`python -m mlx_lm.server`); `tail -f ollama.log` is not Ollama.
+    let launcher = command_tokens.first().is_some_and(|first| {
+        let executable = normalize_process_token(first);
+        [
+            "python", "node", "uv", "uvx", "sh", "bash", "zsh", "env", "conda", "pipx",
+        ]
+        .iter()
+        .any(|known| {
+            executable == *known || (*known == "python" && executable.starts_with("python"))
+        })
+    });
+    let arguments = if launcher { command_tokens.len() } else { 1 };
     let candidates: Vec<_> = std::iter::once(name)
-        .chain(command_tokens.iter().copied())
+        .chain(command_tokens.iter().copied().take(arguments))
         .map(normalize_process_token)
         .filter(|token| !token.contains("mlxtop"))
         .collect();
