@@ -71,7 +71,7 @@ impl LlmTelemetryClient {
     pub(crate) fn poll(&mut self, detected_provider: Option<&str>) -> Option<LlmTelemetry> {
         self.using_adapter = self.provider_adapter.selected(detected_provider);
         if self.using_adapter {
-            return self.provider_adapter.poll();
+            return providers::with_poll_deadline(|| self.provider_adapter.poll());
         }
         let now = Instant::now();
         if now < self.next_poll {
@@ -110,7 +110,7 @@ impl LlmTelemetryClient {
             self.runtime
                 .record("configuration", Err(ProbeIssue::InvalidEndpoint))
         } else {
-            self.poll_once()
+            providers::with_poll_deadline(|| self.poll_once())
         };
         self.runtime.finish(telemetry.is_some());
         if telemetry.is_some() {
@@ -121,7 +121,7 @@ impl LlmTelemetryClient {
             telemetry.remote = !is_loopback_host(&self.host);
             self.cached = Some(telemetry);
             self.retry_backoff = Duration::from_secs(1);
-            self.next_poll = now + self.retry_backoff;
+            self.next_poll = Instant::now() + self.retry_backoff;
         } else {
             diagnostics_log(
                 "WARN",
@@ -133,8 +133,15 @@ impl LlmTelemetryClient {
                     self.retry_backoff.as_secs()
                 ),
             );
-            self.next_poll = now + self.retry_backoff;
-            self.retry_backoff = (self.retry_backoff * 2).min(Duration::from_secs(30));
+            // Counted from the end of the poll; a refused connection is
+            // retried within seconds, a timed-out one backs off further.
+            let timed_out = self
+                .runtime
+                .probes
+                .iter()
+                .any(|probe| probe.issue == Some(ProbeIssue::Timeout));
+            self.next_poll = Instant::now() + self.retry_backoff;
+            self.retry_backoff = providers::next_backoff(self.retry_backoff, timed_out);
         }
         self.cached.clone()
     }

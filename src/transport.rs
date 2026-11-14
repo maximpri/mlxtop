@@ -3,7 +3,7 @@
 use crate::runtime_diagnostics::ProbeIssue;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) struct HttpResponse {
@@ -21,6 +21,22 @@ impl HttpResponse {
     }
 }
 
+/// The longest one oMLX request may take, reply included.
+const REPLY_BUDGET: Duration = Duration::from_secs(2);
+
+/// Whether `raw` holds a whole reply by its `Content-Length` header.
+fn content_complete(raw: &[u8]) -> bool {
+    let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&raw[..end]);
+    head.lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(key, _)| key.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .is_some_and(|length| raw.len() >= end + 4 + length)
+}
+
 pub(crate) fn http_request(
     host: &str,
     port: u16,
@@ -29,16 +45,28 @@ pub(crate) fn http_request(
     headers: &[(&str, &str)],
     body: Option<&str>,
 ) -> Result<HttpResponse, ProbeIssue> {
-    let address = (host, port)
+    // One deadline for the whole exchange (and within the poll's own).
+    let budget = crate::providers::request_budget(REPLY_BUDGET).ok_or(ProbeIssue::Timeout)?;
+    let deadline = Instant::now() + budget;
+    // `localhost` resolves to ::1 first on many machines while the server
+    // listens on IPv4 only: try each address.
+    let addresses: Vec<_> = (host.trim_matches(['[', ']']), port)
         .to_socket_addrs()
         .map_err(ProbeIssue::from_io)?
-        .next()
-        .ok_or(ProbeIssue::Transport)?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(250))
-        .map_err(ProbeIssue::from_io)?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .map_err(ProbeIssue::from_io)?;
+        .collect();
+    let mut connected = Err(ProbeIssue::Transport);
+    for address in &addresses {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ProbeIssue::Timeout);
+        }
+        connected = TcpStream::connect_timeout(address, left.min(Duration::from_millis(250)))
+            .map_err(ProbeIssue::from_io);
+        if connected.is_ok() {
+            break;
+        }
+    }
+    let mut stream = connected?;
     stream
         .set_write_timeout(Some(Duration::from_millis(250)))
         .map_err(ProbeIssue::from_io)?;
@@ -60,11 +88,34 @@ pub(crate) fn http_request(
         .write_all(request.as_bytes())
         .map_err(ProbeIssue::from_io)?;
 
+    // Read until the server closes, the reply is complete by its
+    // Content-Length, or the deadline passes: a slow drip cannot hold the
+    // sampler, and a server that keeps the connection open is still read.
     let mut raw = Vec::new();
-    stream
-        .take((MAX_HTTP_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut raw)
-        .map_err(ProbeIssue::from_io)?;
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        if content_complete(&raw) {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ProbeIssue::Timeout);
+        }
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(ProbeIssue::from_io)?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                raw.extend_from_slice(&chunk[..read]);
+                if raw.len() > MAX_HTTP_RESPONSE_BYTES {
+                    return Err(ProbeIssue::ResponseTooLarge);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(ProbeIssue::from_io(error)),
+        }
+    }
     if raw.len() > MAX_HTTP_RESPONSE_BYTES {
         return Err(ProbeIssue::ResponseTooLarge);
     }

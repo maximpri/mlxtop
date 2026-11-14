@@ -1223,3 +1223,82 @@ fn runtimes_with_two_default_ports_use_the_one_that_answered() {
     adapter.selected(Some("Ollama"));
     assert_eq!(adapter.answered.get(), None, "a new runtime probes again");
 }
+
+#[test]
+fn refused_endpoints_retry_within_seconds_and_timed_out_ones_back_off() {
+    let mut refused = Duration::from_secs(1);
+    let mut timed_out = Duration::from_secs(1);
+    for _ in 0..10 {
+        refused = next_backoff(refused, false);
+        timed_out = next_backoff(timed_out, true);
+    }
+    assert_eq!(refused, Duration::from_secs(4));
+    assert_eq!(timed_out, Duration::from_secs(30));
+}
+
+#[test]
+fn a_poll_shares_one_deadline_across_its_requests() {
+    assert_eq!(
+        request_budget(Duration::from_secs(2)),
+        Some(Duration::from_secs(2))
+    );
+    with_poll_deadline(|| {
+        let budget = request_budget(Duration::from_secs(2)).unwrap();
+        assert!(budget <= POLL_BUDGET);
+    });
+    assert_eq!(
+        request_budget(Duration::from_secs(2)),
+        Some(Duration::from_secs(2))
+    );
+}
+
+#[test]
+fn hung_runtime_costs_one_sample_at_most_the_poll_budget() {
+    // A listener that accepts connections and never answers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let held = std::thread::spawn(move || {
+        let mut open = Vec::new();
+        listener.set_nonblocking(true).unwrap();
+        let until = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < until {
+            if let Ok((stream, _)) = listener.accept() {
+                open.push(stream);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let mut adapter = Adapter {
+        configured: Some("llama.cpp".into()),
+        usage_file: None,
+        selected: Some("llama.cpp".into()),
+        port: Some(port),
+        cached: None,
+        next_poll: Instant::now(),
+        backoff: Duration::from_secs(1),
+        kobold_uptime: None,
+        kobold_session: 0,
+        answered: Default::default(),
+        llama: LlamaRate::default(),
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
+    };
+    let started = Instant::now();
+    let _ = with_poll_deadline(|| adapter.poll());
+    let first = started.elapsed();
+    assert!(
+        first < Duration::from_millis(2000),
+        "first poll took {first:?}"
+    );
+    let started = Instant::now();
+    let _ = with_poll_deadline(|| adapter.poll());
+    let second = started.elapsed();
+    assert!(
+        second < Duration::from_millis(100),
+        "second poll took {second:?}"
+    );
+    held.join().unwrap();
+}

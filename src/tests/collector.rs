@@ -776,8 +776,8 @@ fn omlx_client_backs_off_while_the_server_is_unreachable() {
     }
     assert_eq!(
         client.retry_backoff,
-        Duration::from_secs(30),
-        "backoff is capped"
+        Duration::from_secs(4),
+        "a refused connection is retried within seconds"
     );
     // A cached success survives a failed poll.
     client.cached = Some(LlmTelemetry {
@@ -1660,4 +1660,94 @@ fn omlx_server_env_reads_exported_host_and_port() {
     let found = parse_omlx_server_env("export PORT=9000\nexport HOST='10.0.0.2'\n");
     assert_eq!(found.port, Some(9000));
     assert_eq!(found.host.as_deref(), Some("10.0.0.2"));
+}
+
+fn one_connection(
+    reply: impl FnOnce(std::net::TcpStream) + Send + 'static,
+) -> (u16, thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        reply(stream);
+    });
+    (port, handle)
+}
+
+#[test]
+fn slow_responses_time_out_as_a_whole() {
+    use std::io::Write as _;
+    let (port, server) = one_connection(|mut stream| {
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n");
+        for _ in 0..40 {
+            if stream.write_all(b"x").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let started = Instant::now();
+    let reply = crate::transport::http_request("127.0.0.1", port, "GET", "/health", &[], None);
+    assert!(matches!(
+        reply,
+        Err(crate::runtime_diagnostics::ProbeIssue::Timeout)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_millis(2600),
+        "{:?}",
+        started.elapsed()
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn a_complete_reply_on_a_kept_open_connection_is_read() {
+    use std::io::{Read as _, Write as _};
+    let (port, server) = one_connection(|mut stream| {
+        let mut request = [0_u8; 512];
+        let _ = stream.read(&mut request);
+        let body = r#"{"default_model":"q"}"#;
+        let _ = stream.write_all(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+        );
+        thread::sleep(Duration::from_millis(50));
+        let _ = stream.write_all(body.as_bytes());
+        // Keep the connection open well past the reply.
+        thread::sleep(Duration::from_millis(1500));
+    });
+    let started = Instant::now();
+    let reply = crate::transport::http_request("localhost", port, "GET", "/health", &[], None)
+        .expect("localhost reaches an IPv4-only server, and the reply ends at its length");
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.body, r#"{"default_model":"q"}"#);
+    assert!(started.elapsed() < Duration::from_millis(1000));
+    server.join().unwrap();
+}
+
+#[test]
+fn sampler_keeps_its_cadence_and_quit_does_not_wait_for_a_sample() {
+    let host = linux_host();
+    let sampler = Sampler::start(Duration::from_millis(200), move || {
+        collector(host, Platform::Linux, None)
+    });
+    let first = sampler.views.recv_timeout(Duration::from_secs(10)).unwrap();
+    let mut last = first;
+    for _ in 0..5 {
+        last = sampler.views.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+    let _ = last;
+    let started = Instant::now();
+    drop(sampler);
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn an_unread_view_channel_holds_one_snapshot() {
+    let host = linux_host();
+    let sampler = Sampler::start(Duration::from_millis(5), move || {
+        collector(host, Platform::Linux, None)
+    });
+    thread::sleep(Duration::from_millis(300));
+    let waiting = sampler.views.try_iter().count();
+    assert!(waiting <= 1, "{waiting} snapshots queued");
 }

@@ -19,6 +19,44 @@ mod splash;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
 
+/// The time one runtime poll may take, all of its requests together: a
+/// runtime that stops answering costs the host charts one short wait.
+pub(crate) const POLL_BUDGET: Duration = Duration::from_millis(1500);
+
+thread_local! {
+    static POLL_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Run `poll` with one deadline shared by every request it makes.
+pub(crate) fn with_poll_deadline<T>(poll: impl FnOnce() -> T) -> T {
+    POLL_DEADLINE.with(|deadline| deadline.set(Some(Instant::now() + POLL_BUDGET)));
+    let result = poll();
+    POLL_DEADLINE.with(|deadline| deadline.set(None));
+    result
+}
+
+/// Time left for a request: at most `limit`, less when the poll it belongs
+/// to is nearly out of time; `None` when none is left.
+pub(crate) fn request_budget(limit: Duration) -> Option<Duration> {
+    let left = POLL_DEADLINE.with(Cell::get).map_or(limit, |deadline| {
+        deadline.saturating_duration_since(Instant::now())
+    });
+    let budget = left.min(limit);
+    (!budget.is_zero()).then_some(budget)
+}
+
+/// After a failed poll: a refused connection costs nothing to retry, so a
+/// runtime that starts is seen within seconds; one that timed out waits
+/// longer, so a hung server is not asked every sample.
+pub(crate) fn next_backoff(current: Duration, timed_out: bool) -> Duration {
+    let ceiling = if timed_out {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(4)
+    };
+    (current * 2).min(ceiling)
+}
+
 /// The sampler's poll interval in seconds, so rate windows can follow it.
 static POLL_INTERVAL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -542,9 +580,17 @@ impl Adapter {
             self.cached = Some(result);
             self.backoff = Duration::from_secs(1);
         } else {
-            self.backoff = (self.backoff * 2).min(Duration::from_secs(30));
+            let timed_out = self
+                .diagnostics
+                .borrow()
+                .probes
+                .iter()
+                .any(|probe| probe.issue == Some(ProbeIssue::Timeout));
+            self.backoff = next_backoff(self.backoff, timed_out);
         }
-        self.next_poll = now + self.backoff;
+        // Counted from the end of the poll: a slow poll must not have used
+        // up its own backoff by the time it returns.
+        self.next_poll = Instant::now() + self.backoff;
         self.with_usage()
     }
 

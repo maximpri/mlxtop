@@ -45,7 +45,9 @@ impl Sampler {
         build: impl FnOnce() -> Collector + Send + 'static,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
-        let (view_tx, view_rx) = mpsc::channel();
+        // Only the newest snapshot is ever used: a terminal that stops
+        // reading must not queue them without limit.
+        let (view_tx, view_rx) = mpsc::sync_channel(1);
         let handle = thread::spawn(move || {
             let mut collector = build();
             let mut interval = interval;
@@ -55,6 +57,7 @@ impl Sampler {
 
             loop {
                 if !paused && Instant::now() >= next_sample {
+                    let started = Instant::now();
                     let sampled = panic::catch_unwind(AssertUnwindSafe(|| collector.sample()));
                     if let Err(payload) = sampled.as_ref() {
                         diagnostics_log(
@@ -66,11 +69,18 @@ impl Sampler {
                     if sampled.is_err() {
                         break;
                     }
-                    if view_tx.send(collector.view()).is_err() {
-                        diagnostics_log("INFO", "sampler_stop", "reason=view_receiver_closed");
-                        break;
+                    match view_tx.try_send(collector.view()) {
+                        // The interface has not taken the last one yet; the
+                        // next snapshot is complete, so skipping loses nothing.
+                        Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            diagnostics_log("INFO", "sampler_stop", "reason=view_receiver_closed");
+                            break;
+                        }
                     }
-                    next_sample = Instant::now() + interval;
+                    // A fixed rate: "every 1s" means a sample each second,
+                    // not a second after the last one finished.
+                    next_sample = (started + interval).max(Instant::now());
                 }
 
                 let wait = if paused {
@@ -143,6 +153,16 @@ impl Drop for Sampler {
     fn drop(&mut self) {
         let _ = self.commands.send(SamplerCommand::Stop);
         if let Some(handle) = self.handle.take() {
+            // A sample in flight may be waiting on a runtime: quit does not
+            // wait for it; process exit ends the thread.
+            let waited = Instant::now();
+            while !handle.is_finished() && waited.elapsed() < Duration::from_millis(300) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if !handle.is_finished() {
+                diagnostics_log("INFO", "sampler_stop", "reason=abandoned_mid_sample");
+                return;
+            }
             if let Err(payload) = handle.join() {
                 diagnostics_log(
                     "ERROR",

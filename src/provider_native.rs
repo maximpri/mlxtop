@@ -51,10 +51,12 @@ impl Endpoint {
         if self.api_key.is_some() && self.is_remote() && !self.allow_remote_auth {
             return Err(ProbeIssue::RemoteAuthBlocked);
         }
+        // Whatever is left of this poll's time, at most two seconds.
+        let budget = super::request_budget(Duration::from_secs(2)).ok_or(ProbeIssue::Timeout)?;
         // No redirects or proxies: credentials stay at the configured endpoint.
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(2)))
-            .timeout_connect(Some(Duration::from_millis(500)))
+            .timeout_global(Some(budget))
+            .timeout_connect(Some(budget.min(Duration::from_millis(500))))
             .max_redirects(0)
             .proxy(None)
             .build()
