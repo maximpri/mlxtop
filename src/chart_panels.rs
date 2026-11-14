@@ -153,6 +153,8 @@ impl App {
         let sample = &self.collector.current;
         let insight = &sample.correlation;
         let current = history.back().and_then(|point| point.value);
+        // Whether the panel has anything plotted at all.
+        let sampled = history.iter().any(|point| point.value.is_some());
         match metric {
             ChartMetric::Generation
                 if self.charts.expanded
@@ -170,8 +172,9 @@ impl App {
             }
             // While a prefill runs, its position replaces the unit: the rate is already in the title,
             // and 40.9k / 61.5k tells you how long the wait is.
+            // With nothing plotted there is no axis for a unit to label.
             ChartMetric::Prefill => {
-                Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
+                llm_prefill_progress_label(sample).or_else(|| sampled.then(|| "tok/s".into()))
             }
             // oMLX and Splash report generation summed over running requests;
             // say so when there are several, since each gets only its share.
@@ -217,14 +220,12 @@ impl App {
                             Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
                         })
                     });
-                Some(usual.unwrap_or(unit))
+                (sampled || usual.is_some() || unit != "tok/s").then(|| usual.unwrap_or(unit))
             }
             ChartMetric::Memory => None,
-            ChartMetric::Gpu => Some(if current == Some(0) {
-                "idle".into()
-            } else {
-                gpu_load_label(sample.gpu_util, self.thresholds).into()
-            }),
+            // At 0% the title has said it; a label only for a load.
+            ChartMetric::Gpu => (current != Some(0))
+                .then(|| gpu_load_label(sample.gpu_util, self.thresholds).into()),
             // A short panel's title already has the rate; the split would
             // only repeat it.
             ChartMetric::Compression if area.height < 7 => None,
@@ -329,13 +330,14 @@ impl App {
                 let padding = shown - (tones.len() - start);
                 self.composition_columns(shown, width)
                     .into_iter()
+                    .zip(self.gpu_memory_columns(shown, width))
                     .enumerate()
-                    .map(|(column, sizes)| {
+                    .map(|(column, (sizes, gpu))| {
                         let tone = (column * shown / width.max(1))
                             .checked_sub(padding)
                             .and_then(|offset| tones.get(start + offset))
                             .map_or(Tone::Green, |point| point.tone);
-                        sizes.map(|sizes| (sizes, tone))
+                        sizes.map(|sizes| crate::memory_headroom::Column { sizes, gpu, tone })
                     })
                     .collect()
             };

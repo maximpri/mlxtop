@@ -93,10 +93,26 @@ release replaces.
 - **The memory panel says what holds memory.** GPU memory splits into the
   model and the KV cache and everything else, against the GPU limit; RAM's
   legend gives each kind's size; a line names the runtime's footprint and
-  the largest other app. Under them, RAM by kind over time replaces the
-  trace of what was left, with the GPU limit as a named dashed line, so a
-  model load or a KV cache growing toward the limit shows as a band. The
-  sentence repeating the GPU meter is gone.
+  the largest other app. Under them, each meter over time replaces the
+  trace of what was left: GPU memory against its limit and RAM by kind, in
+  dimmed colours, so a model load or a KV cache growing toward the limit
+  shows as a level rising. A narrow panel wraps the kinds' sizes onto a
+  second row. The GPU meters are the colour of wired RAM, which GPU memory
+  is part of. The sentence repeating the GPU meter is gone.
+- **One figure per fact.** The header's `LLM` and the memory panel's `by
+  app` both give the runtime's footprint (the header gave its resident
+  size: 7.2 GiB beside 23.4 GiB). The Journal's first row, `--once` and the
+  critical-pressure line give RAM in use and what is left, as the panel
+  does. The KV bar's `RAM` and `SSD` shares add up to the title's hit rate
+  (92% and 2% under `KV hit 90%`).
+- **Zero and a trickle stand on one baseline.** A zero rate drew a dash
+  through the middle of its row and a tiny rate a sliver at the bottom, so
+  compression that came and went looked like a dashed line. Byte-rate axes
+  top out at round figures: `1.5 MiB/s`, not `1.4 MiB/s`.
+- **Idle is said once.** The empty generation and prefill panels read `No
+  rate samples yet`, the GPU panel's edge says nothing under `0%`, and an
+  empty panel carries no `tok/s`. The SSD cache row keeps words when it is
+  short of room (`1.5k loaded · 1.3k saved`), not `↑1.5k ↓1.3k ✕327`.
 - **A short compression or paging panel keeps a trickle small.** At two
   rows tall the panel scaled to its own peak, so 16 KiB/s of compression
   drew full bars; it now scales against the warning rate, as the taller

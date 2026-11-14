@@ -688,6 +688,35 @@ pub(crate) struct Sample {
 }
 
 impl Sample {
+    /// What the runtime holds: the footprint of its largest process where
+    /// the OS reports it (on Apple Silicon resident size leaves out memory
+    /// the GPU holds for it), else the resident size of its processes.
+    pub(crate) fn runtime_memory(&self) -> u64 {
+        self.process_memory
+            .as_ref()
+            .map_or(0, |reading| reading.footprint)
+            .max(self.llm_rss)
+    }
+
+    /// RAM in use against all of RAM, and what is left, as the memory panel
+    /// says it; the resident figure only where the OS gives no breakdown.
+    pub(crate) fn memory_use_label(&self) -> String {
+        use crate::formatting::bytes;
+        match crate::memory_composition::segments(self) {
+            Some(sizes) => format!(
+                "RAM {} · {} left",
+                crate::memory_headroom::of_total(sizes[0] + sizes[1] + sizes[2], self.total_memory),
+                bytes(crate::memory_headroom::left(sizes))
+            ),
+            None => format!(
+                "RAM resident {}",
+                self.resident_memory
+                    .map(bytes)
+                    .unwrap_or_else(|| "—".into())
+            ),
+        }
+    }
+
     /// Whether the runtime's readings in this sample are current. Decided
     /// once, when the sample is taken (telemetry older than a few seconds is
     /// marked `stale` then), so a verdict holds until the next sample at any

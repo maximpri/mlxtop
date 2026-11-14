@@ -23,15 +23,24 @@ pub(crate) fn write_static(
     writeln!(out, "mlxtop · static report ({interval}s sample)\n")?;
     writeln!(out, "SIGNAL       {} · {}", sample.impact, sample.grade)?;
     writeln!(out, "PRESSURE     {}", pressure_state_label(sample))?;
-    writeln!(
-        out,
-        "MEMORY       {} resident / {} total · includes file cache",
-        sample
-            .resident_memory
-            .map(bytes)
-            .unwrap_or_else(|| "—".into()),
-        bytes(sample.total_memory)
-    )?;
+    // In use and what is left, as the dashboard says it; the resident
+    // figure only where the OS gives no breakdown by kind.
+    match crate::memory_composition::segments(sample) {
+        Some(_) => writeln!(
+            out,
+            "MEMORY       {} (free and file cache)",
+            sample.memory_use_label().trim_start_matches("RAM ")
+        )?,
+        None => writeln!(
+            out,
+            "MEMORY       {} resident / {} total · includes file cache",
+            sample
+                .resident_memory
+                .map(bytes)
+                .unwrap_or_else(|| "—".into()),
+            bytes(sample.total_memory)
+        )?,
+    }
     // Windows has no paging counters: unknown, not zero.
     // All disk paging: swap plus file page-ins/outs, then the file share and
     // whether it counts (only while memory is tight).

@@ -308,7 +308,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Prefill,
             "prefill",
             None,
-            vec!["Idle · no rate samples yet", "tok/s"],
+            vec!["No rate samples yet"],
         ),
     ] {
         let mut point = ChartPoint::new(last, Tone::Cyan);
@@ -323,7 +323,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
         }
         if metric == ChartMetric::Generation {
             // A bar of filled cells (blank in text) cutting the guides, not a point.
-            assert!(screen.contains("┄ ┄") && screen.contains("─ ─"), "{screen}");
+            assert!(screen.contains("┄ ┄") && screen.contains("▁ ▁"), "{screen}");
             assert!(!screen.contains('●'), "{screen}");
         } else if chart_form(metric) == ChartForm::Bars {
             assert!(!screen.contains('●'), "bars, not points\n{screen}");
@@ -651,7 +651,7 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
         buffer
             .content()
             .iter()
-            .any(|cell| cell.symbol() == "─" && cell.fg == GREEN),
+            .any(|cell| cell.symbol() == "▁" && cell.fg == GREEN),
         "retain measured zero"
     );
     history.push_front(ChartPoint::new(Some(4096), Tone::Green));
@@ -985,7 +985,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     app.collector.current.llm_provider = "oMLX".into();
     app.collector.current.llm_model = "test-model".into();
     let empty = render_app(&app, 80, 24);
-    assert!(empty.contains("no requests yet"), "{empty}");
+    assert!(empty.contains("No requests yet"), "{empty}");
     assert!(!empty.contains("0–1 tokens"));
     assert!(
         app.charts
@@ -1818,7 +1818,7 @@ fn overview_review_fixtures_keep_readouts_visible_at_supported_sizes() {
                 "GPU",
                 "cache",
                 "queue",
-                "? help q quit",
+                "? help  q quit",
             ] {
                 assert!(
                     screen.contains(label),
@@ -1852,7 +1852,9 @@ fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     let screen = render_app(&app, 120, 40);
     for label in [
         "PRESSURE normal",
-        "█wired █app █comp █cache",
+        // A narrow panel wraps the kinds; it never drops their sizes.
+        "█wired 3.2 █app 12.4 █comp 1.6",
+        "█cache 3.3 GiB",
         "18.8 GiB left",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
@@ -2055,11 +2057,14 @@ fn bars_keep_a_gap_between_samples_when_there_is_room_and_show_raw_heights() {
                     let cell = &buffer[(x, y)];
                     if cell.bg == GREEN {
                         8
-                    } else {
+                    } else if cell.fg == GREEN {
                         "▁▂▃▄▅▆▇"
                             .chars()
                             .position(|glyph| cell.symbol().starts_with(glyph))
                             .map_or(0, |index| index + 1)
+                    } else {
+                        // The muted baseline is the axis, not a bar.
+                        0
                     }
                 })
                 .sum()
@@ -2213,6 +2218,10 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
             })
         })
         .collect();
+    // GPU memory follows the load: 4 GiB, then 20, against a 32 GiB limit.
+    app.collector.gpu_memory_history = (0..40)
+        .map(|i| Some(if i < 20 { 4 * gib } else { 20 * gib }))
+        .collect();
     {
         let sample = &mut app.collector.current;
         sample.total_memory = 36 * gib;
@@ -2255,8 +2264,11 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
         "wired 20.0",
         "app 6.0",
         "8.0 GiB left",
-        // RAM by kind over time, with the GPU limit named on its line.
-        "GPU limit 32.0 GiB",
+        // Each meter over time: the chart's top, then whose it is.
+        "│32.0 GiB ",
+        "│     GPU ",
+        "│36.0 GiB ",
+        "│     RAM ",
     ] {
         assert!(text.contains(label), "missing {label}\n{text}");
     }
@@ -2266,16 +2278,24 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
         "no sentence repeats the meter"
     );
     // The GPU meter fills to wired over the limit.
-    let filled = (0..60).filter(|x| buffer[(*x, 1)].bg == CYAN).count();
+    // In the colour of wired RAM, which GPU memory is part of.
+    let fill = crate::memory_headroom::gpu_fill();
+    let filled = (0..60).filter(|x| buffer[(*x, 1)].bg == fill).count();
     let track = (0..60).filter(|x| buffer[(*x, 1)].bg == EDGE).count();
     assert!(
         filled > track,
         "20 of 32 GiB: {filled} filled, {track} empty"
     );
-    // The model load shows as the wired band growing: 4 GiB, then 20.
-    let wired = crate::memory_composition::kind_colors()[0];
-    let band = |x: u16| (0..20).filter(|y| buffer[(x, *y)].bg == wired).count();
+    // The model load shows in both charts as the wired colour rising:
+    // 4 GiB, then 20, of GPU memory and of RAM.
+    let wired = crate::memory_headroom::history_colors()[0];
+    let band = |x: u16| {
+        (0..20)
+            .filter(|y| buffer[(x, *y)].bg == wired || buffer[(x, *y)].fg == wired)
+            .count()
+    };
     assert!(band(57) > band(30) + 2, "{} vs {}", band(57), band(30));
+    assert!(!text.contains("GPU limit"), "the chart's top is the limit");
 
     // With Metal's own count and the model's size: model, then the rest.
     app.collector.current.gpu_in_use = Some(24 * gib);
@@ -2548,6 +2568,18 @@ fn cache_impact_reads_activity_speed_and_shares() {
             disk: 1
         })
     );
+    // The SSD tier counting more lookups than the session's hits does not
+    // widen the bar: its two tiers add up to the title's rate.
+    let mut overcounted = sample.clone();
+    overcounted.ssd_cache = Some(domain::SsdCache {
+        capacity: 1,
+        hit_tokens: Some(640),
+        disk_hit_tokens: Some(20),
+        ..Default::default()
+    });
+    let split = crate::cache_impact::tiers(&overcounted).unwrap();
+    assert_eq!(split.memory + split.disk, 600, "60% of 1000, as the title");
+
     let bar = render_view(60, 1, |frame| {
         crate::cache_impact::draw_tiers(
             frame,
@@ -2654,7 +2686,8 @@ fn the_ssd_row_shows_fill_or_says_the_cache_is_off() {
         ..Default::default()
     });
     assert!(
-        row(&sample).contains("SSD 120.0 GiB · ↑1.5k ↓1.3k ✕327"),
+        row(&sample).contains("SSD 120.0 GiB · 1.5k loaded · 1.3k saved")
+            && !row(&sample).contains('↑'),
         "{}",
         row(&sample)
     );
@@ -2824,18 +2857,14 @@ fn the_enlarged_memory_view_gives_each_kinds_size() {
         "{tall}"
     );
     assert!(tall.contains("cache 3.3 GiB"), "{tall}");
-    // Narrower, the legend drops the sizes whole, never cuts one.
+    // Narrower, the kinds wrap onto a second row: sizes whole, never cut.
     let narrow = render_view(40, 20, |frame| {
         app.render_indicator_chart(frame, frame.area(), "memory", &history, ChartMetric::Memory)
     });
-    let legend = narrow
-        .lines()
-        .find(|l| l.contains("wired"))
-        .unwrap_or_default()
-        .trim_end_matches('│')
-        .trim_end()
-        .to_owned();
-    assert!(legend.ends_with("left"), "{narrow}");
+    assert!(
+        narrow.contains("█wired 3.2 █app 12.4 █comp 1.6") && narrow.contains("█cache 3.3 GiB"),
+        "{narrow}"
+    );
     assert!(
         !render(10).contains("wired 3.2 ·"),
         "the Overview panel keeps to its meters"
@@ -2893,9 +2922,11 @@ fn one_moment_sits_at_the_same_place_on_every_chart() {
                     let plotted = painted(x, y, GREEN)
                         || (chart == Chart::Memory
                             && x >= area.left() + 1 + crate::memory_headroom::AXIS_GUTTER
-                            && crate::memory_composition::kind_colors()[..3]
+                            && crate::memory_headroom::history_colors()
                                 .iter()
-                                .any(|color| buffer[(x, y)].bg == *color));
+                                .any(|color| {
+                                    buffer[(x, y)].bg == *color || buffer[(x, y)].fg == *color
+                                }));
                     if marked || plotted {
                         first = first.min(x);
                         last = last.max(x);
@@ -3069,5 +3100,22 @@ fn a_short_compression_panel_keeps_a_trickle_small() {
         !trickle.contains('▇') && !trickle.contains('█'),
         "{trickle}"
     );
-    assert!(trickle.contains('▁'), "the trickle still shows: {trickle}");
+    assert!(trickle.contains('▂'), "the trickle still shows: {trickle}");
+    // A trickle that comes and goes stays one line on the baseline: zero is
+    // the thinnest sliver there, not a dash through the middle of the row.
+    app.collector.compression_history.clear();
+    for index in 0..60 {
+        push_history_with_tone(
+            &mut app.collector.compression_history,
+            Some(if index % 2 == 0 { 16_000 } else { 0 }),
+            Tone::Green,
+            120,
+        );
+    }
+    let flicker = draw(&app);
+    assert!(flicker.contains("▂▁▂▁▂▁"), "{flicker}");
+    assert!(
+        !flicker.lines().nth(2).unwrap_or_default().contains('─'),
+        "{flicker}"
+    );
 }

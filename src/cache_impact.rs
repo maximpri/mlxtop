@@ -70,7 +70,9 @@ pub(crate) fn tiers(sample: &Sample) -> Option<Tiers> {
     let (prompt, cached) = session(sample)?;
     let ssd = sample.ssd_cache?;
     let disk = ssd.disk_hit_tokens?;
-    let hits = ssd.hit_tokens.unwrap_or(cached).max(disk).min(prompt);
+    // The same hits the title's rate counts: the bar's two tiers add up to
+    // it, whatever the SSD tier's own count of lookups says.
+    let hits = cached.min(prompt);
     Some(Tiers {
         prompt,
         memory: hits - disk.min(hits),

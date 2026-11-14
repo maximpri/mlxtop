@@ -123,9 +123,9 @@ fn cpu(sample: &Sample) -> String {
 
 fn rss(sample: &Sample) -> String {
     format!(
-        "LLM RSS {}",
+        "LLM {}",
         if sample.llm_count > 0 {
-            bytes(sample.llm_rss)
+            bytes(sample.runtime_memory())
         } else {
             "—".into()
         }
@@ -254,7 +254,17 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
             },
             Style::default().fg(MUTED),
         ),
-        Span::styled(meter_cells(percent, 5), Style::default().fg(color).bg(EDGE)),
+        // The memory panel's GPU bar, in small: the same fill colour.
+        Span::styled(
+            meter_cells(percent, 5),
+            Style::default()
+                .fg(if color == CYAN && !sample.has_discrete_gpus() {
+                    crate::memory_headroom::gpu_fill()
+                } else {
+                    color
+                })
+                .bg(EDGE),
+        ),
         Span::styled(
             format!(" {} / {}", bytes(used), bytes(total)),
             Style::default().fg(color),
@@ -283,7 +293,7 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     }
     fields.extend(gpu_memory_meter(sample));
     if sample.llm_count > 0 {
-        let mut field = muted(format!("LLM {} · ", bytes(sample.llm_rss)));
+        let mut field = muted(format!("LLM {} · ", bytes(sample.runtime_memory())));
         field.push(match insight.impact(CorrelationCause::Cpu) {
             Some(note) => Span::styled(
                 note.trim_start_matches("runtime ").to_owned(),

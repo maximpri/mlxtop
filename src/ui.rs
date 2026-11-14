@@ -41,6 +41,41 @@ fn overview_grid(area: Rect) -> [Rect; 3] {
     Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(area)
 }
 
+/// The last `visible` samples of a per-sample history spread over `width`
+/// plot columns, right-aligned, as every Overview chart's window is.
+fn window_columns<T: Copy>(
+    history: &VecDeque<Option<T>>,
+    visible: usize,
+    width: usize,
+) -> Vec<Option<T>> {
+    if visible == 0 || width == 0 {
+        return Vec::new();
+    }
+    let start = history.len().saturating_sub(visible);
+    let padding = visible - (history.len() - start);
+    (0..width)
+        .map(|column| {
+            (column * visible / width)
+                .checked_sub(padding)
+                .and_then(|offset| history.get(start + offset).copied().flatten())
+        })
+        .collect()
+}
+
+/// A bar that always stands on the baseline: a measured zero is the thinnest
+/// sliver in its grade (a missing sample draws nothing), and any rate at all
+/// is taller than that. Zero and a trickle then sit on one line instead of
+/// at two heights.
+fn baseline_bar(mut glyphs: Vec<char>, value: u64) -> Vec<char> {
+    match (glyphs.as_slice(), value) {
+        ([], 0) => glyphs.push('▁'),
+        ([], _) => glyphs.push('▂'),
+        (['▁'], rate) if rate > 0 => glyphs[0] = '▂',
+        _ => {}
+    }
+    glyphs
+}
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
@@ -724,10 +759,7 @@ impl App {
                 value
             };
             let display = (u128::from(value) * 100 / u128::from(ceiling)).min(100) as u64;
-            let mut glyphs = bar_cells(display, usize::from(area.height));
-            if glyphs.is_empty() {
-                glyphs.push(if value > 0 { '▁' } else { '─' });
-            }
+            let glyphs = baseline_bar(bar_cells(display, usize::from(area.height)), value);
             let color = point.tone.color();
             for (height, glyph) in glyphs.into_iter().enumerate() {
                 let cell = &mut frame.buffer_mut()
@@ -749,20 +781,12 @@ impl App {
         visible: usize,
         width: usize,
     ) -> Vec<Option<[u64; 5]>> {
-        let history = &self.collector.composition_history;
-        if visible == 0 || width == 0 {
-            return Vec::new();
-        }
-        let start = history.len().saturating_sub(visible);
-        let padding = visible - (history.len() - start);
-        (0..width)
-            .map(|column| {
-                let index = column * visible / width;
-                index
-                    .checked_sub(padding)
-                    .and_then(|offset| history.get(start + offset).copied().flatten())
-            })
-            .collect()
+        window_columns(&self.collector.composition_history, visible, width)
+    }
+
+    /// GPU memory in use per plot column, over the same window.
+    pub(crate) fn gpu_memory_columns(&self, visible: usize, width: usize) -> Vec<Option<u64>> {
+        window_columns(&self.collector.gpu_memory_history, visible, width)
     }
 
     pub(crate) fn gpu_chart_title(&self) -> &'static str {
@@ -837,10 +861,11 @@ impl App {
         let scale = match warning {
             Some(rate) => (
                 0,
-                scale.1.max(crate::chart_scale::ceiling(
-                    rate,
-                    if normal.is_some() { 10 } else { 1 },
-                )),
+                scale.1.max(if metric.is_byte_rate() && normal.is_none() {
+                    crate::chart_scale::ceiling_bytes(rate, 1)
+                } else {
+                    crate::chart_scale::ceiling(rate, if normal.is_some() { 10 } else { 1 })
+                }),
             ),
             None => scale,
         };
@@ -1024,7 +1049,6 @@ impl App {
         if visible_missing {
             // One vocabulary for absent data: "in this window" when older
             // samples exist, "yet" when none have been captured.
-            let idle = sample.llm_status == "idle";
             let message = match metric {
                 // Hit rate needs prompt tokens read in the window.
                 ChartMetric::Cache
@@ -1032,12 +1056,9 @@ impl App {
                 {
                     "No prompts read in this window"
                 }
+                // The badge and the panel's title already say idle.
                 _ if history.iter().any(|point| point.value.is_some()) => {
-                    if idle && inner.width >= 32 {
-                        "Idle · no samples in this window"
-                    } else {
-                        "No samples in this window"
-                    }
+                    "No samples in this window"
                 }
                 ChartMetric::Cache if inner.width < 20 => "No cache samples",
                 ChartMetric::Cache => "No cache samples yet",
@@ -1049,9 +1070,6 @@ impl App {
                     } else {
                         "No live rates"
                     }
-                }
-                ChartMetric::Generation | ChartMetric::Prefill if idle && inner.width >= 26 => {
-                    "Idle · no rate samples yet"
                 }
                 ChartMetric::Generation | ChartMetric::Prefill => "No rate samples yet",
                 _ => "No samples yet",
@@ -1152,7 +1170,9 @@ impl App {
         };
         for (row, row_cells) in cells.iter_mut().enumerate() {
             let guide = if row + 1 == axis_rows {
-                Some(('─', Tone::Muted))
+                // Bars stand on the bottom of the cell, so their baseline
+                // is drawn there too, not through its middle.
+                Some((if bars { '▁' } else { '─' }, Tone::Muted))
             } else if Some(row) == guide_row {
                 Some((
                     if normal.is_some() { '━' } else { '┄' },
@@ -1190,12 +1210,7 @@ impl App {
                     continue;
                 }
                 let display_value = chart_display_value(metric, value, scale);
-                let mut glyphs = bar_cells(display_value, plot_height);
-                if glyphs.is_empty() {
-                    // A measured zero is a reading, unlike a missing sample:
-                    // it marks the baseline in its grade. Any rate shows.
-                    glyphs.push(if value > 0 { '▁' } else { '─' });
-                }
+                let glyphs = baseline_bar(bar_cells(display_value, plot_height), value);
                 for (height, glyph) in glyphs.into_iter().enumerate() {
                     cells[plot_height - 1 - height][column] = TraceCell {
                         glyph,

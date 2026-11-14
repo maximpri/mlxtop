@@ -49,6 +49,11 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
     assert_eq!((first.swap_in, first.swap_out), (0, 0));
     assert_eq!(first.gpu_util, Some(93));
     assert_eq!(first.gpu_in_use, Some(2 * 1024 * MIB));
+    // The memory panel's GPU history holds what its meter read.
+    assert_eq!(
+        collector.gpu_memory_history.back().copied().flatten(),
+        Some(2 * 1024 * MIB)
+    );
     assert_eq!(first.metal.renderer_util, Some(91));
     assert_eq!(first.metal.tiler_util, Some(12));
     assert_eq!(first.thermal, "no warning");

@@ -384,7 +384,10 @@ pub(super) fn draw(
             Style::default().fg(MUTED),
         ),
     ]);
-    title.spans.push(Span::raw(" "));
+    // The range's trailing space; an empty title already ends in one.
+    if selected.is_some() {
+        title.spans.push(Span::raw(" "));
+    }
     let mut block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -406,7 +409,7 @@ pub(super) fn draw(
         } else if sample.llm_active_requests.is_some_and(|n| n > 0) {
             "waiting for the prompt size"
         } else {
-            "no requests yet"
+            "No requests yet"
         };
         frame.render_widget(
             Paragraph::new(line)

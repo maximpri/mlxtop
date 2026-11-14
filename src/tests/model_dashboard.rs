@@ -92,7 +92,7 @@ fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
             for label in [
                 "32 GPU cores",
                 "CPU 0.8%",
-                "LLM RSS 16.0 GiB",
+                "LLM 16.0 GiB",
                 "GPU mem 8.0 GiB / 16.0 GiB",
             ] {
                 assert!(
@@ -166,7 +166,7 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
     assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
 
     let screen = render(&Sample::default(), &history, 100, 5);
-    for label in ["RAM —", "CPU —", "LLM RSS —"] {
+    for label in ["RAM —", "CPU —", "LLM —"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(!screen.contains("CPU 0.0%"));

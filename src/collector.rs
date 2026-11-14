@@ -11,7 +11,7 @@ use crate::domain::{
     MIB,
 };
 use crate::formatting::{
-    bytes, compact_label, compact_tokens, llm_generation_rate_label, llm_model_label,
+    compact_label, compact_tokens, llm_generation_rate_label, llm_model_label,
     llm_prefill_rate_label, pressure_state_label, rate,
 };
 use crate::history::{
@@ -95,6 +95,9 @@ pub(crate) struct CollectorView {
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
     pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
+    /// GPU memory in use for each memory sample, where a GPU limit is known:
+    /// aligned one to one with `load_history`.
+    pub(crate) gpu_memory_history: VecDeque<Option<u64>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
     /// Which host counters exist; Linux has no compressor counters to chart.
@@ -156,6 +159,9 @@ pub(crate) struct Collector {
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
     pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
+    /// GPU memory in use for each memory sample, where a GPU limit is known:
+    /// aligned one to one with `load_history`.
+    pub(crate) gpu_memory_history: VecDeque<Option<u64>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
     pub(crate) gpu_history: VecDeque<ChartPoint>,
@@ -276,6 +282,7 @@ impl Collector {
             decode_reads: VecDeque::with_capacity(history_limit),
             load_history: VecDeque::with_capacity(history_limit),
             composition_history: VecDeque::with_capacity(history_limit),
+            gpu_memory_history: VecDeque::with_capacity(history_limit),
             swap_history: VecDeque::with_capacity(history_limit),
             compression_history: VecDeque::with_capacity(history_limit),
             gpu_history: VecDeque::with_capacity(history_limit),
@@ -744,6 +751,14 @@ impl Collector {
         while self.composition_history.len() > self.history_limit {
             self.composition_history.pop_front();
         }
+        // What the GPU meter reads: Metal's own count, else wired memory.
+        self.gpu_memory_history.push_back(
+            crate::memory_composition::gpu_limit(&sample)
+                .map(|_| sample.gpu_in_use.unwrap_or(sample.wired)),
+        );
+        while self.gpu_memory_history.len() > self.history_limit {
+            self.gpu_memory_history.pop_front();
+        }
         // Captured tones follow the assessment's states, so a chart never
         // shows a severity the headline does not report.
         // The chart plots all disk paging; its grade is what counted against
@@ -888,6 +903,7 @@ impl Collector {
             session: self.session.clone(),
             load_history: self.load_history.clone(),
             composition_history: self.composition_history.clone(),
+            gpu_memory_history: self.gpu_memory_history.clone(),
             swap_history: self.swap_history.clone(),
             compression_history: self.compression_history.clone(),
             platform: self.platform,
@@ -1276,11 +1292,8 @@ impl Collector {
             add(
                 "SYSTEM",
                 format!(
-                    "journal started · RAM resident {} · pressure {}",
-                    sample
-                        .resident_memory
-                        .map(bytes)
-                        .unwrap_or_else(|| "—".into()),
+                    "journal started · {} · pressure {}",
+                    sample.memory_use_label(),
                     pressure_state_label(sample)
                 ),
                 Tone::Cyan,
@@ -1356,6 +1369,7 @@ impl Collector {
         self.session = Default::default();
         self.load_history.clear();
         self.composition_history.clear();
+        self.gpu_memory_history.clear();
         self.swap_history.clear();
         self.compression_history.clear();
         self.gpu_history.clear();

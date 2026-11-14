@@ -6,7 +6,7 @@
 use crate::domain::{Sample, Tone};
 use crate::formatting::bytes;
 use crate::memory_composition::{draw_composition, gpu_limit, kind_colors, segments};
-use crate::theme::{BLUE, CYAN, EDGE, MUTED, PANEL, RED, YELLOW};
+use crate::theme::{CYAN, EDGE, MUTED, PANEL, RED, YELLOW};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -29,6 +29,28 @@ pub(crate) fn of_total(used: u64, total: u64) -> String {
 /// What RAM is left for a model to grow into: free, plus file cache.
 pub(crate) fn left(sizes: [u64; 5]) -> u64 {
     sizes[3].saturating_add(sizes[4])
+}
+
+/// The GPU meter's fill: the colour of wired RAM, which GPU memory is part
+/// of here, so the two bars read as the same memory.
+pub(crate) fn gpu_fill() -> Color {
+    kind_colors()[0]
+}
+
+/// The part of GPU memory that is not the model's weights.
+const GPU_OTHER: Color = Color::Rgb(170, 190, 255);
+
+/// The history's band colours: wired, app and compressed, dimmed.
+pub(crate) fn history_colors() -> [Color; 3] {
+    let dim = |color: Color| match (color, PANEL) {
+        (Color::Rgb(r, g, b), Color::Rgb(pr, pg, pb)) => {
+            let mix = |c: u8, p: u8| ((u16::from(c) * 2 + u16::from(p) * 3) / 5) as u8;
+            Color::Rgb(mix(r, pr), mix(g, pg), mix(b, pb))
+        }
+        _ => color,
+    };
+    let kinds = kind_colors();
+    [dim(kinds[0]), dim(kinds[1]), dim(kinds[2])]
 }
 
 /// The GPU meter's colour: it nears full as the header's does.
@@ -127,7 +149,7 @@ pub(crate) fn draw(
     frame: &mut Frame,
     area: Rect,
     sample: &Sample,
-    columns: impl Fn(usize) -> Vec<Option<([u64; 5], Tone)>>,
+    columns: impl Fn(usize) -> Vec<Option<Column>>,
 ) -> bool {
     let Some(sizes) = segments(sample) else {
         return false;
@@ -166,9 +188,9 @@ pub(crate) fn draw(
             } else if near_full {
                 color
             } else if x < weights {
-                CYAN
+                gpu_fill()
             } else {
-                BLUE
+                GPU_OTHER
             };
             frame.buffer_mut()[(bar.x + x, bar.y)]
                 .set_symbol(" ")
@@ -192,18 +214,18 @@ pub(crate) fn draw(
                     vec![
                         vec![
                             Span::raw(" ".repeat(usize::from(PREFIX))),
-                            Span::styled("█", Style::default().fg(CYAN)),
+                            Span::styled("█", Style::default().fg(gpu_fill())),
                             muted(format!("model {} ", in_unit(model, unit_ref))),
-                            Span::styled("█", Style::default().fg(BLUE)),
+                            Span::styled("█", Style::default().fg(GPU_OTHER)),
                             muted(format!(
                                 "KV cache & other {}{suffix}",
                                 in_unit(used - model, unit_ref)
                             )),
                         ],
                         vec![
-                            Span::styled("█", Style::default().fg(CYAN)),
+                            Span::styled("█", Style::default().fg(gpu_fill())),
                             muted(format!("model {} ", in_unit(model, unit_ref))),
-                            Span::styled("█", Style::default().fg(BLUE)),
+                            Span::styled("█", Style::default().fg(GPU_OTHER)),
                             muted(format!("other {}{suffix}", in_unit(used - model, unit_ref))),
                         ],
                     ]
@@ -242,49 +264,115 @@ pub(crate) fn draw(
             .as_ref()
             .map(|unit| format!(" {unit}"))
             .unwrap_or_default();
-        let legend = |indent: usize, sized: bool| {
-            let mut legend = vec![Span::raw(" ".repeat(indent))];
-            for (index, ((name, color), size)) in
-                kinds.into_iter().zip(kind_colors()).zip(sizes).enumerate()
-            {
-                let last = index + 1 == kinds.len();
-                legend.push(Span::styled("█", Style::default().fg(color)));
-                legend.push(muted(if sized {
-                    format!(
-                        "{name} {}{}",
-                        in_unit(size, unit.as_deref()),
-                        if last { suffix.as_str() } else { " " }
-                    )
-                } else {
-                    format!("{name}{}", if last { "" } else { " " })
-                }));
-            }
-            legend
-        };
-        text(
-            frame,
-            row(y),
+        // Each kind with its size beside what is left, when one row holds
+        // both; else what is left under the reading, as for the GPU, and the
+        // kinds on up to two rows of their own. Names alone are the last
+        // resort: the sizes are the point.
+        let item = |index: usize, spaced: bool, with_unit: bool| {
+            let last = index + 1 == kinds.len();
             vec![
-                legend(usize::from(PREFIX), true),
-                legend(0, true),
-                legend(usize::from(PREFIX), false),
-                legend(0, false),
-            ],
-            Span::styled(
-                format!("{} left", bytes(left(sizes))),
-                Style::default().fg(tone),
-            ),
-        );
-        y += 1;
+                Span::styled("█", Style::default().fg(kind_colors()[index])),
+                muted(format!(
+                    "{} {}{}",
+                    kinds[index],
+                    in_unit(sizes[index], unit.as_deref()),
+                    match (last, with_unit, spaced) {
+                        (true, true, _) => suffix.as_str(),
+                        (false, _, true) => " ",
+                        _ => "",
+                    }
+                )),
+            ]
+        };
+        let inline = |indent: usize, spaced: bool, with_unit: bool| {
+            let mut spans = vec![Span::raw(" ".repeat(indent))];
+            for index in 0..kinds.len() {
+                spans.extend(item(index, spaced, with_unit));
+            }
+            // Room before what is left, so the last size does not run into it.
+            spans.push(Span::raw(" "));
+            spans
+        };
+        let names = |indent: usize| {
+            let mut spans = vec![Span::raw(" ".repeat(indent))];
+            for (index, name) in kinds.into_iter().enumerate() {
+                spans.push(Span::styled("█", Style::default().fg(kind_colors()[index])));
+                spans.push(muted(format!(
+                    "{name}{}",
+                    if index + 1 < kinds.len() { " " } else { "" }
+                )));
+            }
+            spans
+        };
+        let prefix = usize::from(PREFIX);
+        let room = usize::from(area.width);
+        let left_text = format!("{} left", bytes(left(sizes)));
+        let right = Span::styled(left_text.clone(), Style::default().fg(tone));
+        let fits = |spans: &[Span]| {
+            Line::from(spans.to_vec()).width() + 1 + left_text.chars().count() <= room
+        };
+        let one_row = [
+            inline(prefix, true, true),
+            inline(0, true, true),
+            inline(0, true, false),
+        ]
+        .into_iter()
+        .find(|spans| fits(spans));
+        // The kinds on rows of their own, each a whole item, at most two.
+        let wrapped = |indent: usize| {
+            let mut lines: Vec<Vec<Span<'static>>> = vec![vec![Span::raw(" ".repeat(indent))]];
+            for index in 0..kinds.len() {
+                let spans = item(index, true, true);
+                let width: usize = spans.iter().map(Span::width).sum();
+                let used = Line::from(lines.last().cloned().unwrap_or_default()).width();
+                // The space after an item may hang over the edge.
+                if used + width > room + 1 && used > indent {
+                    lines.push(vec![Span::raw(" ".repeat(indent))]);
+                }
+                if let Some(line) = lines.last_mut() {
+                    line.extend(spans);
+                }
+            }
+            lines
+        };
+        let own_rows = [wrapped(prefix), wrapped(0)].into_iter().find(|lines| {
+            lines.len() <= 2
+                && y + (lines.len() as u16) < bottom
+                && lines
+                    .iter()
+                    .all(|line| Line::from(line.clone()).width() <= room + 1)
+        });
+        match (one_row, own_rows) {
+            (Some(spans), _) => {
+                text(frame, row(y), vec![spans], right);
+                y += 1;
+            }
+            (None, Some(lines)) => {
+                text(frame, row(y), vec![vec![]], right);
+                y += 1;
+                for line in lines {
+                    frame.render_widget(
+                        Paragraph::new(Line::from(line)).style(Style::default().bg(PANEL)),
+                        row(y),
+                    );
+                    y += 1;
+                }
+            }
+            // No row to spare: the sizes run together, else names alone.
+            (None, None) => {
+                text(
+                    frame,
+                    row(y),
+                    vec![inline(0, false, false), names(prefix), names(0)],
+                    right,
+                );
+                y += 1;
+            }
+        }
     }
     // Who holds it: the runtime's own footprint and the largest other app.
     if detailed && y + 3 < bottom {
-        let runtime = sample
-            .process_memory
-            .as_ref()
-            .map(|reading| reading.footprint)
-            .filter(|footprint| *footprint > 0)
-            .or((sample.llm_rss > 0).then_some(sample.llm_rss));
+        let runtime = Some(sample.runtime_memory()).filter(|memory| *memory > 0);
         let mut parts = Vec::new();
         if let Some(runtime) = runtime.filter(|_| sample.llm_provider != "none") {
             parts.push(format!("{} {}", sample.llm_provider, bytes(runtime)));
@@ -309,88 +397,120 @@ pub(crate) fn draw(
             y += 1;
         }
     }
-    // RAM by kind over time, against all of RAM, with the GPU limit marked:
-    // a model load, a growing KV cache or another app shows as its band.
+    // The meters over time, one chart each: GPU memory against its limit
+    // (the top of its chart), and RAM by kind against all of RAM. A model
+    // load, a KV cache growing toward the limit or another app shows as its
+    // level rising.
     let rows = bottom.saturating_sub(y);
     if rows < 2 || area.width <= AXIS_GUTTER + 2 {
         return true;
     }
-    let plot = Rect::new(area.x + AXIS_GUTTER, y, area.width - AXIS_GUTTER, rows);
-    let points = columns(usize::from(plot.width));
+    let width = area.width - AXIS_GUTTER;
+    let points = columns(usize::from(width));
     if points.iter().all(Option::is_none) {
         return true;
     }
-    let total = sample.total_memory.max(1);
-    let gutter = |y: u16| Rect::new(area.x, y, AXIS_GUTTER, 1);
-    // The GPU limit's row, from the bottom, when it falls inside the plot.
-    let limit_level = limit
-        .filter(|limit| *limit < total)
-        .map(|limit| (u128::from(limit) * u128::from(rows) / u128::from(total)) as u16)
-        .filter(|level| *level < rows);
-    // The top is all of RAM, unless the named limit line sits there.
-    if limit_level != Some(rows - 1) {
-        frame_label(frame, gutter(plot.y), bytes(total));
-    }
-    frame_label(frame, gutter(plot.bottom() - 1), "0".into());
-    // Rows from the bottom, in eighths of a row, for a byte count.
-    let height = |value: u64| {
-        (u128::from(value.min(total)) * u128::from(rows) * 8 / u128::from(total)) as u16
+    let bands = history_colors();
+    // Both charts where each can have two rows; else RAM alone.
+    let gpu_rows = match limit {
+        Some(_) if rows >= 4 => rows / 2,
+        _ => 0,
     };
-    let colors = kind_colors();
+    if let Some(limit) = limit.filter(|_| gpu_rows > 0) {
+        level_chart(
+            frame,
+            Rect::new(area.x, y, area.width, gpu_rows),
+            "GPU",
+            limit,
+            &points,
+            |column| column.gpu.map(|gpu| ([gpu, gpu, gpu], [bands[0]; 3])),
+        );
+        y += gpu_rows;
+    }
+    level_chart(
+        frame,
+        Rect::new(area.x, y, area.width, rows - gpu_rows),
+        "RAM",
+        sample.total_memory.max(1),
+        &points,
+        |column| {
+            let [wired, app, compressed, ..] = column.sizes;
+            Some(([wired, wired + app, wired + app + compressed], bands))
+        },
+    );
+    true
+}
+
+/// One column of the panel's history: RAM by kind, GPU memory in use where
+/// a limit is known, and the tone its sample was marked in.
+#[derive(Clone, Copy)]
+pub(crate) struct Column {
+    pub(crate) sizes: [u64; 5],
+    pub(crate) gpu: Option<u64>,
+    pub(crate) tone: Tone,
+}
+
+/// A level over time against `top`: up to three stacked bands per column,
+/// each given by where it ends, drawn dim with the stack's top to the
+/// eighth of a row. The gutter names the chart and its top.
+fn level_chart(
+    frame: &mut Frame,
+    area: Rect,
+    name: &str,
+    top: u64,
+    points: &[Option<Column>],
+    stack: impl Fn(&Column) -> Option<([u64; 3], [Color; 3])>,
+) {
+    const BLOCKS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    let rows = area.height;
+    let plot = Rect::new(area.x + AXIS_GUTTER, area.y, area.width - AXIS_GUTTER, rows);
+    let gutter = |y: u16| Rect::new(area.x, y, AXIS_GUTTER, 1);
+    // The chart's top, then whose it is: "32.0 GiB / GPU" read downward.
+    frame_label(frame, gutter(plot.y), bytes(top));
+    if rows >= 2 {
+        frame_label(frame, gutter(plot.y + 1), name.to_owned());
+    }
+    let eighths =
+        |value: u64| (u128::from(value.min(top)) * u128::from(rows) * 8 / u128::from(top)) as u16;
     for (column, point) in points.iter().enumerate() {
-        let Some((kinds, tone)) = point else {
+        let Some(point) = point else {
             continue;
         };
-        // Wired, app and compressed stacked; cache and free stay empty.
-        let mut tops = [0_u16; 3];
-        let mut sum = 0;
-        for (kind, size) in kinds.iter().take(3).enumerate() {
-            sum += size;
-            tops[kind] = height(sum);
-        }
-        let mut top_level = None;
+        let Some((ends, colors)) = stack(point) else {
+            continue;
+        };
+        let tops = ends.map(eighths);
+        // Any reading shows, however small against the top.
+        let height = tops[2].max(u16::from(ends[2] > 0));
+        let mut top_level = 0;
         for level in 0..rows {
-            let middle = level * 8 + 4;
-            let Some(kind) = tops.iter().position(|top| middle < *top) else {
+            let base = level * 8;
+            if base >= height {
                 break;
-            };
-            frame.buffer_mut()[(plot.x + column as u16, plot.bottom() - 1 - level)]
-                .set_symbol(" ")
-                .set_bg(colors[kind]);
-            top_level = Some(level);
+            }
+            // The band at the cell's middle, or the topmost where the stack
+            // ends inside the cell.
+            let middle = (base + 4).min(height - 1);
+            let band = tops.iter().position(|end| middle < *end).unwrap_or(2);
+            let filled = usize::from((height - base).min(8));
+            let cell = &mut frame.buffer_mut()[(plot.x + column as u16, plot.bottom() - 1 - level)];
+            if filled == 8 {
+                cell.set_symbol(" ").set_bg(colors[band]);
+            } else {
+                cell.set_symbol(BLOCKS[filled])
+                    .set_fg(colors[band])
+                    .set_bg(PANEL);
+            }
+            top_level = level;
         }
         // A sample marked as part of a slowdown: its column's top in the
         // anomaly colour, as on every other chart.
-        if *tone == Tone::Unusual {
-            let level = top_level.unwrap_or(0);
-            frame.buffer_mut()[(plot.x + column as u16, plot.bottom() - 1 - level)]
+        if point.tone == Tone::Unusual {
+            frame.buffer_mut()[(plot.x + column as u16, plot.bottom() - 1 - top_level)]
                 .set_symbol(" ")
                 .set_bg(crate::theme::UNUSUAL);
         }
     }
-    // The GPU limit as a line across the plot, where it falls inside it.
-    if let (Some(limit), Some(level)) = (limit, limit_level) {
-        {
-            let y = plot.bottom() - 1 - level;
-            for x in plot.x..plot.right() {
-                let cell = &mut frame.buffer_mut()[(x, y)];
-                // Across a band the dash is dark; above it, muted.
-                let on_band = colors[..3].contains(&cell.bg);
-                cell.set_symbol("┄")
-                    .set_fg(if on_band { PANEL } else { MUTED });
-            }
-            // Named on the line itself, so it never reads as an axis value.
-            let name = format!(" GPU limit {} ", bytes(limit));
-            let width = Line::from(name.as_str()).width() as u16;
-            if width + 2 < plot.width {
-                frame.render_widget(
-                    Paragraph::new(name).style(Style::default().fg(MUTED).bg(PANEL)),
-                    Rect::new(plot.right() - width - 1, y, width, 1),
-                );
-            }
-        }
-    }
-    true
 }
 
 fn frame_label(frame: &mut Frame, area: Rect, value: String) {

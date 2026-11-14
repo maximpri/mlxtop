@@ -50,16 +50,21 @@ OS **PRESSURE** label in the reading slot.
   GiB`). On Apple Silicon GPU memory is wired RAM. When the runtime reports
   its model's size, the bar and the line under it split it: `model 16.0 ·
   KV cache & other 8.0 GiB`, with what is left before the limit. The meter
-  turns orange from 90% and red from 97%.
+  is the colour of wired RAM, which it is part of; it turns orange from 90%
+  and red from 97%.
 - **RAM** is memory in use (wired, app and compressed) against all of RAM,
-  with the file cache as the bar's last segment. The line under it gives each
-  kind's size, and what is left: free memory plus the cache, which the OS
-  gives back on demand.
+  with the file cache as the bar's last segment. Under it is what is left
+  (free memory plus the cache, which the OS gives back on demand) and each
+  kind's size. A narrow panel wraps the kinds onto a second row; it does not
+  drop their sizes.
 - **By app** names the runtime's own footprint and the largest other app.
-- Under them, RAM by kind over time, against all of RAM, with the GPU limit
-  drawn and named as a dashed line. A model load shows as the wired band
-  growing, a growing KV cache as it creeping toward the limit, another app as
-  the app band. Samples marked as part of a slowdown are marked here too.
+  The header's `LLM` figure is the same footprint.
+- Under them, each meter over time in dimmed colours: GPU memory against
+  its limit, which is the top of its chart, and RAM by kind against all of
+  RAM. A model load shows as both levels rising, a growing KV cache as GPU
+  memory creeping toward the top, another app as the app band. Samples
+  marked as part of a slowdown are marked here too. A short panel keeps the
+  RAM chart alone.
 
 Without composition counters the history is an area of occupancy.
 
@@ -699,7 +704,7 @@ The summary also shows the change from the previous observed request, for
 example `Δ +12,768 (+63.8%) vs previous`, when there is one. Prompt load spans
 two of the three columns, beside Cache and Queue. It is nine to thirteen rows
 high, or seven on short macOS terminals and six with a compact NVIDIA device
-table; with no requests yet it is a single line (`no requests yet`, `waiting
+table; with no requests yet it is a single line (`No requests yet`, `waiting
 for the prompt size`, or `busy outside oMLX`). Enter expands it for a larger
 view.
 Newest requests stay at the right with fixed spacing, including a single bar.

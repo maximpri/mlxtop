@@ -166,7 +166,7 @@ fn overview_journal_retains_three_recent_events_at_screenshot_size() {
         !compact.contains("Event 11"),
         "compact Overview uses the journal preview space for the assessment"
     );
-    assert!(compact.contains("? help q quit"));
+    assert!(compact.contains("? help  q quit"));
 }
 
 #[test]

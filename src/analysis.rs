@@ -495,12 +495,9 @@ pub(crate) fn signal_summary(sample: &Sample) -> String {
             signed_rate(sample.swap_growth)
         ),
         "MEMORY BOTTLENECK" => format!(
-            "native pressure critical · LLM RSS {} · RAM resident {}",
-            bytes(sample.llm_rss),
-            sample
-                .resident_memory
-                .map(bytes)
-                .unwrap_or_else(|| "—".into())
+            "native pressure critical · LLM {} · {}",
+            bytes(sample.runtime_memory()),
+            sample.memory_use_label()
         ),
         "PAGE-IN RECOVERY" => format!(
             "page-in {} · growth {}",

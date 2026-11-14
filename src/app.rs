@@ -5,7 +5,6 @@ use crate::chart_navigation::Chart;
 use crate::collector::CollectorView;
 use crate::config::{config_history, config_interval, config_path, Config, Thresholds};
 use crate::domain::{EventKind, LlmProcess, Sample, SignalEvent};
-use crate::formatting::bytes;
 use crate::logging::{diagnostics_log, log_field};
 use crate::sampler::{Sampler, SamplerCommand};
 use crate::settings::Settings;
@@ -141,13 +140,7 @@ const CALM_SAMPLES_TO_REARM: u32 = 3;
 
 pub(crate) fn critical_summary(sample: &Sample) -> String {
     if critical_state(sample) == Some("MEMORY BOTTLENECK") {
-        format!(
-            "critical memory pressure · RAM resident {}",
-            sample
-                .resident_memory
-                .map(bytes)
-                .unwrap_or_else(|| "—".into())
-        )
+        format!("critical memory pressure · {}", sample.memory_use_label())
     } else {
         signal_summary(sample)
     }
@@ -237,6 +230,7 @@ impl App {
                 session: Default::default(),
                 load_history: VecDeque::new(),
                 composition_history: VecDeque::new(),
+                gpu_memory_history: VecDeque::new(),
                 swap_history: VecDeque::new(),
                 compression_history: VecDeque::new(),
                 platform: crate::host::Platform::current(),
