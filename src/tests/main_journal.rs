@@ -56,9 +56,12 @@ fn critical_memory_alarm_survives_missing_counters_and_acknowledgment() {
     app.tick();
     assert_eq!(app.alert_bells, 1);
     assert!(app.alert.is_none());
-    views
-        .send(view_with_impact("GPU BUSY", "12:00:03"))
-        .unwrap();
+    // Recovery takes three calm samples.
+    for second in 3..6 {
+        views
+            .send(view_with_impact("GPU BUSY", &format!("12:00:0{second}")))
+            .unwrap();
+    }
     views.send(critical).unwrap();
     app.tick();
     assert_eq!(app.alert_bells, 2);
@@ -83,13 +86,16 @@ fn paging_alert_banner_shows_until_acknowledged_or_reset() {
     let rendered = render_app(&app, 180, 50);
     assert!(!rendered.contains("⚠ HEAVY PAGING"));
 
-    // A fresh episode after recovery raises again; reset retires it.
+    // A fresh episode after recovery (three calm samples) raises again;
+    // reset retires it.
+    for second in 55..58 {
+        views
+            .send(view_with_impact("LLM READY", &format!("00:52:{second}")))
+            .expect("test channel should accept views");
+        app.tick();
+    }
     views
-        .send(view_with_impact("LLM READY", "00:52:55"))
-        .expect("test channel should accept views");
-    app.tick();
-    views
-        .send(view_with_impact("SWAP THRASHING", "00:52:56"))
+        .send(view_with_impact("SWAP THRASHING", "00:52:58"))
         .expect("test channel should accept views");
     app.tick();
     assert_eq!(app.alert_bells, 2);

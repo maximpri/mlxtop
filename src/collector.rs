@@ -50,6 +50,36 @@ pub(crate) struct PreviousCounters {
 /// How often readings that change over seconds (thermal state, power) are
 /// taken; each costs a process.
 const SLOW_READ_INTERVAL: Duration = Duration::from_secs(5);
+/// Samples within which a host state or paging change already told is not
+/// told again: a state flapping in and out is one story, not a row a poll.
+const JOURNAL_REPEAT_SAMPLES: u64 = 10;
+
+/// When each host state (or paging on/off) was last told, in Journal calls.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Held {
+    calls: u64,
+    told: std::collections::HashMap<String, u64>,
+}
+
+impl Held {
+    /// Count one Journal call.
+    fn tick(&mut self) {
+        self.calls += 1;
+    }
+
+    /// Whether `value` may be told now; if so, it is remembered as told.
+    fn tell(&mut self, value: &str) -> bool {
+        let fresh = self
+            .told
+            .get(value)
+            .is_none_or(|at| self.calls.saturating_sub(*at) > JOURNAL_REPEAT_SAMPLES);
+        if fresh {
+            self.told.insert(value.to_owned(), self.calls);
+        }
+        fresh
+    }
+}
+
 /// Consecutive failed process listings answered with the last good one.
 const PROCESS_READ_RETRIES: u32 = 3;
 
@@ -104,6 +134,14 @@ pub(crate) struct Collector {
     pub(crate) last_processes: Option<(crate::domain::ProcessSnapshot, u32)>,
     /// Runtime and model of the last sample that produced a rate.
     pub(crate) rate_identity: Option<(String, String)>,
+    /// Host state and paging as the Journal last told them: a change is
+    /// told once it has held for a few samples, so flapping is one story.
+    pub(crate) journal_impact: Held,
+    pub(crate) journal_paging: Held,
+    /// When a stall row was last written; a stall that comes back within the
+    /// same-story window is the same stall.
+    pub(crate) last_stall_row: Option<std::time::SystemTime>,
+    pub(crate) stall_row_skipped: bool,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
@@ -216,6 +254,10 @@ impl Collector {
             cached_at_start: None,
             last_processes: None,
             rate_identity: None,
+            journal_impact: Held::default(),
+            journal_paging: Held::default(),
+            last_stall_row: None,
+            stall_row_skipped: false,
             slow_read_at: None,
             session: Default::default(),
             current: Sample::default(),
@@ -876,9 +918,13 @@ impl Collector {
             // load, not news. Conditions worth inspecting still get a row.
             let serving = !sample.llm_requests.is_empty() || !previous.llm_requests.is_empty();
             let routine = |impact: &str| matches!(impact, "GPU BUSY" | "LLM READY" | "IDLE");
+            // A state told within the last few samples is not told again.
+            self.journal_impact.tick();
+            self.journal_paging.tick();
             let impact_changed = previous.impact != sample.impact
                 && sample.impact != "SAMPLING"
-                && !(serving && routine(&previous.impact) && routine(&sample.impact));
+                && !(serving && routine(&previous.impact) && routine(&sample.impact))
+                && self.journal_impact.tell(&sample.impact);
             if impact_changed {
                 add(&sample.impact, signal_summary(sample), sample.impact_tone);
             }
@@ -1034,20 +1080,39 @@ impl Collector {
                     )
                 };
                 let next = crate::diagnosis::slowdown_next_step(sample);
-                add(
-                    state,
-                    if next.is_empty() {
-                        what
-                    } else {
-                        format!("{what} → {next}")
-                    },
-                    insight.tone(),
-                );
+                // A stall that comes back within the same-story window is the
+                // same stall: one STALL row, and no RESUMED rows in between.
+                let at = sample
+                    .llm_observed_at
+                    .unwrap_or_else(std::time::SystemTime::now);
+                let same_stall = state == "STALL"
+                    && self.last_stall_row.is_some_and(|last| {
+                        at.duration_since(last).is_ok_and(|gap| {
+                            gap.as_secs_f64() < crate::analysis::SAME_STORY_SECONDS
+                        })
+                    });
+                if state == "STALL" {
+                    self.last_stall_row = Some(at);
+                    self.stall_row_skipped = same_stall;
+                }
+                if !same_stall {
+                    add(
+                        state,
+                        if next.is_empty() {
+                            what
+                        } else {
+                            format!("{what} → {next}")
+                        },
+                        insight.tone(),
+                    );
+                }
             }
+            // The end of a stall that was folded into the last one is not news.
+            let quiet_stall = self.stall_row_skipped;
             if let Some(stalled) = previous
                 .correlation
                 .stall_seconds
-                .filter(|_| sample.correlation.stall_seconds.is_none())
+                .filter(|_| sample.correlation.stall_seconds.is_none() && !quiet_stall)
             {
                 add(
                     "RESUMED",
@@ -1101,7 +1166,11 @@ impl Collector {
 
             let previous_paging = previous.paging_churn() > 0;
             let paging = sample.paging_churn() > 0;
-            if previous_paging != paging {
+            if previous_paging != paging
+                && self
+                    .journal_paging
+                    .tell(if paging { "paging" } else { "none" })
+            {
                 // Same band as the paging chart: traffic below the warning
                 // rate is light paging, not a condition worth inspecting.
                 let churn = sample.paging_churn();
@@ -1206,6 +1275,10 @@ impl Collector {
         self.previous = None;
         self.cached_at_start = None;
         self.rate_identity = None;
+        self.journal_impact = Held::default();
+        self.journal_paging = Held::default();
+        self.last_stall_row = None;
+        self.stall_row_skipped = false;
         self.previous_llm_cache = None;
         self.gpu_band = None;
         self.telemetry_online = None;

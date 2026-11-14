@@ -128,6 +128,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         alert_bells: 0,
         bell: || {},
         critical_episode: false,
+        calm_samples: 0,
         alarms: true,
         thresholds: Thresholds::default(),
         settings: crate::settings::Settings::new(std::path::PathBuf::from(

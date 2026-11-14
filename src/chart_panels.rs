@@ -269,11 +269,16 @@ impl App {
                 if !sample.rate_ready || sample.paging_unavailable {
                     return Some("paging unavailable".into());
                 }
-                let swapping = sample.swap_in.saturating_add(sample.swap_out) > 0;
+                let swap = sample.swap_in.saturating_add(sample.swap_out);
+                // "Memory is short" only from the rate the verdict treats as
+                // paging; lighter swap traffic is said to be light.
+                let swapping = swap >= self.thresholds.swap_warn_rate;
+                let light_swap = swap > 0 && !swapping;
                 let files = sample.page_in.saturating_add(sample.page_out) > 0;
                 Some(
                     match (swapping, files, sample.memory_tight()) {
                         (true, _, _) => "swapping: memory is short",
+                        (false, _, _) if light_swap => "light swapping",
                         (false, true, true) => "reading files back: memory is tight",
                         (false, true, false) => "reading files · memory not tight",
                         (false, false, _) => "no paging",

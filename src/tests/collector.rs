@@ -1556,3 +1556,30 @@ fn an_idle_sample_naming_another_model_does_not_restart_the_rate_charts() {
         Some(("oMLX".into(), "second".into()))
     );
 }
+
+#[test]
+fn host_state_flaps_write_one_journal_row_each_way() {
+    let mut collector = collector(linux_host(), Platform::Linux, None);
+    let mut previous: Option<Sample> = None;
+    for i in 0..16 {
+        let sample = Sample {
+            impact: if i % 2 == 0 {
+                "HEAVY PAGING"
+            } else {
+                "MEMORY STRESS"
+            }
+            .into(),
+            rate_ready: true,
+            vm_available: true,
+            ..Sample::default()
+        };
+        collector.record_journal_events(previous.as_ref(), &sample);
+        previous = Some(sample);
+    }
+    let rows: Vec<String> = journal(&collector)
+        .into_iter()
+        .map(|(state, _)| state)
+        .filter(|state| state == "HEAVY PAGING" || state == "MEMORY STRESS")
+        .collect();
+    assert!(rows.len() <= 4, "{rows:?}");
+}

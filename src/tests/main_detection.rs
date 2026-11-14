@@ -86,11 +86,13 @@ fn paging_alert_rings_once_per_episode_and_rearms() {
     assert_eq!(alert.time, "00:52:55");
     assert_eq!(app.alert_bells, 1);
 
-    // Recovery retires the alert and re-arms it for the next episode.
-    views
-        .send(view_with_impact("LLM READY", "00:52:56"))
-        .expect("test channel should accept views");
-    app.tick();
+    // Recovery (three calm samples) retires the alert and re-arms it.
+    for second in 56..59 {
+        views
+            .send(view_with_impact("LLM READY", &format!("00:52:{second}")))
+            .expect("test channel should accept views");
+        app.tick();
+    }
     assert!(app.alert.is_none());
     views
         .send(view_with_impact("HEAVY PAGING", "00:53:10"))
@@ -1962,4 +1964,112 @@ fn a_slowdown_from_fewer_draft_tokens_accepted_says_so() {
         )
     });
     assert!(screen.contains("draft 72%"), "{screen}");
+}
+
+#[test]
+fn bursty_heavy_paging_rings_once() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let mut app = test_app(0);
+    app.alarms = true;
+    let mut previous: Option<Sample> = None;
+    for (i, out) in [40u64, 20, 44, 12, 36, 28, 50, 8, 40, 20, 44, 12]
+        .into_iter()
+        .enumerate()
+    {
+        let mut sample = Sample {
+            total_memory: 1 << 34,
+            availability: Some(20),
+            pressure: "GREEN".into(),
+            vm_available: true,
+            swap_available: true,
+            rate_ready: true,
+            swap_out: out * 1024 * 1024,
+            updated: format!("12:00:{i:02}"),
+            ..Sample::default()
+        };
+        crate::analysis::classify(&mut sample, previous.as_ref(), thresholds);
+        let mut view = view_with_impact(&sample.impact, &sample.updated);
+        view.current = sample.clone();
+        app.track_critical_alert(&view);
+        previous = Some(sample);
+    }
+    assert_eq!(app.alert_bells, 1);
+}
+
+#[test]
+fn steady_paging_between_the_exit_and_enter_rates_stays_watch() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    for (rate, expected) in [
+        (5 * 1024 * 1024 / 2, "WATCH PAGING"),
+        (4 * 1024 * 1024, "PAGING ACTIVE"),
+    ] {
+        let mut previous: Option<Sample> = None;
+        let mut states = Vec::new();
+        for _ in 0..4 {
+            let mut sample = Sample {
+                total_memory: 1 << 34,
+                availability: Some(50),
+                pressure: "GREEN".into(),
+                vm_available: true,
+                swap_available: true,
+                rate_ready: true,
+                swap_in: rate,
+                ..Sample::default()
+            };
+            crate::analysis::classify(&mut sample, previous.as_ref(), thresholds);
+            states.push(sample.impact.clone());
+            previous = Some(sample);
+        }
+        assert!(states.iter().all(|state| state == expected), "{states:?}");
+    }
+}
+
+#[test]
+fn a_request_that_stalls_every_other_poll_is_one_journal_story() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let mut samples = Vec::new();
+    let mut out = 100;
+    for i in 0..20u64 {
+        let idle = if i % 2 == 0 { 0.2 } else { 1.8 };
+        if i % 2 == 0 {
+            out += 1;
+        }
+        samples.push(Sample {
+            llm_provider: "oMLX".into(),
+            llm_model: "m".into(),
+            llm_source: TelemetrySource::Live,
+            llm_status: "generating".into(),
+            llm_generation_tps: Some(0.5),
+            llm_generation_tps_live: true,
+            llm_active_requests: Some(1),
+            llm_observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(i)),
+            updated: format!("t{i}"),
+            vm_available: true,
+            swap_available: true,
+            rate_ready: true,
+            llm_requests: vec![RequestUsage {
+                provider: "oMLX".into(),
+                model: "m".into(),
+                id: "slow".into(),
+                prompt: 30_000,
+                output: Some(out),
+                idle_for: Some(Duration::from_secs_f64(idle)),
+                ..RequestUsage::default()
+            }],
+            ..Sample::default()
+        });
+    }
+    let result = crate::recording::replay(&mut samples, thresholds);
+    let stalls = result
+        .findings
+        .iter()
+        .filter(|(_, s, _)| s == "STALL")
+        .count();
+    let resumed = result
+        .findings
+        .iter()
+        .filter(|(_, s, _)| s == "RESUMED")
+        .count();
+    assert_eq!(stalls, 1, "{:?}", result.findings);
+    assert!(resumed <= 1, "{:?}", result.findings);
 }

@@ -136,6 +136,9 @@ pub(crate) fn critical_state(sample: &Sample) -> Option<&str> {
     }
 }
 
+/// Calm samples in a row that end a critical episode and re-arm the bell.
+const CALM_SAMPLES_TO_REARM: u32 = 3;
+
 pub(crate) fn critical_summary(sample: &Sample) -> String {
     if critical_state(sample) == Some("MEMORY BOTTLENECK") {
         format!(
@@ -194,6 +197,9 @@ pub(crate) struct App {
     /// Rings the terminal bell; replaced in tests so no BEL reaches stdout.
     pub(crate) bell: fn(),
     pub(crate) critical_episode: bool,
+    /// Non-critical samples in a row since the last critical one: an episode
+    /// ends after three, the count the slowdown rule uses to end.
+    pub(crate) calm_samples: u32,
     /// Whether critical conditions ring the bell and raise the banner (`alarms` in the config).
     pub(crate) alarms: bool,
     pub(crate) thresholds: Thresholds,
@@ -261,6 +267,7 @@ impl App {
             alert_bells: 0,
             bell: ring_terminal_bell,
             critical_episode: false,
+            calm_samples: 0,
             alarms: config.alarms.unwrap_or(true),
             thresholds,
             settings: Settings::new(config_path()),
@@ -327,7 +334,17 @@ impl App {
             return;
         }
         let newly_critical = state.is_some() && !self.critical_episode;
-        self.critical_episode = state.is_some();
+        if state.is_some() {
+            self.critical_episode = true;
+            self.calm_samples = 0;
+        } else {
+            self.calm_samples += 1;
+            // One calm sample between bursts is not a recovery.
+            if self.calm_samples < CALM_SAMPLES_TO_REARM {
+                return;
+            }
+            self.critical_episode = false;
+        }
         if let Some(alert) = &mut self.alert {
             if let Some(state) = state {
                 if alert.state != state {

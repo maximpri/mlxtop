@@ -329,9 +329,11 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
     let comp_churn = sample.compress.saturating_add(sample.decompress);
     let llm = llm_is_observed(sample);
     let previous_impact = previous.map(|sample| sample.impact.as_str());
+    // Watch paging is below "Paging active": it must not lower the entry
+    // rate to the exit rate, or 2 MiB/s would read as active.
     let was_paging = matches!(
         previous_impact,
-        Some("PAGING ACTIVE" | "WATCH PAGING" | "HEAVY PAGING" | "SWAP THRASHING")
+        Some("PAGING ACTIVE" | "HEAVY PAGING" | "SWAP THRASHING")
     );
     let was_compressing = matches!(previous_impact, Some("COMPRESSION ACTIVE"));
     let was_gpu_busy = matches!(previous_impact, Some("GPU BUSY"));

@@ -23,6 +23,11 @@ const MAX_USAGE_BYTES: u64 = 256 * 1024;
 static POLL_INTERVAL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) fn set_poll_interval(interval: Duration) {
+    // Tests drive many samplers at once; the windows are tested through
+    // `rate_span_for`, so the shared value stays at its default there.
+    if cfg!(test) {
+        return;
+    }
     POLL_INTERVAL_SECS.store(
         interval.as_secs().max(1),
         std::sync::atomic::Ordering::Relaxed,
