@@ -1184,6 +1184,8 @@ fn process_view_remains_scannable_at_eighty_columns() {
         );
     }
     assert!(!rendered.contains("This dashboard needs"));
+    assert!(rendered.contains("CPU 0.0%"), "no processes must not read -0.0");
+    assert!(!rendered.contains("-0.0"));
 }
 
 #[test]

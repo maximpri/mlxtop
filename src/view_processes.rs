@@ -27,7 +27,8 @@ impl App {
         let sample = &self.collector.current;
         let filtered = self.filtered_llm_processes();
         let total_rss = filtered.iter().map(|p| p.rss).sum::<u64>();
-        let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>();
+        // An empty f64 sum is -0.0; adding 0.0 keeps the title at "0.0%".
+        let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>() + 0.0;
         if let Some(text) = details {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(

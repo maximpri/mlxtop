@@ -132,6 +132,13 @@ releases and for release candidates offered as prereleases.
    gh release edit vX.Y.Z-rc.N --draft=false   # a candidate stays a prerelease
    ~~~
 
+6. For a final release, bump the Homebrew tap (see [Homebrew](#homebrew)) and
+   check that it delivers the new version:
+
+   ~~~sh
+   brew update && brew info --json=v2 maximpri/tap/mlxtop | jq -r '.formulae[0].versions.stable'
+   ~~~
+
 Pull requests that change the workflow or packaging scripts run the same
 builds without publishing; the assets are attached to the run as artifacts.
 
