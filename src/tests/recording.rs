@@ -57,7 +57,7 @@ fn a_recording_round_trips_and_replays_a_slowdown_with_its_reason() {
     }
     // A line that is not a sample is skipped, not fatal.
     text.extend_from_slice(b"not json\n");
-    let mut samples = read(text.as_slice());
+    let (mut samples, _) = read_counted(text.as_slice()).unwrap();
     assert_eq!(samples.len(), 24);
     assert_eq!(samples[3].llm_requests[0].id, "r1");
 
@@ -140,7 +140,7 @@ fn recordings_hold_no_process_command_lines() {
     let line = serde_json::to_string(&sample).unwrap();
     assert!(!line.contains("SECRET"), "{line}");
     assert!(!line.contains("\"command\""), "{line}");
-    let back = read(line.as_bytes());
+    let (back, _) = read_counted(line.as_bytes()).unwrap();
     assert_eq!(back.len(), 1);
     assert!(back[0].llm_processes.is_empty());
     assert_eq!(back[0].llm_generation_tps, Some(50.0));

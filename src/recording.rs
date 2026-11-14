@@ -43,13 +43,6 @@ pub(crate) fn write(sample: &Sample) {
     }
 }
 
-/// Every sample in a recording, skipping lines that are not one.
-pub(crate) fn read(reader: impl BufRead) -> Vec<Sample> {
-    read_counted(reader)
-        .map(|(samples, _)| samples)
-        .unwrap_or_default()
-}
-
 /// Every sample in a recording, and how many non-empty lines were not one.
 /// A line must be a JSON object with a sample's `updated` field: any other
 /// object would otherwise read as an all-default sample.
