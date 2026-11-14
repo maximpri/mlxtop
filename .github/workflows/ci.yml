@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Weekly, so a new advisory against a locked crate is noticed without a push.
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -67,4 +70,4 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: "1.88.0"
-          command: check licenses
+          command: check

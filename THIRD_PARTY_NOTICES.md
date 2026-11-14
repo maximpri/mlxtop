@@ -37,7 +37,7 @@ a compiled binary must also preserve and distribute the license texts and
 notices required by the dependencies included in that binary; this summary does
 not replace those texts.
 
-The policy is enforced by `deny.toml`. Re-run `cargo deny check licenses` after
+The policy is enforced by `deny.toml`. Re-run `cargo deny check` after
 changing dependencies and review both `Cargo.lock` and the upstream license
 files before publishing a release.
 
@@ -594,7 +594,7 @@ DEALINGS IN THE SOFTWARE.
 
 ```
 
-### rustls-webpki-0.103.15: LICENSE
+### rustls-webpki-0.103.17: LICENSE
 
 ```text
 Except as otherwise noted, this project is licensed under the following
@@ -673,7 +673,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
-### webpki-roots-1.0.9: LICENSE
+### webpki-roots-1.0.12: LICENSE
 
 ```text
 # Community Data License Agreement - Permissive - Version 2.0
