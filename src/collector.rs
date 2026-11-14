@@ -1132,7 +1132,19 @@ impl Collector {
             // One row when a slowdown ends: how long it lasted and how deep
             // it went, or that the slower speed is now the request's own.
             if let Some(end) = sample.correlation.ended {
-                if end.settled {
+                if end.finished {
+                    add(
+                        "ENDED",
+                        format!(
+                            "{} finished while slow after {:.0}s · low {:.1} tok/s, usual {:.1}",
+                            sample.correlation.phase.word(),
+                            end.seconds,
+                            end.low,
+                            end.reference
+                        ),
+                        Tone::Muted,
+                    );
+                } else if end.settled {
                     add(
                         "SETTLED",
                         format!(

@@ -52,7 +52,7 @@ impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
             "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED"
-            | "SETTLED" => Self::Llm,
+            | "ENDED" | "SETTLED" => Self::Llm,
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -376,6 +376,8 @@ pub(crate) struct DropEpisode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DropEnd {
     pub(crate) settled: bool,
+    /// The request ended while still slow: nothing came back or settled.
+    pub(crate) finished: bool,
     pub(crate) seconds: f64,
     pub(crate) low: f64,
     pub(crate) rate: f64,

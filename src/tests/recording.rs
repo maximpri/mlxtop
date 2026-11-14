@@ -302,3 +302,65 @@ fn rate_windows_follow_the_poll_interval() {
         Duration::from_secs(122)
     );
 }
+
+#[test]
+fn a_prompt_read_on_a_runtime_without_a_request_list_is_not_a_slowdown() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let base = |at: u64, tps: f64| Sample {
+        llm_provider: "vLLM".into(),
+        llm_model: "m".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_generation_tps: Some(tps),
+        llm_generation_tps_live: true,
+        llm_prefill_tps: Some(0.0),
+        llm_prefill_tps_live: true,
+        llm_active_requests: Some(1),
+        llm_observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(at)),
+        updated: format!("t{at}"),
+        rate_ready: true,
+        ..Sample::default()
+    };
+    let mut samples: Vec<Sample> = (0..15).map(|i| base(i, 50.0)).collect();
+    samples.extend((15..25).map(|i| base(i, 0.0)));
+    samples.extend((25..35).map(|i| base(i, 50.0)));
+    let result = replay(&mut samples, thresholds);
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.slow_generation, 0);
+}
+
+#[test]
+fn a_slowdown_that_ends_with_its_request_is_closed_in_the_journal() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let mut samples = Vec::new();
+    for i in 0..12u64 {
+        samples.push(polled(i, 50.0, 100 + i * 50, 0));
+    }
+    for i in 12..18u64 {
+        samples.push(polled(i, 20.0, 700 + i * 20, thresholds.swap_warn_rate * 2));
+    }
+    for i in 18..138u64 {
+        let mut idle = polled(i, 0.0, 0, 0);
+        idle.llm_requests.clear();
+        idle.llm_generation_tps = None;
+        idle.llm_generation_tps_live = false;
+        idle.llm_active_requests = Some(0);
+        idle.llm_status = "idle".into();
+        samples.push(idle);
+    }
+    for i in 138..150u64 {
+        let mut next = polled(i, 50.0, 100 + (i - 138) * 50, 0);
+        next.llm_requests[0].id = "b".into();
+        samples.push(next);
+    }
+    let result = replay(&mut samples, thresholds);
+    let states: Vec<&str> = result.findings.iter().map(|(_, s, _)| s.as_str()).collect();
+    assert_eq!(states.first(), Some(&"SLOWDOWN"), "{states:?}");
+    assert!(
+        states
+            .iter()
+            .any(|s| matches!(*s, "ENDED" | "RECOVERED" | "SETTLED")),
+        "{:?}",
+        result.findings
+    );
+}

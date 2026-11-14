@@ -773,6 +773,8 @@ pub(crate) struct CorrelationEngine {
     /// Seconds between the last two judged samples: the poll cadence, so
     /// "idle long ago" means the same at a 1 s and a 60 s interval.
     cadence: f64,
+    /// A slowdown whose request ended while it was slow, not yet told.
+    finished: Option<DropEnd>,
     /// Which requests were writing at the previous sample.
     writers: Vec<String>,
     /// Prefill is judged as generation is, with usual values of its own: a
@@ -841,7 +843,13 @@ impl CorrelationEngine {
                 return insight;
             }
         }
-        self.judge(current, thresholds)
+        let mut insight = self.judge(current, thresholds);
+        // A slowdown dropped because its request ended is closed on the
+        // sample that notices, unless that sample already ends something.
+        if insight.ended.is_none() {
+            insight.ended = self.finished.take();
+        }
+        insight
     }
 
     /// Judge one observation of a speed against earlier ones of similar work.
@@ -857,9 +865,12 @@ impl CorrelationEngine {
         let whole = !current.writers.is_empty() && current.writers == self.writers;
         self.writers = current.writers.clone();
         let stalled = current.stalled_for.filter(|idle| *idle >= STALL_SECONDS);
-        let speed = current.generation_tps.filter(|tps| {
-            tps.is_finite() && (*tps > 0.0 || current.active_requests.unwrap_or_default() > 0)
-        });
+        // A zero speed counts only beside a listed request that is writing:
+        // an aggregate active count cannot tell "writing at 0 tok/s" from
+        // "reading a prompt", which is prefill, not a slow answer.
+        let speed = current
+            .generation_tps
+            .filter(|tps| tps.is_finite() && (*tps > 0.0 || current.generating > 0));
         if stalled.is_none() && speed.is_none() {
             // Nothing is generating: there is no speed to judge. A slowdown
             // waits for its next sample.
@@ -873,7 +884,16 @@ impl CorrelationEngine {
         let gap = seconds_between(self.seen, current.at);
         if gap >= SETTLE_SECONDS.max(3.0 * self.cadence) {
             self.keep_pending(thresholds);
-            self.episode = None;
+            if let Some(open) = self.episode.take().filter(|open| !open.silent) {
+                self.finished = Some(DropEnd {
+                    settled: false,
+                    finished: true,
+                    seconds: seconds_between(open.began, self.seen),
+                    low: open.low,
+                    rate: open.low,
+                    reference: open.reference,
+                });
+            }
         }
         if gap > 0.0 {
             self.cadence = gap;
@@ -973,6 +993,7 @@ impl CorrelationEngine {
         let ended = |settled: bool, open: &Episode| {
             (!open.silent).then_some(DropEnd {
                 settled,
+                finished: false,
                 seconds,
                 low: open.low,
                 rate: speed,

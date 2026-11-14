@@ -134,7 +134,7 @@ pub(crate) fn replay(samples: &mut [Sample], thresholds: Thresholds) -> Replay {
         for event in journal.signals.drain(..) {
             if matches!(
                 event.state.as_str(),
-                "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED" | "SETTLED"
+                "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED" | "SETTLED" | "ENDED"
             ) {
                 replay.findings.push((
                     event.time.clone(),

@@ -819,6 +819,7 @@ fn a_slowdown_is_three_slow_samples_and_ends_after_three_usual_ones() {
     assert_eq!(
         over.ended,
         Some(DropEnd {
+            finished: false,
             settled: false,
             seconds: 12.0,
             low: 25.0,
@@ -892,6 +893,7 @@ fn a_slowdown_with_nothing_else_unusual_becomes_the_usual_speed_after_thirty_sec
     assert_eq!(
         settled.ended,
         Some(DropEnd {
+            finished: false,
             settled: true,
             seconds: 32.0,
             low: 30.0,
