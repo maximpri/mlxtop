@@ -124,8 +124,26 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
-/// Plot rows the bars keep before a row of generated tokens goes under them.
+/// Plot rows the bars keep before a row of generation speeds goes under
+/// them, and one more before a row of generated tokens does.
 const OUTPUT_ROW_MIN_PLOT: u16 = 4;
+
+/// The speed a bar's request generated at, so prompts can be compared by
+/// what they cost: the fullest wording that leaves a gap to the next bar.
+fn speed_label(entry: &Entry, width: u16) -> String {
+    let Some(speed) = entry.output_speed.filter(|speed| speed.tps > 0.0) else {
+        return String::new();
+    };
+    let room = usize::from(width.saturating_sub(1));
+    [
+        format!("{:.1} tok/s", speed.tps),
+        format!("{:.1}/s", speed.tps),
+        format!("{:.0}/s", speed.tps),
+    ]
+    .into_iter()
+    .find(|label| label.chars().count() <= room)
+    .unwrap_or_default()
+}
 
 /// The tokens a bar's request has generated, so the size above needs no subtraction.
 fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
@@ -575,12 +593,14 @@ pub(super) fn draw(
         2
     };
     let (start, visible, slot_width) = window.unwrap();
-    // The prompt size sets the bar's height; the tokens generated so far go
-    // under it when the plot keeps enough rows without it. That depends on the
-    // panel's height alone, so the bars never shrink when output first
-    // arrives. Size labels outrank it.
-    let show_outputs = inner.height >= metadata_height + 2 + OUTPUT_ROW_MIN_PLOT;
-    let footer = 1 + u16::from(show_outputs);
+    // The prompt size sets the bar's height and is named under it. Under
+    // that go the speed each request generated at, then the tokens it
+    // generated, each when the plot keeps enough rows without it. That
+    // depends on the panel's height alone, so the bars never shrink when
+    // output first arrives. Size labels outrank both, speed outranks counts.
+    let show_speeds = inner.height >= metadata_height + 2 + OUTPUT_ROW_MIN_PLOT;
+    let show_outputs = inner.height >= metadata_height + 3 + OUTPUT_ROW_MIN_PLOT;
+    let footer = 1 + u16::from(show_speeds) + u16::from(show_outputs);
     if inner.height < metadata_height + footer + 1 {
         return;
     }
@@ -625,12 +645,24 @@ pub(super) fn draw(
             }),
             Rect::new(x, plot.bottom(), slot_width, 1),
         );
+        if show_speeds {
+            frame.render_widget(
+                Paragraph::new(speed_label(old, slot_width))
+                    .alignment(Alignment::Center)
+                    .style(if selected {
+                        Style::default().fg(color)
+                    } else {
+                        Style::default().fg(MUTED)
+                    }),
+                Rect::new(x, plot.bottom() + 1, slot_width, 1),
+            );
+        }
         if show_outputs {
             frame.render_widget(
                 Paragraph::new(output_label(&old.usage, slot_width))
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(MUTED)),
-                Rect::new(x, plot.bottom() + 1, slot_width, 1),
+                Rect::new(x, plot.bottom() + 2, slot_width, 1),
             );
         }
     }

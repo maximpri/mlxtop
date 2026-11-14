@@ -32,11 +32,11 @@ impl fmt::Display for ProbeIssue {
             Self::InvalidPort => f.write_str("invalid MLXTOP_PROVIDER_PORT; use an integer from 1 to 65535"),
             Self::InvalidCredential => f.write_str("invalid credential; remove empty values and control characters"),
             Self::RemoteAuthBlocked => f.write_str("remote authentication blocked; MLXTOP_ALLOW_REMOTE_AUTH=1 is required to send credentials"),
-            Self::CredentialsMissing => f.write_str("monitoring credentials not configured; set MLXTOP_PROVIDER_API_KEY, or auth.api_key in oMLX's settings"),
+            Self::CredentialsMissing => f.write_str("monitoring credentials not configured; set the API key in Settings (4), MLXTOP_PROVIDER_API_KEY, or auth.api_key in oMLX's settings"),
             Self::NotDetected => f.write_str("no oMLX process found; key not sent (set MLXTOP_PROVIDER=omlx to send it)"),
             Self::Timeout => f.write_str("connection timed out; check the server address and reachability"),
             Self::Transport => f.write_str("connection failed; check that the server is running and reachable"),
-            Self::Http(401 | 403) => f.write_str("authentication rejected; check monitoring credentials and permissions"),
+            Self::Http(401 | 403) => f.write_str("authentication rejected; check the API key in Settings (4) or MLXTOP_PROVIDER_API_KEY, and its permissions"),
             Self::Http(status) => write!(f, "HTTP {status}; check that this monitoring endpoint is enabled"),
             Self::InvalidResponse => f.write_str("unrecognized response; check the endpoint and runtime API version"),
             Self::ResponseTooLarge => f.write_str("response exceeds the monitoring size limit"),
@@ -74,7 +74,37 @@ pub(crate) struct RuntimeReport {
     pub usage: &'static str,
 }
 
+/// What a runtime's answers say about the key it wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyNeed {
+    /// It asks for a key and none was found to send.
+    Missing,
+    /// The key that was sent was refused.
+    Rejected,
+}
+
 impl RuntimeReport {
+    /// Whether the runtime needs a key it was not given, or refused the one
+    /// it got. `None` while it answers, is down, or has not been asked.
+    pub(crate) fn key_need(&self) -> Option<KeyNeed> {
+        let issue = |wanted: fn(&ProbeIssue) -> bool| {
+            self.probes
+                .iter()
+                .any(|probe| probe.issue.as_ref().is_some_and(wanted))
+        };
+        if issue(|issue| *issue == ProbeIssue::CredentialsMissing) {
+            Some(KeyNeed::Missing)
+        } else if issue(|issue| matches!(issue, ProbeIssue::Http(401 | 403))) {
+            Some(if self.credentials_present {
+                KeyNeed::Rejected
+            } else {
+                KeyNeed::Missing
+            })
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn begin(&mut self) {
         self.attempted_at = Some(SystemTime::now());
         self.connected = false;

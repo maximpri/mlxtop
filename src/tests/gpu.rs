@@ -152,3 +152,29 @@ fn amd_cards_follow_nvidia_cards_in_one_list() {
     let again = collect(&host, &cards);
     assert_eq!(again, cards);
 }
+
+#[test]
+fn memory_is_laid_out_as_the_hardware_has_it() {
+    // Cards with memory of their own: a pool apart from RAM.
+    assert_eq!(
+        memory(&parse(TWO)),
+        Memory::Dedicated {
+            used: 23024 * MIB,
+            total: 49128 * MIB
+        }
+    );
+    // An integrated GPU (DGX Spark, Jetson) answers and reports no memory
+    // of its own: it shares RAM.
+    let spark = parse("0, GPU-s, NVIDIA GB10, 42, [N/A], [N/A], 51\n");
+    assert_eq!(spark.len(), 1);
+    assert_eq!(memory(&spark), Memory::Shared);
+    // A failed read answers nothing: unknown, not shared.
+    let failed: Vec<Device> = parse(TWO).iter().map(Device::unavailable).collect();
+    assert_eq!(memory(&failed), Memory::Unknown);
+    assert_eq!(memory(&[]), Memory::Unknown);
+    // One card of two without a total: no sum to draw, and not shared.
+    let mixed = parse(&format!(
+        "{TWO}2, GPU-c, NVIDIA test, 5, [N/A], [N/A], 40\n"
+    ));
+    assert_eq!(memory(&mixed), Memory::Unknown);
+}

@@ -365,6 +365,6 @@ fn a_connected_omlx_without_a_key_says_what_is_missing() {
         });
     assert_eq!(
         assess(&sample).next,
-        "No live rates: oMLX admin key not set · d for setup"
+        "No live rates: oMLX admin key not set · 4 for Settings"
     );
 }

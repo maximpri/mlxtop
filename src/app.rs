@@ -172,6 +172,9 @@ pub(crate) struct App {
     pub(crate) journal_scroll: usize,
     /// The furthest the Journal could scroll when last drawn (rows wrap).
     pub(crate) journal_max_scroll: std::cell::Cell<usize>,
+    /// Whether this session has already opened Settings to ask for the
+    /// inference engine's key.
+    pub(crate) key_prompted: bool,
     /// The terminal was too small for the dashboard when last drawn.
     pub(crate) compact: std::cell::Cell<bool>,
     pub(crate) request_scroll: usize,
@@ -250,6 +253,7 @@ impl App {
             journal_filter: JournalFilter::All,
             journal_scroll: 0,
             journal_max_scroll: Default::default(),
+            key_prompted: false,
             compact: Default::default(),
             request_scroll: 0,
             charts: chart_navigation::Navigation::default(),
@@ -275,6 +279,58 @@ impl App {
         }
     }
 
+    /// The first time the inference engine asks for a key mlxtop does not
+    /// have, or refuses the one in the config: open Settings on the key,
+    /// ready to type. Once a session, and never over something the user has
+    /// open; Esc carries on without it.
+    pub(crate) fn prompt_for_key(&mut self) {
+        use crate::runtime_diagnostics::KeyNeed;
+        if self.key_prompted {
+            return;
+        }
+        let runtime = &self.collector.current.runtime;
+        let Some(need) = runtime.key_need() else {
+            return;
+        };
+        let busy = self.help
+            || self.summary_open
+            || self.quit_prompt
+            || self.diagnostics_open
+            || self.top_filtering
+            || self.settings.editing.is_some();
+        if busy {
+            return;
+        }
+        self.key_prompted = true;
+        // A refused key from the environment is not Settings' to replace.
+        let from_environment = !cfg!(test)
+            && std::env::var("MLXTOP_PROVIDER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+        if need == KeyNeed::Rejected && from_environment {
+            return;
+        }
+        let engine = runtime
+            .provider
+            .clone()
+            .unwrap_or_else(|| "The inference engine".into());
+        let asks = match need {
+            KeyNeed::Missing => "asks for an API key",
+            KeyNeed::Rejected => "refused the API key it was sent",
+        };
+        let notice = format!(
+            "{engine} at {} {asks}. Type or paste it, then Enter. Esc skips it; live rates stay off.",
+            runtime.endpoint
+        );
+        self.tab = 3;
+        self.charts.expanded = false;
+        self.settings.reload();
+        self.settings.select("api_key");
+        if self.settings.broken.is_none() {
+            self.settings.start_editing();
+        }
+        self.settings.status = Some(crate::settings::Status::Notice(notice));
+        diagnostics_log("INFO", "api_key_prompt", format!("need={need:?}"));
+    }
+
     pub(crate) fn tick(&mut self) {
         loop {
             match self.sampler.views.try_recv() {
@@ -298,6 +354,7 @@ impl App {
                     self.collector = view;
                     self.sampler_disconnected = false;
                     self.last_view_at = Instant::now();
+                    self.prompt_for_key();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {

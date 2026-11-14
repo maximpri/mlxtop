@@ -23,8 +23,29 @@ pub(crate) const GPU_WARN_EXIT: u64 = 70;
 pub(crate) const DEFAULT_OMLX_HOST: &str = "127.0.0.1";
 pub(crate) const DEFAULT_OMLX_PORT: u16 = 8000;
 
+/// A credential from the config file. It never prints: `Debug` shows only
+/// that one is set, so a logged `Config` cannot carry it.
+#[derive(Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(transparent)]
+pub(crate) struct Secret(String);
+
+impl Secret {
+    /// The credential itself, trimmed; `None` when it is blank.
+    pub(crate) fn expose(&self) -> Option<&str> {
+        Some(self.0.trim()).filter(|key| !key.is_empty())
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<set>")
+    }
+}
+
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Config {
+    /// The key sent to the monitored inference engine when it asks for one.
+    pub(crate) api_key: Option<Secret>,
     pub(crate) interval: Option<u64>,
     pub(crate) history: Option<usize>,
     pub(crate) omx: Option<OmxConfig>,
@@ -60,6 +81,16 @@ pub(crate) struct JournalConfig {
 pub(crate) struct OmxConfig {
     pub(crate) host: Option<String>,
     pub(crate) port: Option<u16>,
+}
+
+impl Config {
+    /// The configured inference-engine key, when one is set.
+    pub(crate) fn api_key(&self) -> Option<String> {
+        self.api_key
+            .as_ref()
+            .and_then(Secret::expose)
+            .map(str::to_owned)
+    }
 }
 
 pub(crate) fn load_config() -> Config {

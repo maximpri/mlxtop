@@ -98,6 +98,7 @@ fn every_config_field_reaches_the_resolved_settings() {
         serde_json::from_str(CONFIG_WITH_EVERY_FIELD_SET).expect("the fixture should parse");
 
     let Config {
+        api_key,
         interval,
         history,
         omx,
@@ -115,6 +116,16 @@ fn every_config_field_reaches_the_resolved_settings() {
         journal,
     } = config.clone();
     let OmxConfig { host, port } = omx.expect("the fixture sets omx");
+
+    // The key reaches the lookup every runtime's login uses, and a logged
+    // config never carries it.
+    let key = api_key.expect("the fixture sets api_key");
+    assert_eq!(key.expose(), Some("test-key-not-a-secret"));
+    assert_eq!(
+        crate::omlx::omlx_api_key_from(None, config.api_key(), None, None, None).as_deref(),
+        key.expose()
+    );
+    assert!(!format!("{config:?}").contains("test-key"));
 
     assert_eq!(
         config_interval(&config).0,

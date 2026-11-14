@@ -316,7 +316,7 @@ fn assess_observation(sample: &Sample) -> Finding {
         finding.next = "No runtime found · d for setup".into();
     } else if !live && omlx_key_missing(sample) {
         // Connected, but the admin statistics need a key nobody gave.
-        finding.next = "No live rates: oMLX admin key not set · d for setup".into();
+        finding.next = "No live rates: oMLX admin key not set · 4 for Settings".into();
     } else if !live {
         finding.next = "Live generation rate unavailable.".into();
     }

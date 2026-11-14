@@ -771,6 +771,18 @@ impl Sample {
     pub(crate) fn has_discrete_gpus(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "windows")) && !self.gpus.is_empty()
     }
+
+    /// Where this machine's GPU memory comes from: a pool of its own, or
+    /// the same RAM everything else uses.
+    pub(crate) fn gpu_memory(&self) -> gpu::Memory {
+        if cfg!(target_os = "macos") {
+            gpu::Memory::Shared
+        } else if self.has_discrete_gpus() {
+            gpu::memory(&self.gpus)
+        } else {
+            gpu::Memory::Unknown
+        }
+    }
 }
 
 impl Default for Sample {

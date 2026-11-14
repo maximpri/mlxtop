@@ -289,6 +289,36 @@ pub(crate) fn source(devices: &[Device]) -> String {
     sources.join(" + ")
 }
 
+/// Where the GPUs' memory comes from, which decides how memory is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Memory {
+    /// The cards have memory of their own: `used` of `total`, all cards.
+    Dedicated { used: u64, total: u64 },
+    /// The GPU has no memory of its own: what it uses is system RAM (Apple
+    /// Silicon, and NVIDIA's integrated GPUs such as DGX Spark and Jetson).
+    Shared,
+    /// No GPU, or its readings did not arrive.
+    Unknown,
+}
+
+/// Classify the cards' memory. A card with its own memory reports a total.
+/// NVIDIA's integrated GPUs answer the other fields and report `[N/A]` for
+/// memory, because they have no dedicated framebuffer; a failed read
+/// answers nothing and stays unknown.
+pub(crate) fn memory(devices: &[Device]) -> Memory {
+    if let Some((used, total)) = memory_totals(devices).filter(|(_, total)| *total > 0) {
+        return Memory::Dedicated { used, total };
+    }
+    let answered = devices
+        .iter()
+        .any(|gpu| gpu.utilization.is_some() || gpu.temperature.is_some());
+    if answered && devices.iter().all(|gpu| gpu.total.is_none()) {
+        Memory::Shared
+    } else {
+        Memory::Unknown
+    }
+}
+
 pub(crate) fn memory_totals(devices: &[Device]) -> Option<(u64, u64)> {
     if devices.is_empty() {
         return None;

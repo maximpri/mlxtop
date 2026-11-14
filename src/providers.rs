@@ -381,7 +381,7 @@ pub(super) struct Adapter {
 }
 
 impl Adapter {
-    pub fn new() -> Self {
+    pub fn new(api_key: Option<String>) -> Self {
         Self {
             configured: env::var("MLXTOP_PROVIDER").ok(),
             usage_file: env::var_os("MLXTOP_USAGE_FILE").map(PathBuf::from),
@@ -397,7 +397,7 @@ impl Adapter {
             kobold_session: 0,
             answered: Cell::default(),
             llama: LlamaRate::default(),
-            endpoint: native::Endpoint::from_env(),
+            endpoint: native::Endpoint::from_env(api_key),
             metrics: native::MetricsHistory::default(),
             splash: splash::SplashHistory::default(),
             diagnostics: RefCell::default(),

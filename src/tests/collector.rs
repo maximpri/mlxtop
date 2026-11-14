@@ -1603,11 +1603,32 @@ fn a_stock_omlx_login_uses_the_key_in_its_own_settings() {
     let key = |provider: Option<&str>, omlx: Option<&str>, base: Option<&Path>| {
         omlx_api_key_from(
             provider.map(str::to_owned),
+            None,
             omlx.map(str::to_owned),
             Some(&home.0),
             base,
         )
     };
+    // The key set in mlxtop's Settings outranks what oMLX keeps for itself,
+    // and gives way only to mlxtop's own variable.
+    let configured = |provider: Option<&str>, set: &str| {
+        omlx_api_key_from(
+            provider.map(str::to_owned),
+            Some(set.to_owned()),
+            Some("from-omlx-env".into()),
+            Some(&home.0),
+            None,
+        )
+    };
+    assert_eq!(
+        configured(None, "from-config").as_deref(),
+        Some("from-config")
+    );
+    assert_eq!(
+        configured(Some("from-mlxtop"), "from-config").as_deref(),
+        Some("from-mlxtop")
+    );
+    assert_eq!(configured(None, "  ").as_deref(), Some("from-omlx-env"));
     assert_eq!(key(None, None, None).as_deref(), Some("from-settings"));
     assert_eq!(
         key(None, Some("from-omlx-env"), None).as_deref(),
@@ -1630,10 +1651,13 @@ fn a_stock_omlx_login_uses_the_key_in_its_own_settings() {
     other.write("base/settings.json", r#"{"auth":{"api_key":"from-base"}}"#);
     let bare = TempDir::new("omlx-no-wrapper");
     assert_eq!(
-        omlx_api_key_from(None, None, Some(&bare.0), Some(&other.0.join("base"))).as_deref(),
+        omlx_api_key_from(None, None, None, Some(&bare.0), Some(&other.0.join("base"))).as_deref(),
         Some("from-base")
     );
-    assert_eq!(omlx_api_key_from(None, None, Some(&bare.0), None), None);
+    assert_eq!(
+        omlx_api_key_from(None, None, None, Some(&bare.0), None),
+        None
+    );
 }
 
 #[test]

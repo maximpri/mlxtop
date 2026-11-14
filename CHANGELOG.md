@@ -90,15 +90,26 @@ release replaces.
 - **Messages name what is wrong:** `mlxtop dcotor` says `unknown command`,
   a `config.json` that does not parse is reported once, and Settings keeps a
   symlinked config linked and private.
-- **The memory panel says what holds memory.** GPU memory splits into the
-  model and the KV cache and everything else, against the GPU limit; RAM's
-  legend gives each kind's size; a line names the runtime's footprint and
-  the largest other app. Under them, each meter over time replaces the
-  trace of what was left: GPU memory against its limit and RAM by kind, in
-  dimmed colours, so a model load or a KV cache growing toward the limit
-  shows as a level rising. A narrow panel wraps the kinds' sizes onto a
-  second row. The GPU meters are the colour of wired RAM, which GPU memory
-  is part of. The sentence repeating the GPU meter is gone.
+- **The memory panel is laid out as the hardware is.** Where the GPU has
+  no memory of its own (Apple Silicon, and NVIDIA's integrated GPUs such as
+  DGX Spark and Jetson) there is one pool and one bar: what the GPU holds
+  is the first part of RAM's wired memory, split into the model and the KV
+  cache and everything else where the runtime gives the model's size. Under
+  it are how near the GPU is to its limit, what is left (free memory and
+  cache, or the room under the GPU limit where that is less), each part's
+  size, the runtime's footprint and the largest other app, and the same
+  pool over time in dimmed colours. Where cards have their own memory,
+  VRAM and RAM each get a meter and a chart. The trace of what was left and
+  the sentence repeating the GPU meter are gone.
+- **Each prompt shows the speed it generated at.** Under every bar of the
+  prompt-load chart, below its size: `24.5/s`. The count of generated
+  tokens moves one row down, on panels tall enough for both.
+- **Settings holds the inference engine's API key.** It is typed and shown
+  as dots, saved to a `config.json` readable by you only, and used at once.
+  `MLXTOP_PROVIDER_API_KEY` still overrides it. The first time in a session
+  that the engine asks for a key mlxtop does not have, or refuses the one in
+  the file, mlxtop opens Settings on the key, ready to type; Esc carries on
+  without it.
 - **One figure per fact.** The header's `LLM` and the memory panel's `by
   app` both give the runtime's footprint (the header gave its resident
   size: 7.2 GiB beside 23.4 GiB). The Journal's first row, `--once` and the

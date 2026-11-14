@@ -236,9 +236,11 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
             ChartMetric::Memory,
         )
     });
-    for label in ["18.0 / 27.0 GiB", "17.2 / 36.0 GiB"] {
+    // One pool: RAM's reading, and how near the GPU is to its limit.
+    for label in ["17.2 / 36.0 GiB", "GPU 67% of limit"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
+    assert!(!screen.contains("│GPU  "), "no second meter\n{screen}");
     assert!(!screen.contains("50%"), "no percentage axis\n{screen}");
     let screen = render_view(40, 4, |frame| {
         app.render_indicator_chart(
@@ -1853,9 +1855,10 @@ fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     for label in [
         "PRESSURE normal",
         // A narrow panel wraps the kinds; it never drops their sizes.
-        "█wired 3.2 █app 12.4 █comp 1.6",
-        "█cache 3.3 GiB",
-        "18.8 GiB left",
+        "█wired 3.2 █app 12.4",
+        "█comp 1.6 █cache 3.3 GiB",
+        // The GPU limit is nearer than what RAM has left.
+        "9.0 GiB to GPU limit",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
@@ -2250,73 +2253,166 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
             .unwrap();
         terminal.backend().buffer().clone()
     };
-    let buffer = draw(&app, 60, 20);
-    let text: String = (0..20)
-        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
-        .collect();
+    let render = |app: &App| {
+        let buffer = draw(app, 60, 20);
+        let text: String = (0..20)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        (buffer, text)
+    };
+    let (buffer, text) = render(&app);
     for label in [
-        "GPU",
-        "20.0 / 32.0 GiB",
-        "12.0 GiB left",
-        "RAM",
+        // One pool: all of RAM in one bar, and what is left of it.
+        "│RAM ",
         "28.0 / 36.0 GiB",
-        // The legend is the breakdown: each kind with its size.
-        "wired 20.0",
-        "app 6.0",
         "8.0 GiB left",
-        // Each meter over time: the chart's top, then whose it is.
-        "│32.0 GiB ",
-        "│     GPU ",
+        // How near wired memory is to the GPU limit, in words beside it.
+        "GPU at 63% of 32.0 GiB limit",
+        // The legend is the breakdown: each kind with its size.
+        "█wired 20.0 █app 6.0 █comp 2.0 █cache 4.0 GiB",
+        // The same pool over time, against all of RAM.
         "│36.0 GiB ",
-        "│     RAM ",
     ] {
         assert!(text.contains(label), "missing {label}\n{text}");
     }
+    // Memory is unified: the GPU is a part of the RAM bar, never a meter
+    // or a chart of its own.
+    assert!(!text.contains("│GPU "), "{text}");
+    assert!(!text.contains("32.0 GiB \n"), "{text}");
     assert!(!text.contains("resident"), "{text}");
-    assert!(
-        !text.contains("against the GPU limit"),
-        "no sentence repeats the meter"
-    );
-    // The GPU meter fills to wired over the limit.
-    // In the colour of wired RAM, which GPU memory is part of.
-    let fill = crate::memory_headroom::gpu_fill();
-    let filled = (0..60).filter(|x| buffer[(*x, 1)].bg == fill).count();
-    let track = (0..60).filter(|x| buffer[(*x, 1)].bg == EDGE).count();
-    assert!(
-        filled > track,
-        "20 of 32 GiB: {filled} filled, {track} empty"
-    );
-    // The model load shows in both charts as the wired colour rising:
-    // 4 GiB, then 20, of GPU memory and of RAM.
-    let wired = crate::memory_headroom::history_colors()[0];
+    // The model load shows as the GPU band rising: 4 GiB, then 20.
+    let gpu_band = crate::memory_headroom::history_colors()[0];
     let band = |x: u16| {
         (0..20)
-            .filter(|y| buffer[(x, *y)].bg == wired || buffer[(x, *y)].fg == wired)
+            .filter(|y| buffer[(x, *y)].bg == gpu_band || buffer[(x, *y)].fg == gpu_band)
             .count()
     };
     assert!(band(57) > band(30) + 2, "{} vs {}", band(57), band(30));
-    assert!(!text.contains("GPU limit"), "the chart's top is the limit");
 
-    // With Metal's own count and the model's size: model, then the rest.
-    app.collector.current.gpu_in_use = Some(24 * gib);
+    // With Metal's count and the model's size, wired RAM splits into the
+    // model, the rest of what the GPU holds, and wired RAM that is not its.
+    app.collector.current.gpu_in_use = Some(19 * gib);
     app.collector.current.llm_model_memory = Some(16 * gib);
-    let buffer = draw(&app, 60, 20);
-    let text: String = (0..20)
-        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
-        .collect();
-    assert!(text.contains("24.0 / 32.0 GiB"), "{text}");
-    assert!(text.contains("model 16.0"), "{text}");
-    assert!(text.contains("8.0 GiB"), "{text}");
-    app.collector.current.gpu_in_use = None;
-    app.collector.current.llm_model_memory = None;
-    // Wired past the limit says so, in red.
+    let (buffer, text) = render(&app);
+    for label in [
+        "█model 16.0",
+        "█KV cache & other 3.0",
+        "█other wired 1.0",
+        "GPU at 59% of 32.0 GiB limit",
+        "28.0 / 36.0 GiB",
+    ] {
+        assert!(text.contains(label), "missing {label}\n{text}");
+    }
+    let fill = crate::memory_headroom::gpu_fill();
+    let wired_cells = (0..60).filter(|x| buffer[(*x, 1)].bg == fill).count();
+    assert!(
+        wired_cells > 10,
+        "the model's part of the bar: {wired_cells}"
+    );
+    // The same RAM, so the bar's parts are the pool's: nothing counted twice.
+    assert!(text.matches("GiB left").count() == 1, "{text}");
+
+    // The GPU limit nearer than what RAM has left: that is the headroom.
+    app.collector.current.wired = 31 * gib;
+    app.collector.current.gpu_in_use = Some(30 * gib);
+    app.collector.current.anonymous = gib;
+    app.collector.current.compressor = 0;
+    app.collector.current.file_backed = 3 * gib;
+    let (buffer, text) = render(&app);
+    assert!(text.contains("2.0 GiB to GPU limit"), "{text}");
+    assert_eq!(buffer[(6, 1)].bg, YELLOW, "94% of the limit");
+    // Past the limit says so, in red.
     app.collector.current.wired = 33 * gib;
-    let buffer = draw(&app, 60, 20);
-    let text: String = (0..20)
-        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
-        .collect();
-    assert!(text.contains("over the limit"), "{text}");
+    app.collector.current.gpu_in_use = Some(33 * gib);
+    let (buffer, text) = render(&app);
+    assert!(text.contains("over the GPU limit"), "{text}");
     assert_eq!(buffer[(6, 1)].bg, RED);
+    // A count above wired RAM is not a part of it: the kinds stay whole.
+    app.collector.current.wired = 20 * gib;
+    app.collector.current.gpu_in_use = Some(24 * gib);
+    app.collector.current.llm_model_memory = None;
+    let (_, text) = render(&app);
+    assert!(
+        text.contains("█wired 20.0") && !text.contains("other wired"),
+        "{text}"
+    );
+    assert!(text.contains("GPU at 75% of 32.0 GiB limit"), "{text}");
+    app.collector.current.gpu_in_use = None;
+    app.collector.current.anonymous = 6 * gib;
+    app.collector.current.compressor = 2 * gib;
+    app.collector.current.file_backed = 4 * gib;
+
+    // Cards with memory of their own are a second pool: VRAM and RAM each
+    // get a meter, what is left, and a chart. Nothing of VRAM is in RAM.
+    let pools = |app: &App, memory: crate::gpu::Memory| {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                let columns = |width: usize| {
+                    app.composition_columns(40, width)
+                        .into_iter()
+                        .zip(app.gpu_memory_columns(40, width))
+                        .map(|(sizes, gpu)| {
+                            sizes.map(|sizes| crate::memory_headroom::Column {
+                                sizes,
+                                gpu,
+                                tone: Tone::Green,
+                            })
+                        })
+                        .collect()
+                };
+                crate::memory_headroom::draw_for(
+                    frame,
+                    frame.area(),
+                    &app.collector.current,
+                    memory,
+                    columns,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = (0..20)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        text
+    };
+    let text = pools(
+        &app,
+        crate::gpu::Memory::Dedicated {
+            used: 20 * gib,
+            total: 24 * gib,
+        },
+    );
+    for label in [
+        "VRAM ",
+        "20.0 / 24.0 GiB",
+        "4.0 GiB left",
+        "RAM ",
+        "28.0 / 36.0 GiB",
+        "8.0 GiB left",
+        "█wired 20.0 █app 6.0 █comp 2.0 █cache 4.0 GiB",
+        // Each pool over time, against its own size.
+        "24.0 GiB ",
+        "    VRAM ",
+        "36.0 GiB ",
+        "     RAM ",
+    ] {
+        assert!(text.contains(label), "missing {label}\n{text}");
+    }
+    assert!(
+        !text.contains("GPU limit") && !text.contains("other wired"),
+        "{text}"
+    );
+    // A GPU that shares RAM and gives no count of its part (DGX Spark):
+    // one pool, and a line saying there is no VRAM to look for.
+    app.collector.current.gpus = crate::gpu::parse("0, GPU-s, NVIDIA GB10, 42, [N/A], [N/A], 51\n");
+    app.collector.current.metal.resource_limit = None;
+    app.collector.current.mlx.recommended_working_set = None;
+    let text = pools(&app, crate::gpu::memory(&app.collector.current.gpus));
+    assert!(text.contains("GPU shares this RAM"), "{text}");
+    assert!(text.contains("28.0 / 36.0 GiB") && text.contains("8.0 GiB left"));
+    assert!(!text.contains("VRAM"), "{text}");
+    app.collector.current.gpus.clear();
 
     // No GPU limit known: RAM alone. A short panel keeps the meters only.
     app.collector.current.metal.resource_limit = None;
@@ -2862,7 +2958,7 @@ fn the_enlarged_memory_view_gives_each_kinds_size() {
         app.render_indicator_chart(frame, frame.area(), "memory", &history, ChartMetric::Memory)
     });
     assert!(
-        narrow.contains("█wired 3.2 █app 12.4 █comp 1.6") && narrow.contains("█cache 3.3 GiB"),
+        narrow.contains("█wired 3.2 █app 12.4") && narrow.contains("█comp 1.6 █cache 3.3 GiB"),
         "{narrow}"
     );
     assert!(

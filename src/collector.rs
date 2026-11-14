@@ -95,8 +95,8 @@ pub(crate) struct CollectorView {
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
     pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
-    /// GPU memory in use for each memory sample, where a GPU limit is known:
-    /// aligned one to one with `load_history`.
+    /// GPU memory in use for each memory sample, the cards' own or the
+    /// GPU's part of RAM: aligned one to one with `load_history`.
     pub(crate) gpu_memory_history: VecDeque<Option<u64>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
@@ -159,8 +159,8 @@ pub(crate) struct Collector {
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
     pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
-    /// GPU memory in use for each memory sample, where a GPU limit is known:
-    /// aligned one to one with `load_history`.
+    /// GPU memory in use for each memory sample, the cards' own or the
+    /// GPU's part of RAM: aligned one to one with `load_history`.
     pub(crate) gpu_memory_history: VecDeque<Option<u64>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
@@ -173,6 +173,8 @@ pub(crate) struct Collector {
     pub(crate) thresholds: Thresholds,
     /// The `omx` section the oMLX endpoint was resolved from.
     pub(crate) omx: Option<OmxConfig>,
+    /// The configured inference-engine key the client was built with.
+    pub(crate) api_key: Option<crate::config::Secret>,
     pub(crate) journal: JournalConfig,
     /// GPU load band the Journal last saw; `None` until the first reading.
     pub(crate) gpu_band: Option<GpuBand>,
@@ -292,6 +294,7 @@ impl Collector {
             history_limit,
             thresholds: Thresholds::from_config(&config),
             omx: config.omx.clone(),
+            api_key: config.api_key.clone(),
             journal: config.journal.clone().unwrap_or_default(),
             gpu_band: None,
             telemetry_online: None,
@@ -303,8 +306,11 @@ impl Collector {
     pub(crate) fn apply_config(&mut self, config: &Config) {
         self.thresholds = Thresholds::from_config(config);
         self.journal = config.journal.clone().unwrap_or_default();
-        if config.omx != self.omx {
+        // A new endpoint or key starts the client over: the old session
+        // and a remembered refusal belong to what was configured before.
+        if config.omx != self.omx || config.api_key != self.api_key {
             self.omx = config.omx.clone();
+            self.api_key = config.api_key.clone();
             self.llm_client = LlmTelemetryClient::from_config(config, self.home.clone());
         }
     }
@@ -751,11 +757,14 @@ impl Collector {
         while self.composition_history.len() > self.history_limit {
             self.composition_history.pop_front();
         }
-        // What the GPU meter reads: Metal's own count, else wired memory.
-        self.gpu_memory_history.push_back(
-            crate::memory_composition::gpu_limit(&sample)
-                .map(|_| sample.gpu_in_use.unwrap_or(sample.wired)),
-        );
+        // What the GPU holds: its own memory in use where the cards have
+        // any, else its part of RAM where the OS counts that.
+        self.gpu_memory_history
+            .push_back(match sample.gpu_memory() {
+                crate::gpu::Memory::Dedicated { used, .. } => Some(used),
+                crate::gpu::Memory::Shared => sample.gpu_in_use,
+                crate::gpu::Memory::Unknown => None,
+            });
         while self.gpu_memory_history.len() > self.history_limit {
             self.gpu_memory_history.pop_front();
         }

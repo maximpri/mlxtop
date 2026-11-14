@@ -35,6 +35,8 @@ pub(crate) struct LlmTelemetryClient {
     /// When a login was last refused: a wrong key is retried once a minute,
     /// not on every poll.
     login_refused_at: Option<Instant>,
+    /// The key set in mlxtop's own config, when there is one.
+    api_key: Option<String>,
     decode: crate::decode_tracker::DecodeTracker,
 }
 
@@ -42,7 +44,8 @@ impl LlmTelemetryClient {
     pub(crate) fn from_config(config: &Config, home: Option<PathBuf>) -> Self {
         let (host, port) = read_omlx_endpoint(config, home.as_deref());
         Self {
-            provider_adapter: providers::Adapter::new(),
+            provider_adapter: providers::Adapter::new(config.api_key()),
+            api_key: config.api_key(),
             home,
             host,
             port,
@@ -104,7 +107,8 @@ impl LlmTelemetryClient {
             crate::runtime_diagnostics::safe_endpoint(&format!("http://{authority}:{}", self.port))
                 .unwrap_or_else(|| "<invalid endpoint>".into());
         self.runtime.remote = !is_loopback_host(&self.host);
-        self.runtime.credentials_present = omlx_api_key(self.home.as_deref()).is_some();
+        self.runtime.credentials_present =
+            omlx_api_key(self.home.as_deref(), self.api_key.as_deref()).is_some();
         self.runtime.begin();
         let telemetry = if self.runtime.endpoint == "<invalid endpoint>" {
             self.runtime
@@ -323,7 +327,7 @@ impl LlmTelemetryClient {
                 .record::<()>("/admin/api/login", Err(ProbeIssue::RemoteAuthBlocked));
             return;
         }
-        let Some(api_key) = omlx_api_key(self.home.as_deref()) else {
+        let Some(api_key) = omlx_api_key(self.home.as_deref(), self.api_key.as_deref()) else {
             self.runtime
                 .record::<()>("/admin/api/login", Err(ProbeIssue::CredentialsMissing));
             return;
@@ -547,10 +551,10 @@ pub(crate) fn read_omlx_settings_api_key(base: &Path) -> Option<String> {
 }
 
 /// The oMLX admin key, from the first source that has one:
-/// `MLXTOP_PROVIDER_API_KEY`, oMLX's own `OMLX_API_KEY`, the wrapper's
-/// `~/.config/omlx-coding/server.env`, then oMLX's `settings.json` (in
-/// `OMLX_BASE_PATH`, by default `~/.omlx`).
-pub(crate) fn omlx_api_key(home: Option<&Path>) -> Option<String> {
+/// `MLXTOP_PROVIDER_API_KEY`, the key set in mlxtop's Settings, oMLX's own
+/// `OMLX_API_KEY`, the wrapper's `~/.config/omlx-coding/server.env`, then
+/// oMLX's `settings.json` (in `OMLX_BASE_PATH`, by default `~/.omlx`).
+pub(crate) fn omlx_api_key(home: Option<&Path>, configured: Option<&str>) -> Option<String> {
     // Tests read keys from files only, whatever the developer's shell holds.
     let var = |name: &str| {
         if cfg!(test) {
@@ -561,6 +565,7 @@ pub(crate) fn omlx_api_key(home: Option<&Path>) -> Option<String> {
     };
     omlx_api_key_from(
         var("MLXTOP_PROVIDER_API_KEY"),
+        configured.map(str::to_owned),
         var("OMLX_API_KEY"),
         home,
         env::var_os("OMLX_BASE_PATH").map(PathBuf::from).as_deref(),
@@ -569,6 +574,7 @@ pub(crate) fn omlx_api_key(home: Option<&Path>) -> Option<String> {
 
 pub(crate) fn omlx_api_key_from(
     provider_key: Option<String>,
+    configured: Option<String>,
     omlx_key: Option<String>,
     home: Option<&Path>,
     base_path: Option<&Path>,
@@ -578,6 +584,7 @@ pub(crate) fn omlx_api_key_from(
             .filter(|key| !key.is_empty())
     };
     set(provider_key)
+        .or_else(|| set(configured))
         .or_else(|| set(omlx_key))
         .or_else(|| read_omlx_api_key(home))
         .or_else(|| {

@@ -44,27 +44,35 @@ place when requests arrive or the model becomes idle; an empty prompt load is
 one line, and the host charts get its rows.
 
 **Memory** says what holds memory and how close it is to a limit, with the
-OS **PRESSURE** label in the reading slot.
+OS **PRESSURE** label in the reading slot. It is laid out as the hardware is.
 
-- **GPU** is GPU memory in use against the GPU wired limit (`24.0 / 32.0
-  GiB`). On Apple Silicon GPU memory is wired RAM. When the runtime reports
-  its model's size, the bar and the line under it split it: `model 16.0 ·
-  KV cache & other 8.0 GiB`, with what is left before the limit. The meter
-  is the colour of wired RAM, which it is part of; it turns orange from 90%
-  and red from 97%.
+Where the GPU has no memory of its own (Apple Silicon, and NVIDIA's
+integrated GPUs such as DGX Spark and Jetson, which report no device memory)
+there is one pool, and one bar:
+
 - **RAM** is memory in use (wired, app and compressed) against all of RAM,
-  with the file cache as the bar's last segment. Under it is what is left
-  (free memory plus the cache, which the OS gives back on demand) and each
-  kind's size. A narrow panel wraps the kinds onto a second row; it does not
-  drop their sizes.
+  with the file cache as the bar's last segment. What the GPU holds is part
+  of wired RAM and is the first part of the bar; where the runtime reports
+  its model's size, that part splits into the model and `KV cache & other`.
+  The rest of wired RAM follows as `other wired`. Near the GPU limit the
+  GPU's part turns orange from 90% and red from 97%.
+- Under the bar: how near GPU memory is to its limit (`GPU at 75% of 32.0
+  GiB limit`) and what is left for a model to grow into. That is free memory
+  plus the cache, which the OS gives back on demand, or the room under the
+  GPU limit where that is less (`2.0 GiB to GPU limit`). An integrated
+  NVIDIA GPU, whose part of RAM the driver does not count, reads `GPU shares
+  this RAM`.
+- Then each part's size. A narrow panel wraps them onto a second row; it
+  does not drop the sizes.
 - **By app** names the runtime's own footprint and the largest other app.
   The header's `LLM` figure is the same footprint.
-- Under them, each meter over time in dimmed colours: GPU memory against
-  its limit, which is the top of its chart, and RAM by kind against all of
-  RAM. A model load shows as both levels rising, a growing KV cache as GPU
-  memory creeping toward the top, another app as the app band. Samples
-  marked as part of a slowdown are marked here too. A short panel keeps the
-  RAM chart alone.
+- Under them, the same pool over time in dimmed colours, against all of
+  RAM: GPU memory, other wired RAM, app and compressed. A model load or a
+  growing KV cache shows as the GPU band rising, another app as the app
+  band. Samples marked as part of a slowdown are marked here too.
+
+Where cards have memory of their own there are two pools, so **VRAM** and
+**RAM** each get a meter with what is left, and a chart of their own.
 
 Without composition counters the history is an area of occupancy.
 
@@ -222,13 +230,16 @@ Without that file, it takes the port from `OMLX_PORT`, then from `server.port`
 default `~/.omlx`.
 
 oMLX's admin statistics (speeds, requests, cache) need its API key. mlxtop
-takes the first it finds: `MLXTOP_PROVIDER_API_KEY`, oMLX's own
+takes the first it finds: `MLXTOP_PROVIDER_API_KEY`, the **API key** in
+Settings (`api_key` in `config.json`), oMLX's own
 `OMLX_API_KEY`, an `API_KEY=` line in `server.env`, then `auth.api_key` in
 oMLX's `settings.json`. It sends the key only to a loopback address (unless
 `MLXTOP_ALLOW_REMOTE_AUTH=1`) and only when an oMLX process was found or oMLX
 was chosen (`MLXTOP_PROVIDER=omlx`, or an `omx` host or port in the config);
 another program answering on the port never receives it. With no key, the
-Overview says `No live rates: oMLX admin key not set`.
+Overview says `No live rates: oMLX admin key not set`, and the first time
+that happens in a session mlxtop opens Settings on the API key, ready to
+type (see [Settings](#settings)).
 
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
@@ -541,6 +552,16 @@ entered in MiB/s and stored in bytes per second.
 | `Esc` while editing | Cancel the edit |
 | `x` / `Delete` | Reset to the default by removing the key |
 
+**API key** is the key the monitored inference engine asks for: oMLX's admin
+key, or the key a server was started with. It is typed and shown as dots,
+never as its text; editing it again starts empty. Saving it makes
+`config.json` readable by you only. `MLXTOP_PROVIDER_API_KEY` overrides it,
+and the rules on where a key is sent are unchanged. The first time in a
+session that the engine asks for a key mlxtop does not have, or refuses the
+one in the file, mlxtop opens Settings on this field with the cursor in it:
+type or paste the key and press Enter. Esc carries on without it; host
+readings do not need a key.
+
 A saved change takes effect at once and is written to `config.json`, so the
 next start uses it too. Keys the view doesn't know are kept. A file that
 doesn't parse is shown with the error and never overwritten; fix it by hand.
@@ -617,6 +638,7 @@ you leave out keeps its built-in default.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
+| `api_key` | string | unset | Key sent to the monitored inference engine when it asks for one; `MLXTOP_PROVIDER_API_KEY` overrides it. Keep the file readable by you only (Settings does) |
 | `interval` | integer | 1 | Refresh interval in seconds (1–60) |
 | `history` | integer | 300 | Chart/journal history size (20–3600) |
 | `omx.host` | string | "127.0.0.1" | oMLX server host |
@@ -723,9 +745,12 @@ stale, an incomplete request reads `LAST SEEN`; completed request counts read
 `REPORTED`.
 
 On a panel tall enough to keep at least four rows of bars, a row under the
-size labels shows the tokens each request has generated, so the count needs
-no subtraction. The row depends on the panel's height alone, so the bars
-don't shrink when a request first generates output.
+size labels shows the speed each request generated at (`24.5/s`, or `24.5
+tok/s` where the bars are wide enough), so prompts can be compared by what
+they cost; a request that has generated nothing yet shows none. With one
+more row to spare, the tokens each request has generated go under that, so
+the count needs no subtraction. Both rows depend on the panel's height
+alone, so the bars don't shrink when a request first generates output.
 
 While the selected live request is still prefilling, its output line becomes
 a progress bar:
@@ -926,8 +951,9 @@ MLXTOP_PROVIDER=vllm MLXTOP_PROVIDER_URL=https://inference.example.net mlxtop
 `MLXTOP_PROVIDER_URL` overrides host/port and can include a reverse-proxy path
 prefix. Supply the server root (for example `https://host/llm`), **without** the
 endpoint suffix such as `/v1` or `/metrics`. HTTP and HTTPS are supported;
-HTTPS certificates are verified. Set `MLXTOP_PROVIDER_API_KEY` in the environment
-when the server requires bearer authentication. Remote credentials also require
+HTTPS certificates are verified. Set the API key in Settings, or
+`MLXTOP_PROVIDER_API_KEY` in the environment, when the server requires bearer
+authentication. Remote credentials also require
 `MLXTOP_ALLOW_REMOTE_AUTH=1`, preserving the existing authentication opt-in.
 Keys are never printed or stored
 in usage reports. Redirects and environment proxies are disabled; credentials

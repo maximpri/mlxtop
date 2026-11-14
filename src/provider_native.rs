@@ -20,10 +20,15 @@ pub(super) struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn from_env() -> Self {
+    /// The endpoint from the environment; the key from
+    /// `MLXTOP_PROVIDER_API_KEY`, else the one set in mlxtop's Settings.
+    pub fn from_env(configured_key: Option<String>) -> Self {
         Self {
             url: env::var("MLXTOP_PROVIDER_URL").ok(),
-            api_key: env::var("MLXTOP_PROVIDER_API_KEY").ok(),
+            api_key: env::var("MLXTOP_PROVIDER_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+                .or(configured_key),
             allow_remote_auth: env::var("MLXTOP_ALLOW_REMOTE_AUTH").is_ok_and(|value| value == "1"),
         }
     }

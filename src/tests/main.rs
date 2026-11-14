@@ -48,6 +48,7 @@ pub(super) fn defaults() -> Thresholds {
  * from the built-in default and survives normalization unchanged.
  */
 pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
+    "api_key": "test-key-not-a-secret",
     "interval": 7,
     "history": 1234,
     "omx": { "host": "10.1.2.3", "port": 9999 },
@@ -122,6 +123,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         diagnostics_scroll: 0,
         diagnostics_max_scroll: Default::default(),
         journal_max_scroll: Default::default(),
+        key_prompted: false,
         compact: Default::default(),
         quit: false,
         quit_prompt: false,
