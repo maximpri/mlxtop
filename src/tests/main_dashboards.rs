@@ -3041,3 +3041,36 @@ fn the_oldest_journal_event_is_reachable_with_wrapped_rows() {
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.journal_scroll, before - 1);
 }
+
+#[test]
+fn a_short_compression_panel_keeps_a_trickle_small() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let draw = |app: &App| {
+        render_view(75, 4, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "compression",
+                &app.collector.compression_history,
+                ChartMetric::Compression,
+            )
+        })
+    };
+    // 16 KiB/s against a warning rate of tens of MiB/s: a baseline, not bars.
+    app.collector.compression_history.clear();
+    for _ in 0..60 {
+        push_history_with_tone(
+            &mut app.collector.compression_history,
+            Some(16_000),
+            Tone::Green,
+            120,
+        );
+    }
+    let trickle = draw(&app);
+    assert!(
+        !trickle.contains('▇') && !trickle.contains('█'),
+        "{trickle}"
+    );
+    assert!(trickle.contains('▁'), "the trickle still shows: {trickle}");
+}

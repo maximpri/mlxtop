@@ -696,6 +696,13 @@ impl App {
             metric,
             ChartMetric::Memory | ChartMetric::Gpu | ChartMetric::Cache
         );
+        // Paging and compression are judged against their warning rates, as
+        // on the full chart: a trickle stays a small bar, not a full one.
+        let floor = match metric {
+            ChartMetric::Swap => self.thresholds.swap_warn_rate,
+            ChartMetric::Compression => self.thresholds.compression_warn_rate,
+            _ => 1,
+        };
         let ceiling = if percent {
             100
         } else {
@@ -704,6 +711,7 @@ impl App {
                 .filter_map(|point| point.value)
                 .max()
                 .unwrap_or(0)
+                .max(floor)
                 .max(1)
         };
         for (column, point) in points.iter().enumerate() {
