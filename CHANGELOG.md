@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.1-rc.1 — 2026-11-14
+## 3.3.1-rc.2 — 2026-11-14
 
 Fixes from a full review of 3.3.0. **Update with the install script or
 Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS crates this
@@ -90,6 +90,10 @@ release replaces.
 - **Messages name what is wrong:** `mlxtop dcotor` says `unknown command`,
   a `config.json` that does not parse is reported once, and Settings keeps a
   symlinked config linked and private.
+- **A short compression or paging panel keeps a trickle small.** At two
+  rows tall the panel scaled to its own peak, so 16 KiB/s of compression
+  drew full bars; it now scales against the warning rate, as the taller
+  chart does.
 - Smaller fixes: `CPU 0.0%`, not `-0.0%`; `1 request waiting`; the paging
   panel says `memory is short` only from the warning rate; the
   discrete-GPU layout drops `% resident` and `No paging traffic`.
