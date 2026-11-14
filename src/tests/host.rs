@@ -58,3 +58,30 @@ fn clock_reports_the_local_offset_for_request_times() {
         assert_eq!(parse_utc_offset(invalid), None, "{invalid}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn command_output_does_not_depend_on_the_callers_locale() {
+    // Commands run with numbers in the C locale and no `LC_ALL` override.
+    assert_eq!(
+        System
+            .command("sh", &["-c", "echo ${LC_ALL-unset} $LC_NUMERIC"])
+            .as_deref(),
+        Some("unset C\n")
+    );
+    if cfg!(target_os = "macos") {
+        let cpu = System
+            .command("/bin/ps", &["-o", "%cpu=", "-p", "1"])
+            .unwrap();
+        assert!(!cpu.contains(','), "{cpu:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn command_output_with_invalid_utf8_is_kept() {
+    let output = System
+        .command("/usr/bin/printf", &["a\\n\\377\\n"])
+        .expect("an undecodable byte must not discard the reading");
+    assert_eq!(output.lines().next(), Some("a"));
+}

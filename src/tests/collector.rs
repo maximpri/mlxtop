@@ -1386,3 +1386,18 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
         .count();
     assert_eq!(again, 2);
 }
+
+#[test]
+fn a_completion_log_tail_that_starts_inside_a_character_is_still_read() {
+    let home = TempDir::new("omlx-log-tail");
+    // 256 KiB + 2 bytes: the tail starts one byte into a three-byte `→`.
+    let mut text = String::from("x→");
+    text.push_str(&"y".repeat(256 * 1024 - 2));
+    text.push_str(
+        "\nChat completion: model=qwen, 7 tokens in 1.0s (7.0 tok/s), prompt: 3, cached: 0\n",
+    );
+    home.write(".omlx-coding/logs/server.log", &text);
+    let stats = read_latest_completion(&home.0.join(".omlx-coding/logs/server.log"))
+        .expect("the tail must be decoded lossily");
+    assert_eq!(stats.model.as_deref(), Some("qwen"));
+}

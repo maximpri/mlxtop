@@ -35,8 +35,10 @@ pub(crate) fn read_latest_completion(path: &Path) -> Option<LlmLogStats> {
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(256 * 1024);
     file.seek(SeekFrom::Start(start)).ok()?;
-    let mut text = String::new();
-    file.read_to_string(&mut text).ok()?;
+    // The tail can start inside a multi-byte character; decode what is there.
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     let mut stats = text
         .lines()
         .filter_map(parse_llm_completion_line)

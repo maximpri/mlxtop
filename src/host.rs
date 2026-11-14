@@ -19,7 +19,16 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
                 .join(",")
         )
     };
-    let mut child = match Command::new(program)
+    let mut builder = Command::new(program);
+    // Numbers are parsed with a dot whatever the user's locale: `ps` and
+    // `sysctl` print `2,6` under a comma-decimal locale. Text stays UTF-8.
+    builder.env_remove("LC_ALL").env("LC_NUMERIC", "C");
+    if let Ok(all) = std::env::var("LC_ALL") {
+        if !all.is_empty() {
+            builder.env("LC_CTYPE", all);
+        }
+    }
+    let mut child = match builder
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -43,9 +52,11 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
     };
     let command_context = command();
     let reader = thread::spawn(move || {
-        let mut output = String::new();
-        match stdout.read_to_string(&mut output) {
-            Ok(_) => Some(output),
+        // One undecodable byte (a process argument in another encoding)
+        // must not discard the whole reading.
+        let mut output = Vec::new();
+        match stdout.read_to_end(&mut output) {
+            Ok(_) => Some(String::from_utf8_lossy(&output).into_owned()),
             Err(error) => {
                 diagnostics_log(
                     "WARN",
