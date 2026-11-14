@@ -621,8 +621,9 @@ pub(crate) fn signal_summary(sample: &Sample) -> String {
             llm_generation_rate_label(sample)
         ),
         "LLM READY" => format!(
-            "{} process(es) · {} · {} · cache {}",
+            "{} process{} · {} · {} · cache {}",
             sample.llm_count,
+            if sample.llm_count == 1 { "" } else { "es" },
             llm_generation_rate_label(sample),
             llm_prefill_rate_label(sample),
             percent(sample.llm_cache_efficiency)

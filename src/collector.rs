@@ -11,8 +11,8 @@ use crate::domain::{
     MIB,
 };
 use crate::formatting::{
-    bytes, compact_tokens, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
-    pressure_state_label, rate,
+    bytes, compact_label, compact_tokens, llm_generation_rate_label, llm_model_label,
+    llm_prefill_rate_label, pressure_state_label, rate,
 };
 use crate::history::{
     compression_tone, delta, paging_tone, push_history, push_history_with_tone, rate_bytes,
@@ -144,6 +144,8 @@ pub(crate) struct Collector {
     pub(crate) stall_row_skipped: bool,
     /// The runtime connection state last written to the log.
     pub(crate) runtime_logged: Option<String>,
+    /// Why config.json was ignored at start, told once in the Journal.
+    pub(crate) config_ignored: Option<String>,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
@@ -184,13 +186,15 @@ const GPU_SATURATED_EXIT_GAP: u64 = 10;
 
 impl Collector {
     pub(crate) fn new(history_limit: usize, config: Config) -> Self {
-        Self::with_host(
+        let mut collector = Self::with_host(
             history_limit,
             config,
             host::system(),
             Platform::current(),
             crate::config::home_dir(),
-        )
+        );
+        collector.config_ignored = crate::config::config_ignored();
+        collector
     }
 
     pub(crate) fn with_host(
@@ -261,6 +265,7 @@ impl Collector {
             last_stall_row: None,
             stall_row_skipped: false,
             runtime_logged: None,
+            config_ignored: None,
             slow_read_at: None,
             session: Default::default(),
             current: Sample::default(),
@@ -710,7 +715,7 @@ impl Collector {
             .filter(|speed| speed.is_finite() && *speed > 0.0)
             .filter(|_| sample.disk.read.is_some())
         {
-            if self.decode_reads.len() >= self.history_limit {
+            while self.decode_reads.len() >= self.history_limit.max(1) {
                 self.decode_reads.pop_front();
             }
             self.decode_reads.push_back(crate::domain::DecodeRead {
@@ -1279,6 +1284,18 @@ impl Collector {
                 ),
                 Tone::Cyan,
             );
+            // A config that did not parse is ignored; say so once, where
+            // the session starts.
+            if let Some(reason) = self.config_ignored.clone() {
+                add(
+                    "SYSTEM",
+                    format!(
+                        "config.json ignored: {} · open Settings (4)",
+                        compact_label(&reason, 60)
+                    ),
+                    Tone::Yellow,
+                );
+            }
             if sample.llm_provider != "none" && sample.llm_model != "not detected" {
                 add(
                     "LLM",

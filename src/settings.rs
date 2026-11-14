@@ -451,15 +451,22 @@ impl Settings {
 
     /// Write to a temporary file beside the config, then rename it over the
     /// config, so an interrupted save never leaves half a file.
-    fn write(&self, doc: &Map<String, Value>) -> std::io::Result<()> {
+    pub(crate) fn write(&self, doc: &Map<String, Value>) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
+        // A config kept in a dotfiles repository is a symlink: write to its
+        // target, so the link survives and later edits there still apply.
+        let target = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
         let mut text = serde_json::to_string_pretty(doc)?;
         text.push('\n');
-        let temporary = self.path.with_extension("json.tmp");
+        let temporary = target.with_extension("json.tmp");
         fs::write(&temporary, text)?;
-        fs::rename(&temporary, &self.path)
+        // Keep the file's permissions: a private file stays private.
+        if let Ok(metadata) = fs::metadata(&target) {
+            fs::set_permissions(&temporary, metadata.permissions())?;
+        }
+        fs::rename(&temporary, &target)
     }
 }
 

@@ -253,7 +253,8 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
     let insight = &sample.correlation;
     if let Some((usual, slow_below)) = insight.usual_speed {
         lines.push(format!(
-            "Usual generation speed {usual:.1} tok/s{} · slow below {slow_below:.1}",
+            "Usual {} speed {usual:.1} tok/s{} · slow below {slow_below:.1}",
+            insight.phase.word(),
             usual_for(insight)
         ));
     }

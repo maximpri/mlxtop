@@ -1287,7 +1287,7 @@ fn gpu_and_llm_summaries_prefer_correlation_and_rates() {
         llm_count: 2,
         ..Sample::default()
     };
-    assert!(signal_summary(&ready).starts_with("2 process(es) · "));
+    assert!(signal_summary(&ready).starts_with("2 processes · "));
 }
 
 #[test]
@@ -1453,4 +1453,35 @@ fn the_static_report_says_plainly_when_no_runtime_was_found() {
     let line = text.lines().find(|line| line.starts_with("LLM ")).unwrap();
     assert_eq!(line.trim_end(), "LLM          none detected");
     assert!(!text.contains("·  ·"));
+}
+
+#[test]
+fn command_line_errors_name_the_word_at_fault() {
+    let error = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        match parse_args(&args, &Config::default()) {
+            Err(error) => error.to_string(),
+            Ok(_) => String::from("accepted"),
+        }
+    };
+    assert_eq!(
+        error(&["dcotor"]),
+        "unknown command: dcotor; see mlxtop --help"
+    );
+    assert_eq!(
+        error(&["-i", "abc"]),
+        "interval must be a whole number of seconds (got \"abc\")"
+    );
+    assert_eq!(
+        error(&["-n", "x"]),
+        "history must be a whole number of samples (got \"x\")"
+    );
+    assert_eq!(
+        error(&["update", "--rc", "extra"]),
+        "unknown option for update: extra"
+    );
+    assert_eq!(
+        error(&["doctor", "--record", "f.jsonl"]),
+        "doctor cannot be combined with --record"
+    );
 }

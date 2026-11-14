@@ -108,7 +108,7 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
 pub(super) fn assess(sample: &Sample) -> Finding {
     let mut finding = assess_observation(sample);
     if sample.llm_remote {
-        if finding.title.ends_with("requests waiting") {
+        if finding.title.ends_with(" waiting") {
             finding.title = format!("Remote runtime: {}", finding.title);
             finding.evidence = "Remote request queue".into();
         } else {
@@ -265,7 +265,12 @@ fn assess_observation(sample: &Sample) -> Finding {
             .llm_waiting_requests
             .is_some_and(|waiting| waiting > 0)
     {
-        finding.title = format!("{} requests waiting", count(sample.llm_waiting_requests));
+        let waiting = sample.llm_waiting_requests.unwrap_or_default();
+        finding.title = format!(
+            "{} request{} waiting",
+            count(sample.llm_waiting_requests),
+            if waiting == 1 { "" } else { "s" }
+        );
         finding.context = format!(
             "{} active · {}",
             count(sample.llm_active_requests),

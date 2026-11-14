@@ -164,7 +164,7 @@ pub(crate) fn lines(
         });
         for (usage, timing) in slowest.iter().take(3) {
             lines.push(format!(
-                "  slow: {} · {:.0} tok/s · {} prompt · {}",
+                "  slowest: {} · {:.0} tok/s · {} prompt · {}",
                 usage.id,
                 usage.output.unwrap_or(0) as f64 / timing.decode,
                 compact_tokens(usage.prompt),

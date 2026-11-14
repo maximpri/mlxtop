@@ -260,3 +260,27 @@ fn the_view_lists_every_setting_and_shows_the_file() {
     let screen = render_app(&app, 80, 24);
     assert!(screen.contains("Compression clears below"));
 }
+
+#[cfg(unix)]
+#[test]
+fn saving_keeps_a_symlinked_config_linked_and_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("settings-symlink");
+    let target = dir.write("dotfiles/mlxtop.json", "{\"interval\": 2}\n");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let link = dir.0.join("config.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let settings = Settings::new(link.clone());
+    let mut doc = serde_json::Map::new();
+    doc.insert("interval".into(), serde_json::json!(3));
+    settings.write(&doc).unwrap();
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_to_string(&target)
+        .unwrap()
+        .contains("\"interval\": 3"));
+    let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}

@@ -66,6 +66,13 @@ pub(crate) fn load_config() -> Config {
     load_config_from(&config_path())
 }
 
+/// Why the config file was ignored at start, so the screen can say so once.
+static CONFIG_IGNORED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(crate) fn config_ignored() -> Option<String> {
+    CONFIG_IGNORED.lock().ok().and_then(|reason| reason.clone())
+}
+
 pub(crate) fn load_config_from(config_path: &Path) -> Config {
     match fs::read_to_string(config_path) {
         Ok(text) => match serde_json::from_str::<Config>(&text) {
@@ -83,6 +90,9 @@ pub(crate) fn load_config_from(config_path: &Path) -> Config {
                     "config_parse_error",
                     format!("path={} error={}", config_path.display(), e),
                 );
+                if let Ok(mut ignored) = CONFIG_IGNORED.lock() {
+                    *ignored = Some(e.to_string());
+                }
                 Config::default()
             }
         },

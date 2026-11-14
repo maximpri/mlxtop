@@ -106,7 +106,14 @@ pub(crate) fn parse_args(
             [flag] if flag == "-h" || flag == "--help" => {
                 Ok(CliAction::Print(help_text(Platform::current())))
             }
-            [option, ..] => Err(format!("unknown option for update: {option}").into()),
+            // Name the word that is wrong, not a valid flag before it.
+            options => {
+                let wrong = options
+                    .iter()
+                    .find(|option| !matches!(option.as_str(), "--rc" | "-h" | "--help"))
+                    .unwrap_or(&options[0]);
+                Err(format!("unknown option for update: {wrong}").into())
+            }
         };
     }
     if let Some(("replay", options)) = args
@@ -153,11 +160,17 @@ pub(crate) fn parse_args(
             "doctor" if i == 0 => doctor = true,
             "-i" | "--interval" => {
                 i += 1;
-                interval = args.get(i).ok_or("missing interval")?.parse()?;
+                let value = args.get(i).ok_or("missing interval")?;
+                interval = value.parse().map_err(|_| {
+                    format!("interval must be a whole number of seconds (got \"{value}\")")
+                })?;
             }
             "-n" | "--history" => {
                 i += 1;
-                history = args.get(i).ok_or("missing history")?.parse()?;
+                let value = args.get(i).ok_or("missing history")?;
+                history = value.parse().map_err(|_| {
+                    format!("history must be a whole number of samples (got \"{value}\")")
+                })?;
             }
             "-1" | "--once" => once = true,
             "--record" => {
@@ -166,7 +179,11 @@ pub(crate) fn parse_args(
             }
             "-V" | "--version" => return Ok(CliAction::Print(format!("mlxtop {VERSION}"))),
             "-h" | "--help" => return Ok(CliAction::Print(help_text(Platform::current()))),
-            value if !value.starts_with('-') && i == 0 => interval = value.parse()?,
+            value if !value.starts_with('-') && i == 0 => {
+                interval = value
+                    .parse()
+                    .map_err(|_| format!("unknown command: {value}; see mlxtop --help"))?
+            }
             value => return Err(format!("unknown option: {value}").into()),
         }
         i += 1;
@@ -180,6 +197,9 @@ pub(crate) fn parse_args(
     if doctor {
         if once {
             return Err("doctor cannot be combined with --once".into());
+        }
+        if record.is_some() {
+            return Err("doctor cannot be combined with --record".into());
         }
         return Ok(CliAction::Doctor { interval, history });
     }
@@ -200,6 +220,12 @@ pub(crate) fn run_once(
     collector.sample();
     thread::sleep(interval);
     let sample = collector.sample();
+    if let Some(reason) = &collector.config_ignored {
+        writeln!(
+            out,
+            "NOTE         config.json ignored, defaults used: {reason}"
+        )?;
+    }
     write_static(
         out,
         &sample,

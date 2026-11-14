@@ -646,7 +646,8 @@ impl App {
             }
             return;
         }
-        if self.help || self.tab != 0 {
+        // The charts under an overlay are not what the pointer is on.
+        if self.help || self.summary_open || self.quit_prompt || self.tab != 0 {
             return;
         }
         let Some(chart) = self.charts.at(mouse.column, mouse.row) else {

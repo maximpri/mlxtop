@@ -96,7 +96,7 @@ fn a_session_counts_work_energy_and_the_speed_each_cause_cost() {
         "generation stalled",
         "Requests: 1 · time went to queue 9% · prompt 45% · answer 45%",
         "first token: median 12s · slowest 12s",
-        "slow: a · 40 tok/s · 30.0k prompt",
+        "slowest: a · 40 tok/s · 30.0k prompt",
         "KV cache: 91% of prompt tokens served from cache since the runtime started · ≈5m 0s of prefill saved while watched",
         "Energy: 1.53 J per token written",
     ] {
