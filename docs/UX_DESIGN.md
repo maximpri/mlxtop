@@ -310,7 +310,7 @@ colors in time-series history instead of recoloring old samples on refresh.
 
 ## Interaction and review
 
-- Preserve the three views: Overview, Processes and Journal. Place request load
+- Preserve the four views: Overview, Processes, Journal and Settings. Place request load
   in Overview, with contextual history controls and a clear selected marker.
 - Tab/Shift-Tab switch views globally, including from an expanded chart or
   an active process filter. In Overview, arrow keys select charts. Mouse clicks select,

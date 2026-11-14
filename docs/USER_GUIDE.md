@@ -14,9 +14,11 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 | Settings | How is mlxtop configured? | Every `config.json` option with its current value and default, editable in place |
 
 The **top bar** holds the views, a heartbeat spinner that turns with every
-sample (a frozen spinner means sampling stopped or is paused), the refresh
-interval and the time window every Overview chart shares, for example
-`every 1s · window 46s`.
+sample, the refresh interval and the time window every Overview chart shares,
+for example `every 1s · window 46s`. When no sample has arrived for three
+intervals it reads `NO SAMPLE 12s` in red instead of the spinner, and
+`STOPPED` when sampling has ended (the assessment then says `Sampling
+stopped`; the log has the reason).
 
 Overview starts with the **runtime card**: the provider, engine and model, a
 status badge, and the machine along its bottom edge (device, GPU cores, a GPU
@@ -32,10 +34,10 @@ Below it, a one-line **assessment** leads with an icon: ✓ for
 Evidence follows only when something is wrong, and a second line appears only
 for a suggested check (→) or a missing reading worth knowing about.
 
-The **host row** takes the remaining height: **memory**, **compression** and
-**paging / I/O** on macOS (memory spans two columns on Linux and Windows).
-**Prompt load** spans two columns of the next row, with **cache** above
-**queue** in the third. **Generation**, **prefill** and **GPU** share a compact
+The **host row** takes the remaining height: **memory**, **KV cache / model
+I/O** and **paging / I/O** on macOS (memory spans two columns on Linux and
+Windows). **Prompt load** spans two columns of the next row, with
+**compression** above **queue** in the third. **Generation**, **prefill** and **GPU** share a compact
 row, and the bottom **recent Journal** shows timestamped changes, newest
 first. Select a chart and press Enter for its full view. Each panel keeps its
 place when requests arrive or the model becomes idle; an empty prompt load is
@@ -492,6 +494,14 @@ that a corresponding process exists on the machine running mlxtop.
 | `s` | Cycle sort: RSS, CPU, PID, name |
 | `f` / `/` | Enter a text filter |
 | `c` | Clear the filter |
+
+### Session summary
+
+`u` opens what the session amounted to: how long the model was watched and
+worked, the speed each cause cost, where requests' time went (queue, prompt,
+answer) with the slowest answers, the time the prompt cache saved and the
+energy per token. The same summary is printed when mlxtop exits, if the model
+did any work.
 
 ### Journal
 

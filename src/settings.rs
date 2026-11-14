@@ -160,7 +160,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "memory_warn_load",
         section: "Thresholds",
         label: "Memory warning",
-        help: "Unavailable memory that turns Linux pressure yellow. macOS uses its own pressure level.",
+        help: "Unavailable memory that turns Linux pressure to a warning. macOS uses its own pressure level.",
         kind: percent(MEMORY_WARN_LOAD),
     },
     Field {
@@ -174,7 +174,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "gpu_warn_load",
         section: "Thresholds",
         label: "GPU busy",
-        help: "GPU load reported as busy and shown in yellow.",
+        help: "GPU load reported as busy.",
         kind: percent(GPU_WARN_LOAD),
     },
     Field {

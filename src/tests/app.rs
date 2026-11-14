@@ -1495,3 +1495,12 @@ fn plain_text_output_drops_control_characters() {
     assert!(!text.bytes().any(|b| b < 0x20 && b != b'\n'), "{text:?}");
     assert!(text.contains("a[31mb · ]0;titlemodelx\n"), "{text:?}");
 }
+
+#[test]
+fn help_text_names_every_view_and_the_runtime_variables() {
+    let help = crate::cli::help_text(Platform::MacOs);
+    for word in ["2 processes", "4 settings", "p pause", "r reset", "MLXTOP_PROVIDER"] {
+        assert!(help.contains(word), "help lacks {word}");
+    }
+    assert!(!help.contains("2 top"));
+}

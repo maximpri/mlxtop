@@ -22,8 +22,8 @@ cargo build --release --locked
 
 ### Coverage gate
 
-Production line coverage must stay at or above 90 percent on each supported
-platform. Install the tools once, then run the gate:
+Production line coverage must stay at or above 90 percent on macOS and
+Linux, the platforms CI measures (Windows code has no coverage gate). Install the tools once, then run the gate:
 
 ~~~sh
 cargo install cargo-llvm-cov --locked

@@ -96,7 +96,9 @@ mlxtop doctor     # check the runtime connection and which readings are availabl
 ```
 
 Memory and GPU readings appear straight away, even with no model loaded. Start
-your runtime, send it a prompt, and watch Overview while it answers.
+your runtime, send it a prompt, and watch Overview while it answers. The
+dashboard needs a terminal of at least 72×24; smaller, it shows the verdict
+and a note.
 
 | View | What it shows |
 | --- | --- |
@@ -125,7 +127,8 @@ where each reading comes from.
 | [oMLX](docs/USER_GUIDE.md#omlx-telemetry) | ✓ | Models, prompt and generation speed, requests with prefill progress, cache activity; follows oMLX serving through Splash |
 | [Splash](https://github.com/incoai/splash) | ✓ | Running and waiting requests, prefill progress, decode and prefill speed, prefix-cache reuse, Metal memory, DFlash acceptance, TTFT |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | ✓ | Generation and prefill rates, running requests with their own speeds, prefix-cache reuse, MLX memory (start it with `--metrics`; sushi's `sushi:` gauges are read too) |
-| vLLM, SGLang | ✓ | Active and waiting queues, server token rates, KV-cache occupancy, mean first-token time |
+| vLLM | ✓ | Active and waiting queues, server token rates, KV-cache occupancy, mean first-token time |
+| SGLang | after completion | Active and waiting queues, completed-request token rates, KV-cache occupancy, prefix-cache reuse |
 | [Strata](https://github.com/niko1221/strata) | ✓ | Live engine decode and prefill rates, active and waiting queues, KV-cache occupancy, prefix-cache reuse, mean first-token time, engine GPU memory |
 | llama.cpp | ✓ | Active slots, output counts and live generation speed; average rates and queues when `/metrics` is enabled |
 | KoboldCpp | last request | Input and output counts and rates |

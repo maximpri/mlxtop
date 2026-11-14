@@ -74,15 +74,18 @@ pub(crate) fn help_text(platform: Platform) -> String {
         "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
          update installs the latest release in place; --rc includes release candidates\n\
          replay reads a recording back through the detection rules and reports what fires\n\
-         Options: -i, --interval N  refresh interval (default 1)\n\
-         -n, --history N    chart/journal history (20–3600)\n\
-         -1, --once         static report\n\
-         --record FILE      append every sample to FILE (one JSON line, about 3 KB, each)\n\
-         -V, --version      show version\n\
-         -h, --help         show help\n\
+         Options:\n\
+         \x20 -i, --interval N  refresh interval in seconds, 1–60 (default 1)\n\
+         \x20 -n, --history N   chart and journal history, 20–3600 samples\n\
+         \x20 -1, --once        static report\n\
+         \x20 --record FILE     append every sample to FILE (one JSON line, about 3 KB, each)\n\
+         \x20 -V, --version     show version\n\
+         \x20 -h, --help        show help\n\
+         Runtime selection: MLXTOP_PROVIDER, MLXTOP_PROVIDER_PORT, MLXTOP_PROVIDER_URL,\n\
+         \x20 MLXTOP_PROVIDER_API_KEY, MLXTOP_USAGE_FILE (see mlxtop doctor)\n\
          Config file: {}\n\
          Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
-         Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · d diagnostics · u session summary · ? help",
+         Interactive keys: q quit · 1 overview · 2 processes · 3 journal · 4 settings · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · p pause · r reset · a acknowledge alarm · d diagnostics · u session summary · ? help",
         if platform == Platform::Windows {
             r"%USERPROFILE%\.config\mlxtop\config.json"
         } else {
