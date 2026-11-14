@@ -77,7 +77,7 @@ pub(crate) fn help_text(platform: Platform) -> String {
          Options: -i, --interval N  refresh interval (default 1)\n\
          -n, --history N    chart/journal history (20–3600)\n\
          -1, --once         static report\n\
-         --record FILE      append every sample to FILE (one JSON line each)\n\
+         --record FILE      append every sample to FILE (one JSON line, about 3 KB, each)\n\
          -V, --version      show version\n\
          -h, --help         show help\n\
          Config file: {}\n\

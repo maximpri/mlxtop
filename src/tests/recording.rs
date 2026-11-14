@@ -159,3 +159,80 @@ fn a_new_recording_is_readable_by_its_owner_only() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(mode, 0o600);
 }
+
+#[test]
+fn replay_reports_findings_after_hundreds_of_requests() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let swap = thresholds.swap_warn_rate * 2;
+    let mut samples = Vec::new();
+    // 130 short requests: a PROMPT and a DONE row each fill the Journal.
+    for request in 0..130u64 {
+        let mut busy = decoding(request * 3, 50.0, 0);
+        busy.llm_requests[0].id = format!("r{request}");
+        samples.push(busy);
+        let mut idle = decoding(request * 3 + 1, 50.0, 0);
+        idle.llm_requests[0].id = format!("r{request}");
+        idle.llm_requests[0].completed = true;
+        idle.llm_status = "idle".into();
+        idle.llm_active_requests = Some(0);
+        idle.llm_generation_tps_live = false;
+        samples.push(idle);
+    }
+    let base = 130 * 3 + 10;
+    for second in 0..12 {
+        samples.push(decoding(base + second, 50.0, 0));
+    }
+    for second in 12..24 {
+        samples.push(decoding(base + second, 20.0, swap));
+    }
+    for sample in &mut samples {
+        sample.updated = format!(
+            "{}",
+            sample
+                .llm_observed_at
+                .unwrap()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
+    }
+    let result = replay(&mut samples, thresholds);
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|(_, state, _)| state == "SLOWDOWN"),
+        "{:?}",
+        result.findings
+    );
+}
+
+#[test]
+fn replay_reports_lines_it_could_not_read() {
+    let good = serde_json::to_string(&decoding(1, 50.0, 0)).unwrap();
+    let text = format!("{good}\nnot json\n{{\"other\": 1}}\n\n{good}\n");
+    let (samples, skipped) = read_counted(text.as_bytes()).unwrap();
+    assert_eq!(
+        samples.len(),
+        2,
+        "the bad line in the middle must not stop reading"
+    );
+    assert_eq!(skipped, 2);
+    let report = Replay {
+        samples: 2,
+        skipped,
+        ..Replay::default()
+    };
+    let mut out = Vec::new();
+    write_report(&mut out, &report).unwrap();
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("SKIPPED     2 lines"));
+}
+
+#[test]
+fn a_file_of_unrelated_json_objects_is_not_a_recording() {
+    let (samples, skipped) = read_counted("{\"a\": 1}\n{\"b\": 2}\n".as_bytes()).unwrap();
+    assert!(samples.is_empty());
+    assert_eq!(skipped, 2);
+}

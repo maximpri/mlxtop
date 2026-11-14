@@ -539,7 +539,8 @@ change to the rules, or attach it to a bug report. A recording holds the
 machine's readings, hardware names, the name of the process using the most
 memory, and the runtime's request ids, model names and token counts. It never
 holds prompts, output or process command lines, and it is created readable by
-you only. Recordings made by 3.3.0 do contain the command lines of runtime
+you only. Each sample adds about 3 KB, about 10 MB an hour at the default
+one-second interval; nothing limits the file's size. Recordings made by 3.3.0 do contain the command lines of runtime
 processes; check one before sharing it.
 
 `mlxtop update` downloads the release archive for this platform from GitHub,

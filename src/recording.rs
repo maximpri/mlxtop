@@ -45,11 +45,32 @@ pub(crate) fn write(sample: &Sample) {
 
 /// Every sample in a recording, skipping lines that are not one.
 pub(crate) fn read(reader: impl BufRead) -> Vec<Sample> {
-    reader
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str(&line).ok())
-        .collect()
+    read_counted(reader)
+        .map(|(samples, _)| samples)
+        .unwrap_or_default()
+}
+
+/// Every sample in a recording, and how many non-empty lines were not one.
+/// A line must be a JSON object with a sample's `updated` field: any other
+/// object would otherwise read as an all-default sample.
+pub(crate) fn read_counted(reader: impl BufRead) -> io::Result<(Vec<Sample>, usize)> {
+    let mut samples = Vec::new();
+    let mut skipped = 0;
+    for line in reader.split(b'\n') {
+        let line = line?;
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let sample = serde_json::from_slice::<serde_json::Value>(&line)
+            .ok()
+            .filter(|value| value.get("updated").is_some())
+            .and_then(|value| serde_json::from_value::<Sample>(value).ok());
+        match sample {
+            Some(sample) => samples.push(sample),
+            None => skipped += 1,
+        }
+    }
+    Ok((samples, skipped))
 }
 
 /// A host with nothing on it: replay reads samples, not the machine.
@@ -78,6 +99,8 @@ pub(crate) struct Replay {
     pub(crate) slow_prefill: usize,
     /// Journal rows about the model's speed, with their time.
     pub(crate) findings: Vec<(String, String, String)>,
+    /// Lines of the file this version could not read as a sample.
+    pub(crate) skipped: usize,
 }
 
 /// Run `samples` through the detection engine and Journal.
@@ -112,10 +135,10 @@ pub(crate) fn replay(samples: &mut [Sample], thresholds: Thresholds) -> Replay {
                 Phase::Prefill => replay.slow_prefill += 1,
             }
         }
-        let before = journal.signals.len();
+        // Take this sample's rows out: the Journal keeps at most 240, so
+        // counting its growth stops working once it is full.
         journal.record_journal_events(previous.as_ref(), sample);
-        let added = journal.signals.len() - before.min(journal.signals.len());
-        for event in journal.signals.iter().rev().take(added).rev() {
+        for event in journal.signals.drain(..) {
             if matches!(
                 event.state.as_str(),
                 "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED" | "SETTLED"
@@ -161,6 +184,14 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
         .iter()
         .filter(|(_, state, _)| matches!(state.as_str(), "SLOWDOWN" | "STALL"))
         .count();
+    if replay.skipped > 0 {
+        writeln!(
+            out,
+            "SKIPPED     {} line{} not readable by this version",
+            replay.skipped,
+            if replay.skipped == 1 { "" } else { "s" }
+        )?;
+    }
     writeln!(out, "FINDINGS    {started}")?;
     for (time, state, summary) in &replay.findings {
         writeln!(out, "{time}  {state:<9} {summary}")?;
@@ -170,14 +201,19 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
 
 /// `mlxtop replay FILE`.
 pub(crate) fn run(path: &Path, thresholds: Thresholds, out: &mut dyn Write) -> io::Result<()> {
-    let mut samples = read(BufReader::new(File::open(path)?));
+    let named =
+        |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    let (mut samples, skipped) =
+        read_counted(BufReader::new(File::open(path).map_err(named)?)).map_err(named)?;
     if samples.is_empty() {
         return Err(io::Error::other(format!(
             "no samples in {}; record some with --record",
             path.display()
         )));
     }
-    write_report(out, &replay(&mut samples, thresholds))
+    let mut result = replay(&mut samples, thresholds);
+    result.skipped = skipped;
+    write_report(out, &result)
 }
 
 #[cfg(test)]

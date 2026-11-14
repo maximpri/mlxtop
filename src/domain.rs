@@ -846,6 +846,7 @@ pub(crate) struct VmCounters {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct RequestUsage {
     pub provider: String,
     pub model: String,
