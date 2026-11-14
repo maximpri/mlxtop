@@ -681,9 +681,6 @@ pub(crate) struct Sample {
     pub(crate) health: Option<u16>,
     pub(crate) grade: String,
     pub(crate) limiter: String,
-    pub(crate) guidance_badge: String,
-    pub(crate) guidance_cause: String,
-    pub(crate) guidance_action: String,
     pub(crate) rate_ready: bool,
 }
 
@@ -832,9 +829,6 @@ impl Default for Sample {
             health: None,
             grade: "SAMPLING".into(),
             limiter: "collecting baseline".into(),
-            guidance_badge: "WAIT".into(),
-            guidance_cause: "Collecting the live-rate baseline.".into(),
-            guidance_action: "Wait one refresh before acting.".into(),
             rate_ready: false,
         }
     }

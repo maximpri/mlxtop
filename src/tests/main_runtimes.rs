@@ -343,13 +343,11 @@ fn classification_reports_unknown_data_and_actionable_compression() {
     sample.vm_available = false;
     classify(&mut sample, None, defaults());
     assert_eq!(sample.impact, "DATA LIMITED");
-    assert_eq!(sample.guidance_badge, "CHECK");
 
     sample.vm_available = true;
     sample.compress = COMPRESSION_WARN_RATE;
     classify(&mut sample, None, defaults());
     assert_eq!(sample.impact, "COMPRESSION ACTIVE");
-    assert_eq!(sample.guidance_badge, "WATCH");
 }
 
 #[test]

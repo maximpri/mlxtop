@@ -116,41 +116,6 @@ impl GpuIssue {
             Self::Throttled { .. } => "Check GPU cooling and power delivery.",
         }
     }
-
-    /// Overview guidance: badge, cause and action.
-    pub(crate) fn guidance(&self) -> (&'static str, String, &'static str) {
-        match self {
-            Self::Offload { offloaded, size } => (
-                "FIT",
-                format!(
-                    "{}% of the model runs on CPU — generation is limited by RAM bandwidth.",
-                    Self::offload_percent(*offloaded, *size)
-                ),
-                "Choose a smaller quantization, a shorter context or fewer parallel slots.",
-            ),
-            Self::VramFull { index, percent, .. } => (
-                "VRAM",
-                if cfg!(target_os = "windows") {
-                    format!("GPU {index} memory {percent}% full — the driver may spill to shared memory.")
-                } else {
-                    format!("GPU {index} memory {percent}% full — the next allocation may fail.")
-                },
-                "Unload unused models or reduce context and KV cache.",
-            ),
-            Self::Throttled { index, cause, .. } => (
-                if *cause == Throttle::Thermal {
-                    "COOL"
-                } else {
-                    "POWER"
-                },
-                format!(
-                    "GPU {index} {} under load — clocks are held down.",
-                    cause.label()
-                ),
-                self.next(),
-            ),
-        }
-    }
 }
 
 /// The most severe issue: placement first, then memory, then clocks.

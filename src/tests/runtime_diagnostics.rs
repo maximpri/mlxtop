@@ -40,6 +40,8 @@ fn capabilities_preserve_sources_and_missing_or_stale_observations() {
         "GPT4All",
         "TensorFold",
         "Strata",
+        "mlx-serve",
+        "Splash",
     ] {
         let capabilities = capabilities(name);
         assert_eq!(capabilities.len(), 7, "{name}");

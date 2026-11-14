@@ -97,7 +97,6 @@ fn throttling_counts_only_faults_on_a_busy_card() {
         issue.evidence(),
         "Clocks limited by thermal slowdown · 84°C"
     );
-    assert_eq!(issue.guidance().0, "COOL");
     // A power cap under load is the configured limit, not a fault.
     assert_eq!(
         detect(&with_cards(vec![card(0, 95, 1_000, Some(0x4))]), None),
@@ -110,7 +109,6 @@ fn throttling_counts_only_faults_on_a_busy_card() {
     );
     let brake = detect(&with_cards(vec![card(2, 60, 1_000, Some(0x80))]), None).unwrap();
     assert_eq!(brake.next(), "Check the GPU power supply and cables.");
-    assert_eq!(brake.guidance().0, "POWER");
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -141,7 +139,6 @@ fn classify_reports_the_issue_as_impact_guidance_and_signal() {
     classify(&mut sample, None, Thresholds::default());
     assert_eq!(sample.impact, "VRAM FULL");
     assert_eq!(sample.grade, "DEGRADED");
-    assert_eq!(sample.guidance_badge, "VRAM");
     assert!(signal_summary(&sample).starts_with("VRAM 99%"));
     // Host memory faults still outrank the card.
     sample.pressure = "RED".into();
@@ -154,5 +151,4 @@ fn classify_reports_the_issue_as_impact_guidance_and_signal() {
     let previous = sample.clone();
     classify(&mut sample, Some(&previous), Thresholds::default());
     assert_eq!(sample.impact, "GPU THROTTLED");
-    assert_eq!(sample.guidance_badge, "COOL");
 }

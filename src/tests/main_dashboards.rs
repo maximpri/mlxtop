@@ -1481,11 +1481,6 @@ fn file_paging_counts_against_the_system_only_while_memory_is_tight() {
     classify(&mut full, None, defaults());
     assert_eq!(full.impact, "HEAVY PAGING");
     assert_eq!(full.impact_tone, Tone::Red);
-    assert_eq!(full.guidance_badge, "ACT NOW");
-    assert_eq!(
-        full.guidance_cause,
-        "RAM full — reading evicted pages back from disk at 900.0 MiB/s."
-    );
     assert!(signal_summary(&full).starts_with("page-in 900.0 MiB/s"));
 
     // Lighter file paging under pressure is active paging, not yet heavy.
@@ -1501,10 +1496,6 @@ fn file_paging_counts_against_the_system_only_while_memory_is_tight() {
     pressured.availability = Some(5);
     classify(&mut pressured, None, defaults());
     assert_eq!(pressured.impact, "PAGING ACTIVE");
-    assert_eq!(
-        pressured.guidance_cause,
-        "Paging active — in 8.0 MiB/s + out 0 B/s."
-    );
 
     // Swap counts whatever the memory state, as before.
     let mut swapping = Sample {

@@ -1190,18 +1190,7 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ),
         ("MEMORY BOTTLENECK", "CRITICAL", Some(10))
     );
-    assert_eq!(critical.guidance_badge, "ACT NOW");
-    assert!(critical
-        .guidance_action
-        .starts_with("Pause or quit the largest app"));
     assert!(signal_summary(&critical).starts_with("native pressure critical"));
-    let critical_llm = classified(Sample {
-        llm_count: 1,
-        ..measured("RED")
-    });
-    assert!(critical_llm
-        .guidance_action
-        .starts_with("Stop unused models/requests"));
 
     let thrash = classified(Sample {
         swap_in: 32 * MIB,
@@ -1209,9 +1198,6 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ..measured("GREEN")
     });
     assert_eq!(thrash.impact, "SWAP THRASHING");
-    assert!(thrash
-        .guidance_cause
-        .starts_with("Swap thrash — 32.0 MiB/s in"));
     assert_eq!(signal_summary(&thrash), "in 32.0 MiB/s / out 32.0 MiB/s");
 
     let heavy = classified(Sample {
@@ -1219,15 +1205,7 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ..measured("GREEN")
     });
     assert_eq!(heavy.impact, "HEAVY PAGING");
-    assert!(heavy.guidance_cause.starts_with("RAM overflow"));
-    assert!(heavy.guidance_action.contains("Pause or quit Xcode"));
     assert!(signal_summary(&heavy).starts_with("swap 40.0 MiB/s / growth"));
-    let heavy_llm = classified(Sample {
-        swap_out: 40 * MIB,
-        llm_count: 1,
-        ..measured("GREEN")
-    });
-    assert!(heavy_llm.guidance_action.starts_with("Stop unused models"));
 
     let recovery = classified(Sample {
         swap_in: 40 * MIB,
@@ -1240,15 +1218,6 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
 
     let stress = classified(measured("YELLOW"));
     assert_eq!(stress.impact, "MEMORY STRESS");
-    assert_eq!(stress.guidance_badge, "REDUCE");
-    assert!(stress.guidance_action.contains("start with Xcode"));
-    let stress_llm = classified(Sample {
-        llm_count: 1,
-        ..measured("YELLOW")
-    });
-    assert!(stress_llm
-        .guidance_action
-        .starts_with("Reduce model/context/cache"));
 
     for thermal in ["limited 70%", "warning reported"] {
         let hot = classified(Sample {
@@ -1256,12 +1225,10 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
             ..measured("GREEN")
         });
         assert_eq!(hot.impact, "THERMAL LIMIT");
-        assert_eq!(hot.guidance_badge, "COOL");
     }
 
     let idle = classified(measured("GREEN"));
     assert_eq!((idle.impact.as_str(), idle.health), ("IDLE", Some(100)));
-    assert_eq!(idle.guidance_badge, "OK");
     assert_eq!(signal_summary(&idle), "none");
 
     let limited = classified(Sample {
@@ -1269,7 +1236,6 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ..measured("GREEN")
     });
     assert_eq!(limited.impact, "DATA LIMITED");
-    assert_eq!(limited.guidance_badge, "CHECK");
 }
 
 #[test]
@@ -1499,7 +1465,13 @@ fn plain_text_output_drops_control_characters() {
 #[test]
 fn help_text_names_every_view_and_the_runtime_variables() {
     let help = crate::cli::help_text(Platform::MacOs);
-    for word in ["2 processes", "4 settings", "p pause", "r reset", "MLXTOP_PROVIDER"] {
+    for word in [
+        "2 processes",
+        "4 settings",
+        "p pause",
+        "r reset",
+        "MLXTOP_PROVIDER",
+    ] {
         assert!(help.contains(word), "help lacks {word}");
     }
     assert!(!help.contains("2 top"));
