@@ -284,3 +284,37 @@ pub(crate) fn write_doctor(out: &mut dyn Write, sample: &Sample) -> io::Result<b
     }
     Ok(host_ready && !sample.runtime.failed())
 }
+
+/// Standard output for text that came from outside the program (a runtime's
+/// model name, a recording someone sent): control characters other than a
+/// newline are dropped, so nothing can drive the user's terminal.
+pub(crate) struct PlainText<W: std::io::Write>(pub(crate) W);
+
+impl<W: std::io::Write> std::io::Write for PlainText<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut clean = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            // C1 controls (U+0080..U+009F) are 0xC2 0x80..0x9F in UTF-8.
+            if byte == 0xC2
+                && bytes
+                    .get(index + 1)
+                    .is_some_and(|next| (0x80..=0x9F).contains(next))
+            {
+                index += 2;
+                continue;
+            }
+            if byte == b'\n' || byte == b'\t' || (byte >= 0x20 && byte != 0x7F) {
+                clean.push(byte);
+            }
+            index += 1;
+        }
+        self.0.write_all(&clean)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}

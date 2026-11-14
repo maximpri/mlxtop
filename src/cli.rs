@@ -11,7 +11,7 @@ use crate::host::Platform;
 use crate::logging::{
     diagnostics_default_hint, diagnostics_log, init_diagnostics, install_panic_hook, log_field,
 };
-use crate::report::{write_doctor, write_static};
+use crate::report::{write_doctor, write_static, PlainText};
 use crate::terminal::{next_terminal_event, run_app, TerminalGuard};
 use crate::update::update;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -252,7 +252,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             collector.sample();
             thread::sleep(Duration::from_secs(interval));
             let sample = collector.sample();
-            if !write_doctor(&mut stdout().lock(), &sample)? {
+            if !write_doctor(&mut PlainText(stdout().lock()), &sample)? {
                 return Err(
                     "diagnostics found unavailable host counters or a failed runtime connection"
                         .into(),
@@ -263,7 +263,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::Update { rc } => return update(rc),
         CliAction::Replay { path } => {
             let thresholds = crate::config::Thresholds::from_config(&config);
-            crate::recording::run(&path, thresholds, &mut stdout().lock())?;
+            crate::recording::run(&path, thresholds, &mut PlainText(stdout().lock()))?;
             return Ok(());
         }
         CliAction::Run {
@@ -295,7 +295,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         run_once(
             &mut collector,
             Duration::from_secs(interval),
-            &mut stdout().lock(),
+            &mut PlainText(stdout().lock()),
         )?;
         return Ok(());
     }
@@ -339,9 +339,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::logging::report_deferred_panic();
     // What the session amounted to stays in the terminal after it closes.
     if app.collector.session.generating + app.collector.session.prefilling > 0.0 {
-        println!("mlxtop session summary");
+        let mut out = PlainText(stdout().lock());
+        let _ = writeln!(out, "mlxtop session summary");
         for line in app.summary_lines() {
-            println!("  {line}");
+            let _ = writeln!(out, "  {line}");
         }
     }
     drop(app);

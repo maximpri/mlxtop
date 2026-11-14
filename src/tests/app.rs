@@ -1485,3 +1485,13 @@ fn command_line_errors_name_the_word_at_fault() {
         "doctor cannot be combined with --record"
     );
 }
+
+#[test]
+fn plain_text_output_drops_control_characters() {
+    use std::io::Write as _;
+    let mut out = crate::report::PlainText(Vec::new());
+    writeln!(out, "LLM a\x1b[31mb · \x1b]0;title\x07model\u{9b}x").unwrap();
+    let text = String::from_utf8(out.0).unwrap();
+    assert!(!text.bytes().any(|b| b < 0x20 && b != b'\n'), "{text:?}");
+    assert!(text.contains("a[31mb · ]0;titlemodelx\n"), "{text:?}");
+}

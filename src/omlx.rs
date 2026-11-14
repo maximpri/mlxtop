@@ -588,12 +588,21 @@ pub(crate) fn omlx_api_key_from(
         })
 }
 
+/// Text from the runtime without control characters, at most 120 of them.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(120).collect()
+}
+
 pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> LlmTelemetry {
     let mut telemetry = LlmTelemetry {
         source: TelemetrySource::Live,
         provider: Some("oMLX".into()),
-        status: Some(json_string(health, &["status"]).unwrap_or_else(|| "healthy".into())),
-        model: json_string(health, &["default_model"]),
+        status: Some(
+            json_string(health, &["status"])
+                .map(|status| printable(&status))
+                .unwrap_or_else(|| "healthy".into()),
+        ),
+        model: json_string(health, &["default_model"]).map(|model| printable(&model)),
         model_memory: json_u64(health, &["engine_pool", "current_model_memory"]),
         model_memory_max: json_u64(health, &["engine_pool", "final_ceiling"]),
         mlx: parse_mlx_runtime_telemetry(health, stats),

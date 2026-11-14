@@ -30,11 +30,12 @@ impl Diagnostics {
         {
             fs::create_dir_all(parent).ok()?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // Model names, endpoints and paths: readable by the user only.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&path).ok()?;
         Some(Self {
             path,
             file: Mutex::new(file),

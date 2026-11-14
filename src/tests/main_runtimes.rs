@@ -1028,3 +1028,11 @@ fn macos_process_names_are_executable_names() {
         "loginwindow"
     );
 }
+
+#[test]
+fn omlx_model_and_status_carry_no_control_characters() {
+    let health = json!({"status": "ok\u{1b}[5m", "default_model": "evil\u{1b}]0;TITLE\u{7}model"});
+    let telemetry = parse_omlx_telemetry(&health, None);
+    assert_eq!(telemetry.model.as_deref(), Some("evil]0;TITLEmodel"));
+    assert_eq!(telemetry.status.as_deref(), Some("ok[5m"));
+}

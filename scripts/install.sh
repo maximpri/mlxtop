@@ -64,7 +64,7 @@ main() {
     if [ -z "$version" ]; then
         # GitHub redirects the latest release to its tag; prereleases are
         # never the latest release.
-        latest=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+        latest=$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --head --output /dev/null --write-out '%{url_effective}' \
             "$repository/releases/latest")
         version="${latest##*/tag/}"
@@ -98,9 +98,9 @@ main() {
     trap 'exit 1' HUP INT TERM
 
     printf 'Downloading mlxtop %s for %s...\n' "$version" "$platform"
-    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
         "$base/$archive" -o "$work_dir/$archive"
-    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
         "$base/SHA256SUMS" -o "$work_dir/SHA256SUMS"
     # SHA256SUMS lists every platform's download; verify this one only.
     awk -v file="$archive" '$2 == file || $2 == "*" file' \

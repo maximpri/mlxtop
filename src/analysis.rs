@@ -203,7 +203,7 @@ impl Signal {
             // Cache blocks moved count as disk work whatever the byte rate.
             Self::Disk => {
                 let traffic = o.disk.read.unwrap_or(0).max(o.disk.write.unwrap_or(0));
-                Some(if o.disk.loads + o.disk.saves > 0 {
+                Some(if o.disk.loads.saturating_add(o.disk.saves) > 0 {
                     traffic.max(DISK_ACTIVE_RATE) as f64
                 } else {
                     traffic as f64
