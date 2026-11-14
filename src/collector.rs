@@ -482,6 +482,7 @@ impl Collector {
             .map(|process| process.name.clone())
             .unwrap_or_else(|| "none".into());
         sample.largest_consumer = process_snapshot.largest_consumer;
+        sample.largest_other = process_snapshot.largest_other;
         let mut llm_processes = process_snapshot.llm_processes;
         if let Some(elapsed) = process_elapsed {
             annotate_process_pagein_rates(&mut llm_processes, &self.current.llm_processes, elapsed);

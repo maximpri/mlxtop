@@ -167,6 +167,15 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
     }
     consumers.sort_by_key(|consumer| std::cmp::Reverse(consumer.rss));
     let largest_consumer = consumers.first().map(|consumer| consumer.name.clone());
+    // The largest app that is not the runtime: what else holds memory.
+    let largest_other = consumers
+        .iter()
+        .find(|consumer| {
+            !llm_processes
+                .iter()
+                .any(|process| process.name == consumer.name)
+        })
+        .map(|consumer| (consumer.name.clone(), consumer.rss));
     llm_processes.sort_by_key(|process| std::cmp::Reverse(process.rss));
     llm_processes.truncate(32);
     let top_llm = llm_processes.first().cloned();
@@ -178,6 +187,7 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
         top_llm,
         provider,
         largest_consumer,
+        largest_other,
         llm_processes,
         hosted_splash_cpu,
     }

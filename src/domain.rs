@@ -162,6 +162,8 @@ pub(crate) struct ProcessSnapshot {
     pub(crate) top_llm: Option<LlmProcess>,
     pub(crate) provider: Option<String>,
     pub(crate) largest_consumer: Option<String>,
+    /// The app holding the most memory that is not the runtime, and how much.
+    pub(crate) largest_other: Option<(String, u64)>,
     pub(crate) llm_processes: Vec<LlmProcess>,
     /// CPU % of a Splash engine running beside another runtime: oMLX serves
     /// models through Splash as an external engine.
@@ -631,6 +633,7 @@ pub(crate) struct Sample {
     #[serde(skip)]
     pub(crate) llm_processes: Vec<LlmProcess>,
     pub(crate) largest_consumer: Option<String>,
+    pub(crate) largest_other: Option<(String, u64)>,
     pub(crate) llm_model: String,
     pub(crate) llm_provider: String,
     pub(crate) llm_status: String,
@@ -790,6 +793,7 @@ impl Default for Sample {
             llm_cpu: 0.0,
             llm_processes: Vec::new(),
             largest_consumer: None,
+            largest_other: None,
             llm_model: "not detected".into(),
             llm_provider: "not detected".into(),
             llm_status: "offline".into(),

@@ -43,18 +43,27 @@ first. Select a chart and press Enter for its full view. Each panel keeps its
 place when requests arrive or the model becomes idle; an empty prompt load is
 one line, and the host charts get its rows.
 
-**Memory** puts the OS **PRESSURE** label in the reading slot and shows
-headroom beneath it. The **GPU** meter is wired memory against the GPU wired
-limit, with what is left under it (`25.6 / 32.0 GiB`, `6.4 GiB left`); it
-turns orange from 90%, red from 97%, and says so when wired memory is over
-the limit. The **RAM** meter is memory in use (wired, app and compressed)
-with the file cache as its last segment, and what is left: free memory plus
-that cache, which the OS gives back on demand. Under the meters, a trace
-shows what was left over time, each sample in its pressure colour: green
-for normal, orange for warning, red for critical. A model load reads as the
-trace dropping. There is no resident percentage: a full file cache fills RAM
-without establishing memory pressure. Without composition counters the
-history is an area of occupancy. Linux derives pressure from
+**Memory** says what holds memory and how close it is to a limit, with the
+OS **PRESSURE** label in the reading slot.
+
+- **GPU** is GPU memory in use against the GPU wired limit (`24.0 / 32.0
+  GiB`). On Apple Silicon GPU memory is wired RAM. When the runtime reports
+  its model's size, the bar and the line under it split it: `model 16.0 ·
+  KV cache & other 8.0 GiB`, with what is left before the limit. The meter
+  turns orange from 90% and red from 97%.
+- **RAM** is memory in use (wired, app and compressed) against all of RAM,
+  with the file cache as the bar's last segment. The line under it gives each
+  kind's size, and what is left: free memory plus the cache, which the OS
+  gives back on demand.
+- **By app** names the runtime's own footprint and the largest other app.
+- Under them, RAM by kind over time, against all of RAM, with the GPU limit
+  drawn and named as a dashed line. A model load shows as the wired band
+  growing, a growing KV cache as it creeping toward the limit, another app as
+  the app band. Samples marked as part of a slowdown are marked here too.
+
+Without composition counters the history is an area of occupancy.
+
+Linux derives pressure from
 unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
 `memory_warn_load` and `memory_critical_load` configure those Linux bands.
 macOS uses native pressure rather than percentage thresholds. macOS

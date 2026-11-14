@@ -320,21 +320,22 @@ impl App {
             // is left, and what was left over time. Without the OS's
             // composition counters, the plain occupancy reading below.
             let visible = |width: usize| self.charts.visible_samples(Chart::Memory, width);
+            // RAM by kind per column, with the tone its sample was marked in:
+            // a slowdown's samples are marked here as on every chart.
             let columns = |width: usize| {
                 let tones = &self.collector.load_history;
-                let lefts = self.composition_columns(visible(width), width);
                 let shown = visible(width);
                 let start = tones.len().saturating_sub(shown);
                 let padding = shown - (tones.len() - start);
-                lefts
+                self.composition_columns(shown, width)
                     .into_iter()
                     .enumerate()
                     .map(|(column, sizes)| {
-                        let tone = (column * shown / width)
+                        let tone = (column * shown / width.max(1))
                             .checked_sub(padding)
                             .and_then(|offset| tones.get(start + offset))
                             .map_or(Tone::Green, |point| point.tone);
-                        sizes.map(|sizes| (crate::memory_headroom::left(sizes), tone))
+                        sizes.map(|sizes| (sizes, tone))
                     })
                     .collect()
             };

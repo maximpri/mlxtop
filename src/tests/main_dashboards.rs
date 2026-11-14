@@ -2248,18 +2248,23 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
     for label in [
         "GPU",
         "20.0 / 32.0 GiB",
-        "wired, against the GPU limit",
         "12.0 GiB left",
         "RAM",
         "28.0 / 36.0 GiB",
-        "█wired █app █comp █cache",
+        // The legend is the breakdown: each kind with its size.
+        "wired 20.0",
+        "app 6.0",
         "8.0 GiB left",
-        // The axis rounds up past the 18 GiB peak, as every chart's does.
-        "20.0 GiB",
+        // RAM by kind over time, with the GPU limit named on its line.
+        "GPU limit 32.0 GiB",
     ] {
         assert!(text.contains(label), "missing {label}\n{text}");
     }
     assert!(!text.contains("resident"), "{text}");
+    assert!(
+        !text.contains("against the GPU limit"),
+        "no sentence repeats the meter"
+    );
     // The GPU meter fills to wired over the limit.
     let filled = (0..60).filter(|x| buffer[(*x, 1)].bg == CYAN).count();
     let track = (0..60).filter(|x| buffer[(*x, 1)].bg == EDGE).count();
@@ -2267,49 +2272,30 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
         filled > track,
         "20 of 32 GiB: {filled} filled, {track} empty"
     );
-    // What was left: 18 GiB before the load, 8 GiB after, under its pressure.
-    let height = |x: u16| {
-        (0..20)
-            .filter(|y| "▁▂▃▄▅▆▇█".contains(buffer[(x, *y)].symbol()))
-            .count()
-    };
-    assert!(
-        height(30) > height(57) + 2,
-        "{} vs {}",
-        height(30),
-        height(57)
-    );
-    // A steady reading stands below the top, never a solid block.
-    let plot_top = (0..20)
-        .find(|y| buffer[(1, *y)].symbol() == "2")
-        .expect("axis label");
-    assert!(
-        !"▁▂▃▄▅▆▇█".contains(buffer[(30, plot_top)].symbol()),
-        "the peak reaches the top of the axis"
-    );
-    assert_eq!(buffer[(57, 18)].fg, YELLOW);
-    assert_eq!(buffer[(30, 18)].fg, GREEN);
+    // The model load shows as the wired band growing: 4 GiB, then 20.
+    let wired = crate::memory_composition::kind_colors()[0];
+    let band = |x: u16| (0..20).filter(|y| buffer[(x, *y)].bg == wired).count();
+    assert!(band(57) > band(30) + 2, "{} vs {}", band(57), band(30));
 
-    // With Metal's own count, the meter reads it, as the header does.
+    // With Metal's own count and the model's size: model, then the rest.
     app.collector.current.gpu_in_use = Some(24 * gib);
+    app.collector.current.llm_model_memory = Some(16 * gib);
     let buffer = draw(&app, 60, 20);
     let text: String = (0..20)
         .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
         .collect();
     assert!(text.contains("24.0 / 32.0 GiB"), "{text}");
-    assert!(
-        text.contains("GPU memory in use, against the GPU limit"),
-        "{text}"
-    );
+    assert!(text.contains("model 16.0"), "{text}");
+    assert!(text.contains("8.0 GiB"), "{text}");
     app.collector.current.gpu_in_use = None;
+    app.collector.current.llm_model_memory = None;
     // Wired past the limit says so, in red.
     app.collector.current.wired = 33 * gib;
     let buffer = draw(&app, 60, 20);
     let text: String = (0..20)
         .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
         .collect();
-    assert!(text.contains("wired over the GPU limit"), "{text}");
-    assert!(text.contains("0 B left"), "{text}");
+    assert!(text.contains("over the limit"), "{text}");
     assert_eq!(buffer[(6, 1)].bg, RED);
 
     // No GPU limit known: RAM alone. A short panel keeps the meters only.
@@ -2832,20 +2818,24 @@ fn the_enlarged_memory_view_gives_each_kinds_size() {
         })
     };
     let tall = render(20);
-    // One unit for the row, and no kind cut off.
-    assert!(tall.contains("wired 3.2 · app"), "{tall}");
-    assert!(tall.contains("· free") && tall.contains(" GiB"), "{tall}");
+    // The legend is the breakdown: each kind with its size, in one unit.
+    assert!(
+        tall.contains("wired 3.2") && tall.contains("app 12.4"),
+        "{tall}"
+    );
+    assert!(tall.contains("cache 3.3 GiB"), "{tall}");
+    // Narrower, the legend drops the sizes whole, never cuts one.
     let narrow = render_view(40, 20, |frame| {
         app.render_indicator_chart(frame, frame.area(), "memory", &history, ChartMetric::Memory)
     });
-    let sizes = narrow
+    let legend = narrow
         .lines()
-        .find(|l| l.contains("wired 3.2"))
-        .unwrap_or_default();
-    assert!(
-        sizes.trim_end_matches('│').trim_end().ends_with("GiB"),
-        "{narrow}"
-    );
+        .find(|l| l.contains("wired"))
+        .unwrap_or_default()
+        .trim_end_matches('│')
+        .trim_end()
+        .to_owned();
+    assert!(legend.ends_with("left"), "{narrow}");
     assert!(
         !render(10).contains("wired 3.2 ·"),
         "the Overview panel keeps to its meters"
@@ -2899,7 +2889,14 @@ fn one_moment_sits_at_the_same_place_on_every_chart() {
             for y in area.top() + 1..area.bottom() - 1 {
                 for x in area.left() + 1..area.right() - 1 {
                     let marked = painted(x, y, UNUSUAL);
-                    if marked || painted(x, y, GREEN) {
+                    // Memory plots RAM by kind in the kinds' own colours.
+                    let plotted = painted(x, y, GREEN)
+                        || (chart == Chart::Memory
+                            && x >= area.left() + 1 + crate::memory_headroom::AXIS_GUTTER
+                            && crate::memory_composition::kind_colors()[..3]
+                                .iter()
+                                .any(|color| buffer[(x, y)].bg == *color));
+                    if marked || plotted {
                         first = first.min(x);
                         last = last.max(x);
                     }
