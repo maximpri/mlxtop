@@ -1,0 +1,81 @@
+name: Install smoke
+
+# Each published install path, run by a machine once per release: the
+# install scripts are served from main, so they must match the latest
+# published release's layout, and Windows self-update has no other test.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to install, without the v (e.g. 3.3.1)"
+        required: true
+      previous:
+        description: "An older version to update from"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version || github.event.release.tag_name }}
+      PREVIOUS: ${{ inputs.previous }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with install.sh
+        run: |
+          version="${VERSION#v}"
+          MLXTOP_VERSION="$version" MLXTOP_INSTALL_DIR="$RUNNER_TEMP/bin" sh scripts/install.sh
+          test "$("$RUNNER_TEMP/bin/mlxtop" --version)" = "mlxtop $version"
+      - name: Update from the previous release
+        run: |
+          version="${VERSION#v}"
+          previous="${PREVIOUS:-$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --limit 2 --json tagName --jq '.[1].tagName')}"
+          previous="${previous#v}"
+          MLXTOP_VERSION="$previous" MLXTOP_INSTALL_DIR="$RUNNER_TEMP/old" sh scripts/install.sh
+          "$RUNNER_TEMP/old/mlxtop" update
+          test "$("$RUNNER_TEMP/old/mlxtop" --version)" = "mlxtop $version"
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version || github.event.release.tag_name }}
+      PREVIOUS: ${{ inputs.previous }}
+      GH_TOKEN: ${{ github.token }}
+      MLXTOP_NO_MODIFY_PATH: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with install.ps1
+        shell: pwsh
+        run: |
+          $version = $env:VERSION -replace '^v', ''
+          $env:MLXTOP_VERSION = $version
+          $env:MLXTOP_INSTALL_DIR = "$env:RUNNER_TEMP\bin"
+          ./scripts/install.ps1
+          $reported = & "$env:RUNNER_TEMP\bin\mlxtop.exe" --version
+          if ($reported -ne "mlxtop $version") { throw "installed $reported" }
+      - name: Update from the previous release
+        shell: pwsh
+        run: |
+          $version = $env:VERSION -replace '^v', ''
+          $previous = $env:PREVIOUS
+          if (-not $previous) {
+            $previous = gh release list --repo $env:GITHUB_REPOSITORY --exclude-pre-releases --limit 2 --json tagName --jq '.[1].tagName'
+          }
+          $env:MLXTOP_VERSION = $previous -replace '^v', ''
+          $env:MLXTOP_INSTALL_DIR = "$env:RUNNER_TEMP\old"
+          ./scripts/install.ps1
+          & "$env:RUNNER_TEMP\old\mlxtop.exe" update
+          $reported = & "$env:RUNNER_TEMP\old\mlxtop.exe" --version
+          if ($reported -ne "mlxtop $version") { throw "updated to $reported" }

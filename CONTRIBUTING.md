@@ -139,6 +139,22 @@ releases and for release candidates offered as prereleases.
    brew update && brew info --json=v2 maximpri/tap/mlxtop | jq -r '.formulae[0].versions.stable'
    ~~~
 
+### When a release goes wrong
+
+- **A build or test job failed.** Re-run the failed jobs for a flaky
+  failure. If code must change, fix it on `main`; move the tag
+  (`git tag -d vX.Y.Z && git push --delete origin vX.Y.Z`, then tag again)
+  only if no draft was reviewed or published, otherwise bump the patch
+  version.
+- **The release job failed after creating a draft.** Delete the draft and
+  keep the tag (`gh release delete vX.Y.Z --yes`), then re-run the job.
+- **A published release is bad.** Mark the previous release Latest
+  (`gh release edit vPREV --latest`) so the install scripts fall back to it,
+  then publish a fixed patch release. `mlxtop update` never installs an
+  older version, so users who already updated need the patch; anyone can
+  pin a version with `MLXTOP_VERSION=X.Y.Z` on either install script.
+- **Homebrew.** Revert the tap's bump commit.
+
 Pull requests that change the workflow or packaging scripts run the same
 builds without publishing; the assets are attached to the run as artifacts.
 

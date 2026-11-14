@@ -65,7 +65,8 @@ curl -fsSL https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/instal
 irm https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/install.ps1 | iex
 ```
 
-Both scripts verify the download's SHA-256 checksum. Linux builds are static
+Both scripts verify the download's SHA-256 checksum, which detects a damaged
+download; it comes from the same release, so it is not a signature. Linux builds are static
 binaries with no runtime dependencies. You can also download a macOS
 installer (`.dmg`, unsigned) or an archive from the
 [latest release](https://github.com/maximpri/mlxtop/releases/latest).
