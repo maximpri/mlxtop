@@ -1401,3 +1401,158 @@ fn a_completion_log_tail_that_starts_inside_a_character_is_still_read() {
         .expect("the tail must be decoded lossily");
     assert_eq!(stats.model.as_deref(), Some("qwen"));
 }
+
+fn scripted_macos_host(vm_stats: &[String], ps: &[&str]) -> FakeHost {
+    let mut host = FakeHost::default()
+        .command("/usr/sbin/sysctl -n hw.memsize", "38654705664\n")
+        .command("/usr/sbin/sysctl -n hw.machine", "arm64\n")
+        .command("/usr/sbin/sysctl -n iogpu.wired_limit_mb", "28000\n")
+        .command("/usr/sbin/sysctl -n hw.pagesize", "16384\n")
+        .command("/usr/sbin/ioreg -r -d 1 -w 0 -c IOAccelerator", IOREG_GPU)
+        .command(
+            "/usr/sbin/sysctl -n kern.memorystatus_vm_pressure_level",
+            "1\n",
+        )
+        .command(
+            "/usr/bin/memory_pressure -Q",
+            "System-wide memory free percentage: 63%\n",
+        )
+        .command(
+            "/usr/sbin/sysctl -n vm.swapusage",
+            "total = 2048.00M  used = 512.00M  free = 1536.00M  (encrypted)\n",
+        )
+        .command(
+            "/usr/bin/pmset -g therm",
+            "Note: No thermal warning level has been recorded\n",
+        )
+        .command("/bin/date +%H:%M:%S %z", "12:00:01 -0500\n");
+    for vm in vm_stats {
+        host = host.command("/usr/bin/vm_stat", vm);
+    }
+    for listing in ps {
+        host = host.command(
+            "/bin/ps -axo pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args=",
+            listing,
+        );
+    }
+    host
+}
+
+fn scripted_vm_stat(pageins: u64) -> String {
+    format!(
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free:                               10000.\n\
+Pages speculative:                         2000.\n\
+Pages wired down:                         50000.\n\
+Pages occupied by compressor:             10000.\n\
+Pages stored in compressor:               40000.\n\
+Anonymous pages:                         300000.\n\
+File-backed pages:                       100000.\n\
+Pages reactivated:                       700000.\n\
+Compressions:                          90000000.\n\
+Decompressions:                        40000000.\n\
+Pageins:                               {pageins}.\n\
+Pageouts:                                300000.\n\
+Swapins:                                5000000.\n\
+Swapouts:                               6000000.\n"
+    )
+}
+
+#[test]
+fn a_failed_counter_read_never_becomes_a_rate_baseline() {
+    let host = scripted_macos_host(
+        &[
+            scripted_vm_stat(50_000_000),
+            String::new(),
+            scripted_vm_stat(50_000_010),
+            scripted_vm_stat(50_000_020),
+        ],
+        &[MACOS_PS],
+    );
+    let mut collector = collector(host, Platform::MacOs, None);
+    let samples: Vec<Sample> = (0..4)
+        .map(|_| {
+            thread::sleep(Duration::from_millis(20));
+            collector.sample()
+        })
+        .collect();
+    assert!(!samples[1].rate_ready, "an unread counter has no rate");
+    assert!(
+        !samples[2].rate_ready,
+        "the next good read starts a new baseline"
+    );
+    assert_eq!(samples[2].swap_in, 0);
+    assert!(samples[3].rate_ready);
+    assert_eq!(samples[3].swap_in, 0, "swap-ins did not change");
+    for sample in &samples {
+        assert_ne!(sample.impact, "SWAP THRASHING");
+    }
+    assert!(!journal(&collector)
+        .iter()
+        .any(|(state, _)| state == "PAGING" || state == "SWAP THRASHING"));
+}
+
+#[test]
+fn a_failed_linux_counter_read_never_becomes_a_rate_baseline() {
+    let mut collector = collector(linux_host(), Platform::Linux, None);
+    collector.sample();
+    collector.host = Box::new(FakeHost::default());
+    let sample = collector.sample();
+    assert!(!sample.rate_ready);
+    assert!(collector.previous.is_none());
+}
+
+#[test]
+fn a_failed_process_listing_keeps_the_runtime_and_its_history() {
+    let host = scripted_macos_host(&[scripted_vm_stat(1)], &[MACOS_PS, "", MACOS_PS, MACOS_PS]);
+    let mut collector = collector(host, Platform::MacOs, None);
+    let samples: Vec<Sample> = (0..4).map(|_| collector.sample()).collect();
+    let first = &samples[0];
+    assert!(first.llm_count > 0, "the fixture lists a runtime");
+    for sample in &samples {
+        assert_eq!(sample.llm_count, first.llm_count);
+        assert_eq!(sample.llm_provider, first.llm_provider);
+    }
+    assert_eq!(collector.generation_history.len(), 4);
+    let detected = journal(&collector)
+        .iter()
+        .filter(|(_, summary)| summary.starts_with("detected"))
+        .count();
+    assert!(detected <= 1, "{:?}", journal(&collector));
+}
+
+#[test]
+fn repeated_failed_process_listings_stop_reusing_the_last_one() {
+    let host = scripted_macos_host(&[scripted_vm_stat(1)], &[MACOS_PS, "", "", "", "", ""]);
+    let mut collector = collector(host, Platform::MacOs, None);
+    let samples: Vec<Sample> = (0..5).map(|_| collector.sample()).collect();
+    assert!(samples[3].llm_count > 0);
+    assert_eq!(samples[4].llm_count, 0);
+}
+
+#[test]
+fn an_idle_sample_naming_another_model_does_not_restart_the_rate_charts() {
+    let live = |model: &str, live: bool| Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: model.into(),
+        llm_source: TelemetrySource::Live,
+        llm_generation_tps: Some(40.0),
+        llm_generation_tps_live: live,
+        ..Sample::default()
+    };
+    assert_eq!(
+        crate::collector::rate_identity(&live("coder", true)),
+        Some(("oMLX".into(), "coder".into()))
+    );
+    // Idle: oMLX keeps its last rate and names the first listed model.
+    assert_eq!(crate::collector::rate_identity(&live("chat", false)), None);
+    // A rate read from a log has no live flag but still names its model.
+    let logged = Sample {
+        llm_source: TelemetrySource::Log,
+        ..live("second", false)
+    };
+    assert_eq!(
+        crate::collector::rate_identity(&logged),
+        Some(("oMLX".into(), "second".into()))
+    );
+}

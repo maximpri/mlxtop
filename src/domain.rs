@@ -154,6 +154,7 @@ pub(crate) struct LlmProcess {
     pub(crate) pagein_rate: Option<f64>,
 }
 
+#[derive(Clone)]
 pub(crate) struct ProcessSnapshot {
     pub(crate) llm_count: u32,
     pub(crate) llm_rss: u64,

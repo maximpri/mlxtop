@@ -25,9 +25,9 @@ use crate::logging::{
 use crate::omlx::LlmTelemetryClient;
 use crate::platform::{
     linux_counters_for_rates, linux_metal_init, linux_page_size, linux_total_memory,
-    macos_counters_for_rates, parse_metal_hardware, resident_memory_percent,
-    sample_linux_gpu_thermal, sample_linux_memory, sample_macos_gpu_thermal, sample_macos_memory,
-    sample_windows_gpu_thermal, sample_windows_memory,
+    parse_metal_hardware, resident_memory_percent, sample_linux_gpu_thermal, sample_linux_memory,
+    sample_macos_gpu_thermal, sample_macos_memory, sample_windows_gpu_thermal,
+    sample_windows_memory,
 };
 use crate::processes::{annotate_process_pagein_rates, parse_processes, snapshot};
 use crate::{host, operator_history, process_memory, providers, request_history};
@@ -50,6 +50,8 @@ pub(crate) struct PreviousCounters {
 /// How often readings that change over seconds (thermal state, power) are
 /// taken; each costs a process.
 const SLOW_READ_INTERVAL: Duration = Duration::from_secs(5);
+/// Consecutive failed process listings answered with the last good one.
+const PROCESS_READ_RETRIES: u32 = 3;
 
 #[derive(Clone)]
 pub(crate) struct CollectorView {
@@ -98,6 +100,10 @@ pub(crate) struct Collector {
     pub(crate) cached_at_start: Option<(String, u64)>,
     /// When thermal state and power were last read.
     pub(crate) slow_read_at: Option<Instant>,
+    /// The last process listing read, and how many reads have failed since.
+    pub(crate) last_processes: Option<(crate::domain::ProcessSnapshot, u32)>,
+    /// Runtime and model of the last sample that produced a rate.
+    pub(crate) rate_identity: Option<(String, String)>,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
@@ -208,6 +214,8 @@ impl Collector {
             previous: None,
             previous_llm_cache: None,
             cached_at_start: None,
+            last_processes: None,
+            rate_identity: None,
             slow_read_at: None,
             session: Default::default(),
             current: Sample::default(),
@@ -270,21 +278,36 @@ impl Collector {
                 self.thresholds,
             ),
         }
+        // On macOS total memory and page size are read once; if that first
+        // read failed, try again rather than run a session without them.
+        if self.platform == Platform::MacOs && self.total_memory == 0 {
+            if let Some(total) = host.command_u64("/usr/sbin/sysctl", &["-n", "hw.memsize"]) {
+                self.total_memory = total;
+                sample.total_memory = total;
+                if let Some(page) = host.command_u64("/usr/sbin/sysctl", &["-n", "hw.pagesize"]) {
+                    self.page_size = page;
+                }
+            }
+        }
         let counters = match self.platform {
             // The memory reading already ran vm_stat: one call serves both.
-            Platform::MacOs => sample
-                .vm_counters
-                .take()
-                .unwrap_or_else(|| macos_counters_for_rates(host, self.page_size)),
+            Platform::MacOs => sample.vm_counters.take().filter(|_| sample.vm_available),
             Platform::Linux => linux_counters_for_rates(host),
-            Platform::Windows => VmCounters::default(),
+            Platform::Windows => Some(VmCounters::default()),
         };
         let process_elapsed = self
             .previous
             .as_ref()
             .map(|previous| now.duration_since(previous.at));
 
-        if let Some(previous) = &self.previous {
+        // Counters that could not be read are unknown, not zero: no rate
+        // this sample, and the next good reading starts a new baseline.
+        let previous_counters = if counters.is_some() {
+            self.previous.as_ref()
+        } else {
+            None
+        };
+        if let (Some(previous), Some(counters)) = (previous_counters, counters.as_ref()) {
             let elapsed = now.duration_since(previous.at);
             sample.swap_in = rate_bytes(
                 delta(counters.swapins, previous.swapins),
@@ -324,7 +347,7 @@ impl Collector {
             sample.swap_growth = signed_rate_bytes(sample.swap_used, previous.swap_used, elapsed);
             sample.rate_ready = true;
         }
-        self.previous = Some(PreviousCounters {
+        self.previous = counters.map(|counters| PreviousCounters {
             at: now,
             swapins: counters.swapins,
             swapouts: counters.swapouts,
@@ -355,28 +378,39 @@ impl Collector {
             Platform::Windows => sample_windows_gpu_thermal(host, &mut sample, &self.current.gpus),
         }
 
-        let process_snapshot = match self.platform {
-            Platform::MacOs => parse_processes(
-                &host
-                    .command(
-                        "/bin/ps",
-                        &["-axo", "pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args="],
-                    )
-                    .unwrap_or_default(),
+        let listing = match self.platform {
+            Platform::MacOs => host.command(
+                "/bin/ps",
+                &["-axo", "pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args="],
             ),
             // Linux `ps` has no `pagein` column; `maj_flt` (major faults)
             // keeps the same positional layout for the shared parser.
-            Platform::Linux => parse_processes(
-                &host
-                    .command(
-                        "ps",
-                        &["-axo", "pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args="],
-                    )
-                    .unwrap_or_default(),
+            Platform::Linux => host.command(
+                "ps",
+                &["-axo", "pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args="],
             ),
-            Platform::Windows => {
+            Platform::Windows => None,
+        }
+        // `ps` always lists itself: empty output is a failed read too.
+        .filter(|text| !text.trim().is_empty());
+        let process_snapshot = match (self.platform, listing) {
+            (Platform::Windows, _) => {
                 snapshot(windows.map(|reading| reading.processes).unwrap_or_default())
             }
+            (_, Some(text)) => {
+                let fresh = parse_processes(&text);
+                self.last_processes = Some((fresh.clone(), 0));
+                fresh
+            }
+            // A failed listing is not an empty machine: keep the last one for
+            // a few samples so the runtime and its charts do not "vanish".
+            (_, None) => match self.last_processes.as_mut() {
+                Some((last, failures)) if *failures < PROCESS_READ_RETRIES => {
+                    *failures += 1;
+                    last.clone()
+                }
+                _ => parse_processes(""),
+            },
         };
         sample.llm_count = process_snapshot.llm_count;
         sample.llm_rss = process_snapshot.llm_rss;
@@ -573,11 +607,19 @@ impl Collector {
         sample.correlation = self.correlation.observe(&sample, self.thresholds);
         classify(&mut sample, previous.as_ref(), self.thresholds);
 
-        if previous.as_ref().is_some_and(|old| {
-            old.llm_provider != sample.llm_provider || old.llm_model != sample.llm_model
-        }) {
-            self.generation_history.clear();
-            self.prefill_history.clear();
+        // A rate chart restarts when a different runtime or model produces a
+        // rate. A sample without one (idle, or a runtime briefly not found)
+        // cannot clear it.
+        if let Some(identity) = rate_identity(&sample) {
+            if self
+                .rate_identity
+                .as_ref()
+                .is_some_and(|last| *last != identity)
+            {
+                self.generation_history.clear();
+                self.prefill_history.clear();
+            }
+            self.rate_identity = Some(identity);
         }
 
         push_history(
@@ -1161,6 +1203,8 @@ impl Collector {
 
     pub(crate) fn reset(&mut self) {
         self.previous = None;
+        self.cached_at_start = None;
+        self.rate_identity = None;
         self.previous_llm_cache = None;
         self.gpu_band = None;
         self.telemetry_online = None;
@@ -1216,6 +1260,17 @@ pub(crate) fn apply_hosted_splash(sample: &mut Sample, thresholds: Thresholds) {
 /// Return a live request rate for a chart. Aggregate session rates and
 /// completion-log values are deliberately excluded because they are not
 /// measurements of the current sample.
+/// The runtime and model a sample's rate belongs to, when it has a rate. From
+/// a live API only a live rate counts: an idle runtime keeps its last rate,
+/// which says nothing about the model now named.
+pub(crate) fn rate_identity(sample: &Sample) -> Option<(String, String)> {
+    let live_api = sample.llm_source == TelemetrySource::Live;
+    let generation =
+        sample.llm_generation_tps.is_some() && (!live_api || sample.llm_generation_tps_live);
+    let prefill = sample.llm_prefill_tps.is_some() && (!live_api || sample.llm_prefill_tps_live);
+    (generation || prefill).then(|| (sample.llm_provider.clone(), sample.llm_model.clone()))
+}
+
 pub(crate) fn chart_rate_value(sample: &Sample, metric: ChartMetric) -> Option<u64> {
     let (value, live) = match metric {
         ChartMetric::Generation => (sample.llm_generation_tps, sample.llm_generation_tps_live),

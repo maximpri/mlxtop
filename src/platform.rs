@@ -67,11 +67,6 @@ pub(crate) fn sample_macos_memory(host: &dyn Host, sample: &mut Sample, page_siz
     (sample.swap_total, sample.swap_used) = parse_swap_usage(&swap_usage.unwrap_or_default());
 }
 
-pub(crate) fn macos_counters_for_rates(host: &dyn Host, page_size: u64) -> VmCounters {
-    let vm = host.command("/usr/bin/vm_stat", &[]).unwrap_or_default();
-    parse_vm_stat(&vm, page_size)
-}
-
 /// The GPU's load and memory, every poll; thermal state and power only when
 /// `slow` is set, since they change over seconds and each costs a process.
 pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample, slow: bool) {
@@ -255,14 +250,16 @@ pub(crate) fn linux_thermal_label(hottest: Option<u64>) -> String {
         .unwrap_or_else(|| "unavailable".into())
 }
 
-pub(crate) fn linux_counters_for_rates(host: &dyn Host) -> VmCounters {
-    let mut counters = VmCounters::default();
-    if let Some(text) = host.read_file(Path::new("/proc/vmstat")) {
-        let (swapins, swapouts) = parse_linux_paging(&text);
-        counters.swapins = swapins;
-        counters.swapouts = swapouts;
-    }
-    counters
+/// Paging counters from `/proc/vmstat`, or `None` when it could not be read:
+/// an unread counter must never become a zero baseline for the next rate.
+pub(crate) fn linux_counters_for_rates(host: &dyn Host) -> Option<VmCounters> {
+    let text = host.read_file(Path::new("/proc/vmstat"))?;
+    let (swapins, swapouts) = parse_linux_paging(&text);
+    Some(VmCounters {
+        swapins,
+        swapouts,
+        ..VmCounters::default()
+    })
 }
 
 pub(crate) fn sample_linux_memory(
