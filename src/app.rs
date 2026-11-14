@@ -177,6 +177,10 @@ pub(crate) struct App {
     pub(crate) top_selected: usize,
     pub(crate) journal_filter: JournalFilter,
     pub(crate) journal_scroll: usize,
+    /// The furthest the Journal could scroll when last drawn (rows wrap).
+    pub(crate) journal_max_scroll: std::cell::Cell<usize>,
+    /// The terminal was too small for the dashboard when last drawn.
+    pub(crate) compact: std::cell::Cell<bool>,
     pub(crate) request_scroll: usize,
     pub(crate) charts: chart_navigation::Navigation,
     pub(crate) gpu_selected: usize,
@@ -251,6 +255,8 @@ impl App {
             top_selected: 0,
             journal_filter: JournalFilter::All,
             journal_scroll: 0,
+            journal_max_scroll: Default::default(),
+            compact: Default::default(),
             request_scroll: 0,
             charts: chart_navigation::Navigation::default(),
             gpu_selected: 0,
@@ -383,6 +389,16 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        // Below the dashboard's size only quitting acts: a key whose effect
+        // cannot be seen (r clears the session's history) must not act.
+        if self.compact.get() && !self.quit_prompt {
+            let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if !quit {
+                return;
+            }
+        }
         if self.quit_prompt {
             self.quit_prompt = false;
             let ctrl_c =
@@ -490,7 +506,9 @@ impl App {
                     return;
                 }
                 KeyCode::Down => {
-                    self.top_selected = self.top_selected.saturating_add(1);
+                    // Bounded here, not only when drawn: Up then moves at once.
+                    let last = self.filtered_llm_processes().len().saturating_sub(1);
+                    self.top_selected = self.top_selected.saturating_add(1).min(last);
                     return;
                 }
                 KeyCode::PageUp => {
@@ -579,7 +597,8 @@ impl App {
                     return;
                 }
                 KeyCode::Down => {
-                    self.journal_scroll = self.journal_scroll.saturating_add(1);
+                    let last = self.journal_last_scroll();
+                    self.journal_scroll = self.journal_scroll.saturating_add(1).min(last);
                     return;
                 }
                 KeyCode::PageUp => {
@@ -587,7 +606,8 @@ impl App {
                     return;
                 }
                 KeyCode::PageDown => {
-                    self.journal_scroll = self.journal_scroll.saturating_add(10);
+                    let last = self.journal_last_scroll();
+                    self.journal_scroll = self.journal_scroll.saturating_add(10).min(last);
                     return;
                 }
                 KeyCode::Home => {
@@ -595,7 +615,7 @@ impl App {
                     return;
                 }
                 KeyCode::End => {
-                    self.journal_scroll = self.filtered_journal_events().len().saturating_sub(1);
+                    self.journal_scroll = self.journal_last_scroll();
                     return;
                 }
                 KeyCode::Char('f') | KeyCode::Char(']') => {
@@ -793,6 +813,17 @@ impl App {
             }),
         }
         rows
+    }
+
+    /// The furthest the Journal scrolls: as drawn, or (before the first
+    /// draw) the oldest event.
+    fn journal_last_scroll(&self) -> usize {
+        let drawn = self.journal_max_scroll.get();
+        if drawn > 0 {
+            drawn
+        } else {
+            self.filtered_journal_events().len().saturating_sub(1)
+        }
     }
 
     pub(crate) fn filtered_journal_events(&self) -> Vec<&SignalEvent> {

@@ -120,6 +120,8 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         diagnostics_open: false,
         diagnostics_scroll: 0,
         diagnostics_max_scroll: Default::default(),
+        journal_max_scroll: Default::default(),
+        compact: Default::default(),
         quit: false,
         quit_prompt: false,
         sampler_disconnected: false,

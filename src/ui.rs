@@ -17,7 +17,7 @@ use crate::{drop_marks, gpu_dashboard, model_dashboard, operator_charts, request
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 use std::collections::VecDeque;
 
@@ -46,8 +46,31 @@ impl App {
         let area = frame.area();
         self.charts.regions.borrow_mut().clear();
         self.charts.overview_samples.set(None);
-        if area.width < 72 || area.height < 24 {
-            self.draw_compact_warning(frame, area);
+        self.compact.set(area.width < 72 || area.height < 24);
+        if self.compact.get() {
+            // Too small for the dashboard, but not for the verdict: a
+            // terminal with a tmux status line is 80×23.
+            let verdict_rows = if area.height >= 8 && area.width >= 30 {
+                2
+            } else {
+                0
+            };
+            if verdict_rows > 0 {
+                crate::diagnostics_view::summary(
+                    frame,
+                    Rect::new(area.x, area.y, area.width, verdict_rows),
+                    &self.collector.current,
+                    self.paused,
+                    self.sampler_disconnected,
+                );
+            }
+            let rest = Rect::new(
+                area.x,
+                area.y + verdict_rows,
+                area.width,
+                area.height - verdict_rows,
+            );
+            self.draw_compact_warning(frame, rest);
             if self.quit_prompt {
                 self.draw_quit_prompt(frame, area);
             }
@@ -128,13 +151,16 @@ impl App {
             ]),
         ];
         frame.render_widget(
-            Paragraph::new(text).alignment(Alignment::Center).block(
-                Block::default()
-                    .title(" QUIT MLXTOP? ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(YELLOW))
-                    .style(Style::default().bg(PANEL)),
-            ),
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .title(" QUIT MLXTOP? ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(YELLOW))
+                        .style(Style::default().bg(PANEL)),
+                ),
             popup,
         );
     }
@@ -1359,7 +1385,11 @@ impl App {
             )),
             Line::from(""),
             Line::from("This dashboard needs at least 72×24 terminal cells."),
-            Line::from(format!("Current size: {}×{}", area.width, area.height)),
+            Line::from(format!(
+                "Current size: {}×{}",
+                frame.area().width,
+                frame.area().height
+            )),
             Line::from("Resize the terminal, or use --once for a static report."),
             Line::from("q quit"),
         ];

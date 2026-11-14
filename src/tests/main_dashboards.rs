@@ -3002,3 +3002,53 @@ fn with_no_runtime_the_header_says_so_once() {
     assert!(rendered.contains("No LLM runtime detected"), "{rendered}");
     assert!(!rendered.contains("none · not detected"));
 }
+
+#[test]
+fn a_terminal_too_small_for_the_dashboard_still_shows_the_verdict() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    for (width, height) in [(80, 23), (60, 15)] {
+        let rendered = render_app(&app, width, height);
+        assert!(
+            rendered.contains("Healthy") || rendered.contains("bottleneck"),
+            "{width}x{height}:\n{rendered}"
+        );
+        assert!(rendered.contains("72"), "the notice says the size needed");
+    }
+    // Keys whose effect cannot be seen do nothing while the notice shows.
+    let history = app.collector.load_history.len();
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert_eq!(app.tab, 0);
+    assert_eq!(app.collector.load_history.len(), history);
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(app.quit);
+}
+
+#[test]
+fn the_oldest_journal_event_is_reachable_with_wrapped_rows() {
+    let mut app = test_app(2);
+    for index in 0..60 {
+        app.collector.signals.push_back(crate::domain::SignalEvent {
+            time: format!("12:{:02}:00", index % 60),
+            recorded_at: SystemTime::now(),
+            kind: crate::domain::EventKind::from_state("SLOWDOWN"),
+            state: "SLOWDOWN".into(),
+            summary: format!(
+                "event {index:02} · GEN ↓50% (50.0→25.0 tok/s) · paging 6.0 MiB/s → The model no longer fits in RAM; reduce context or load a smaller quant"
+            ),
+            tone: Tone::Unusual,
+        });
+    }
+    render_app(&app, 80, 24);
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    let rendered = render_app(&app, 80, 24);
+    assert!(rendered.contains("event 00"), "{rendered}");
+    // Up moves at once after scrolling past the end.
+    for _ in 0..50 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let before = app.journal_scroll;
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.journal_scroll, before - 1);
+}
