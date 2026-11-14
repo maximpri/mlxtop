@@ -286,6 +286,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         EnableMouseCapture,
         crossterm::cursor::Hide
     )?;
+    crate::logging::set_tui_active(true);
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(interval, history, config);
@@ -299,6 +300,8 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     terminal.show_cursor()?;
     terminal_guard.disarm();
+    crate::logging::set_tui_active(false);
+    crate::logging::report_deferred_panic();
     // What the session amounted to stays in the terminal after it closes.
     if app.collector.session.generating + app.collector.session.prefilling > 0.0 {
         println!("mlxtop session summary");

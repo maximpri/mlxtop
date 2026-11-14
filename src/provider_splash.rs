@@ -255,7 +255,8 @@ impl SplashHistory {
         let age = json_value(status, &["transport", "status_age_ms"])
             .and_then(Value::as_f64)
             .filter(|ms| ms.is_finite() && *ms >= 0.0)
-            .map_or(Duration::ZERO, |ms| Duration::from_secs_f64(ms / 1000.0));
+            .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
+            .unwrap_or(Duration::ZERO);
         let captured = now.checked_sub(age).unwrap_or(now);
         let counters = Counters::read(status, captured);
         // The share of draft tokens accepted since the last capture: what

@@ -258,7 +258,8 @@ pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
                 idle_for: (request.phase == OmlxPhase::Generating)
                     .then_some(request.idle)
                     .flatten()
-                    .map(Duration::from_secs_f64),
+                    // An absurd age from the runtime must not stop sampling.
+                    .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok()),
                 ttft_ms: None,
                 observed_at: Some(
                     request

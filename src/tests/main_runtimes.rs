@@ -965,3 +965,16 @@ fn captured_omlx_stats_report_a_full_ssd_cache_and_its_block_counters() {
     assert_eq!(crate::omlx::parse_ssd_cache(&json!({})), None);
     assert!(!domain::SsdCache::default().full());
 }
+
+#[test]
+fn an_absurd_idle_age_from_omlx_is_ignored_not_fatal() {
+    let health = json!({"status": "ok", "default_model": "m"});
+    let text = include_str!("fixtures/omlx_stats_generating_live.json")
+        .replace("0.04725745797622949", "1e30");
+    let stats: Value = serde_json::from_str(&text).unwrap();
+    let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+    let [request] = telemetry.requests.as_slice() else {
+        panic!("one generating request: {:?}", telemetry.requests);
+    };
+    assert_eq!(request.idle_for, None);
+}

@@ -11,7 +11,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bool) {
+pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bool, stopped: bool) {
+    // A verdict on the last sample would read as current; it is not.
+    if stopped {
+        let line = Line::from(Span::styled(
+            " ✖ Sampling stopped · restart mlxtop · details in the log",
+            Style::default()
+                .fg(Tone::Red.color())
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let finding = diagnosis::assess(sample);
     // An icon carries the verdict's severity before any words do.
     let icon = match finding.tone {

@@ -123,6 +123,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         quit: false,
         quit_prompt: false,
         sampler_disconnected: false,
+        last_view_at: Instant::now(),
         alert: None,
         alert_bells: 0,
         bell: || {},

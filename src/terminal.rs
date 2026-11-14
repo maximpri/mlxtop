@@ -36,6 +36,8 @@ impl Drop for TerminalGuard {
                 DisableMouseCapture,
                 LeaveAlternateScreen
             );
+            crate::logging::set_tui_active(false);
+            crate::logging::report_deferred_panic();
         }
     }
 }

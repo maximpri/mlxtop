@@ -187,6 +187,8 @@ pub(crate) struct App {
     /// Esc at the top level asks before quitting, because quitting discards the session's history.
     pub(crate) quit_prompt: bool,
     pub(crate) sampler_disconnected: bool,
+    /// When the last sample arrived from the sampler.
+    pub(crate) last_view_at: Instant,
     pub(crate) alert: Option<ActiveAlert>,
     pub(crate) alert_bells: usize,
     /// Rings the terminal bell; replaced in tests so no BEL reaches stdout.
@@ -254,6 +256,7 @@ impl App {
             quit: false,
             quit_prompt: false,
             sampler_disconnected: false,
+            last_view_at: Instant::now(),
             alert: None,
             alert_bells: 0,
             bell: ring_terminal_bell,
@@ -287,6 +290,7 @@ impl App {
                         });
                     self.collector = view;
                     self.sampler_disconnected = false;
+                    self.last_view_at = Instant::now();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -302,6 +306,14 @@ impl App {
                 }
             }
         }
+    }
+
+    /// How long sampling has been silent, when it is: the sampler has
+    /// stopped, or (not paused) no sample has come for three intervals.
+    pub(crate) fn sampling_silent(&self) -> Option<Duration> {
+        let age = self.last_view_at.elapsed();
+        let limit = (self.interval * 3).max(Duration::from_secs(5));
+        (self.sampler_disconnected || (!self.paused && age > limit)).then_some(age)
     }
 
     /// Ring once per critical episode. Acknowledgment silences the episode;

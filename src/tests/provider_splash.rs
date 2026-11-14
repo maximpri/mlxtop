@@ -457,3 +457,11 @@ fn draft_acceptance_is_measured_between_polls_not_over_the_engines_life() {
         .unwrap();
     assert_eq!(later.draft_acceptance, None);
 }
+
+#[test]
+fn an_absurd_status_age_from_splash_is_ignored_not_fatal() {
+    let mut history = SplashHistory::default();
+    let mut absurd = status(1000, 0, 0.0, json!([]));
+    absurd["transport"]["status_age_ms"] = json!(1e30);
+    assert!(history.observe(&absurd, Instant::now()).is_some());
+}

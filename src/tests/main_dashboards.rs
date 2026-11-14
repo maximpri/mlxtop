@@ -2940,3 +2940,38 @@ fn one_moment_sits_at_the_same_place_on_every_chart() {
         }
     }
 }
+
+#[test]
+fn a_stopped_sampler_is_shown_on_every_view() {
+    for tab in 0..4 {
+        let mut app = test_app(tab);
+        populate_dashboard_fixture(&mut app);
+        app.sampler_disconnected = true;
+        for (width, height) in [(120, 40), (80, 24)] {
+            let rendered = render_app(&app, width, height);
+            assert!(
+                rendered.contains("STOPPED"),
+                "tab {tab} at {width}x{height}:\n{rendered}"
+            );
+            if tab == 0 {
+                assert!(rendered.contains("Sampling stopped"));
+                assert!(!rendered.contains("Healthy"));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_late_sample_is_named_and_a_live_one_is_quiet() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let rendered = render_app(&app, 120, 40);
+    assert!(!rendered.contains("NO SAMPLE") && !rendered.contains("STOPPED"));
+    app.last_view_at = Instant::now() - Duration::from_secs(12);
+    assert!(render_app(&app, 120, 40).contains("NO SAMPLE 12s"));
+    app.paused = true;
+    assert!(
+        !render_app(&app, 120, 40).contains("NO SAMPLE"),
+        "a paused sampler is not silent"
+    );
+}

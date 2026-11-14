@@ -294,7 +294,18 @@ impl App {
         frame.render_widget(tabs, chunks[1]);
         // A heartbeat that turns with every sample, the refresh interval, and
         // the one time window every Overview chart shares.
-        let mut status = if self.paused {
+        let mut status = if let Some(age) = self.sampling_silent() {
+            // The heartbeat would only stand still; say that sampling stopped.
+            let text = if self.sampler_disconnected {
+                "STOPPED".to_owned()
+            } else {
+                format!("NO SAMPLE {}s", age.as_secs())
+            };
+            vec![Span::styled(
+                text,
+                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            )]
+        } else if self.paused {
             vec![Span::styled(
                 "PAUSED",
                 Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
@@ -513,7 +524,13 @@ impl App {
             &self.collector.current,
             &self.collector.request_history,
         );
-        crate::diagnostics_view::summary(frame, rows[1], &self.collector.current, self.paused);
+        crate::diagnostics_view::summary(
+            frame,
+            rows[1],
+            &self.collector.current,
+            self.paused,
+            self.sampler_disconnected,
+        );
         if devices {
             gpu_dashboard::draw(
                 frame,
