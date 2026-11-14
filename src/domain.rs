@@ -620,6 +620,9 @@ pub(crate) struct Sample {
     pub(crate) disk: DiskActivity,
     pub(crate) ssd_cache: Option<SsdCache>,
     pub(crate) llm_cpu: f64,
+    /// Process rows carry full command lines, which can hold paths and
+    /// keys; they are shown on screen but never written to a recording.
+    #[serde(skip)]
     pub(crate) llm_processes: Vec<LlmProcess>,
     pub(crate) largest_consumer: Option<String>,
     pub(crate) llm_model: String,

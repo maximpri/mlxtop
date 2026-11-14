@@ -535,8 +535,12 @@ the runtime's, request by request. `mlxtop replay FILE` runs them through
 today's rules and Journal and prints how many generation and prefill samples
 there were, how many fell inside a slowdown or stall, and each finding with
 its time. Record a session in which the model slowed, then replay it after a
-change to the rules, or attach it to a bug report. A recording holds request
-ids, model names and token counts, never prompts or output.
+change to the rules, or attach it to a bug report. A recording holds the
+machine's readings, hardware names, the name of the process using the most
+memory, and the runtime's request ids, model names and token counts. It never
+holds prompts, output or process command lines, and it is created readable by
+you only. Recordings made by 3.3.0 do contain the command lines of runtime
+processes; check one before sharing it.
 
 `mlxtop update` downloads the release archive for this platform from GitHub,
 checks it against the release's `SHA256SUMS` and the new binary's reported

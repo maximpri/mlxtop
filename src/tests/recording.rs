@@ -122,3 +122,40 @@ fn recording_writes_one_line_per_sample_and_replay_needs_samples() {
     assert!(run(&dir.join("missing.jsonl"), thresholds, &mut Vec::new()).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn recordings_hold_no_process_command_lines() {
+    let mut sample = decoding(1, 50.0, 0);
+    sample.llm_processes = vec![crate::domain::LlmProcess {
+        pid: 42,
+        name: "server".into(),
+        command: "server --api-key SECRET".into(),
+        rss: 1,
+        cpu: 0.0,
+        memory_percent: None,
+        state: "R".into(),
+        pageins: None,
+        pagein_rate: None,
+    }];
+    let line = serde_json::to_string(&sample).unwrap();
+    assert!(!line.contains("SECRET"), "{line}");
+    assert!(!line.contains("\"command\""), "{line}");
+    let back = read(line.as_bytes());
+    assert_eq!(back.len(), 1);
+    assert!(back[0].llm_processes.is_empty());
+    assert_eq!(back[0].llm_generation_tps, Some(50.0));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_recording_is_readable_by_its_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("mlxtop-rec-mode-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mode.jsonl");
+    let _ = std::fs::remove_file(&path);
+    drop(open_private(&path).unwrap());
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(mode, 0o600);
+}

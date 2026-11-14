@@ -17,10 +17,20 @@ static RECORDING: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Start appending every sample to `path`.
 pub(crate) fn start(path: &Path) -> io::Result<()> {
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let file = open_private(path)?;
     RECORDING
         .set(Mutex::new(file))
         .map_err(|_| io::Error::other("already recording"))
+}
+
+/// Open `path` for appending, created readable by its owner only: a
+/// recording is the user's to share, not the machine's.
+pub(crate) fn open_private(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
 }
 
 /// Append one sample, when recording. A failed write never stops sampling.
