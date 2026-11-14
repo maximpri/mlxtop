@@ -137,7 +137,7 @@ impl App {
             .take(shown)
             .map(|event| {
                 Line::from(vec![
-                    Span::styled(format!(" {} ", event.time), Style::default().fg(DIM)),
+                    Span::styled(format!(" {} ", event.time), Style::default().fg(MUTED)),
                     Span::styled(
                         format!("{:<16}", compact_label(&event.state, 16)),
                         Style::default()
