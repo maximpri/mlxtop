@@ -2975,3 +2975,20 @@ fn a_late_sample_is_named_and_a_live_one_is_quiet() {
         "a paused sampler is not silent"
     );
 }
+
+#[test]
+fn the_overview_headline_names_a_slowdown_while_paging_is_active() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    app.collector.current.impact = "PAGING ACTIVE".into();
+    app.collector.current.impact_tone = Tone::Yellow;
+    app.collector.current.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Paging,
+        summary: "GEN ↓50.0% (50.0→25.0 tok/s) · paging 6.0 MiB/s".into(),
+        lead: "paging 6.0 MiB/s (usual 0.5 MiB/s)".into(),
+        ..CorrelationInsight::default()
+    };
+    let rendered = render_app(&app, 80, 24);
+    assert!(rendered.contains("Generation slowed"), "{rendered}");
+}

@@ -121,6 +121,59 @@ pub(super) fn assess(sample: &Sample) -> Finding {
     finding
 }
 
+/// Whether the sample's rate for the phase being judged is live and current.
+fn live_rate(sample: &Sample) -> bool {
+    let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
+    sample.llm_fresh()
+        && if prefill {
+            sample.llm_prefill_tps_live
+        } else {
+            sample.llm_generation_tps_live
+        }
+}
+
+/// A measured slowdown or stall, written into `finding`. It leads the
+/// headline over any host state that is not critical: the host reading it
+/// coincides with is already its reason.
+fn measured_slowdown(sample: &Sample, finding: &mut Finding) -> bool {
+    let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
+    if live_rate(sample) && !sample.llm_remote && sample.correlation.is_material_drop() {
+        finding.title = if sample.correlation.cause == CorrelationCause::Stall {
+            "Generation stalled".into()
+        } else if prefill {
+            "Prefill slowed".into()
+        } else {
+            "Generation slowed".into()
+        };
+        finding.evidence = sample
+            .correlation
+            .summary
+            .split(" · ")
+            .next()
+            .unwrap_or("")
+            .to_owned();
+        // A slowdown that has lasted says for how long.
+        if let Some(episode) = sample
+            .correlation
+            .episode
+            .filter(|episode| episode.seconds >= 5.0)
+        {
+            finding.evidence = format!("{} for {:.0}s", finding.evidence, episode.seconds);
+        }
+        // The reason is whatever else is unusual at the same time.
+        finding.context = if sample.correlation.lead.is_empty() {
+            "Nothing else unusual".into()
+        } else {
+            format!("WITH {}", sample.correlation.lead)
+        };
+        finding.next = slowdown_next_step(sample);
+        finding.actionable = true;
+        finding.tone = sample.correlation.tone();
+        return true;
+    }
+    false
+}
+
 fn assess_observation(sample: &Sample) -> Finding {
     let paging = if sample.paging_measured() && sample.vm_available {
         rate(sample.paging_churn())
@@ -160,6 +213,13 @@ fn assess_observation(sample: &Sample) -> Finding {
         "THERMAL LIMIT" => Some("Reduce concurrency; recheck thermals."),
         _ => None,
     };
+    let critical = matches!(
+        impact,
+        "MEMORY BOTTLENECK" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY"
+    );
+    if !critical && measured_slowdown(sample, &mut finding) {
+        return finding;
+    }
     if let Some(action) = action {
         finding.title = sentence_case(impact);
         finding.next = action.into();
@@ -199,47 +259,7 @@ fn assess_observation(sample: &Sample) -> Finding {
 
     // Historical/reported rates must not become a current slowdown diagnosis.
     let fresh = sample.llm_fresh();
-    let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
-    let live = fresh
-        && if prefill {
-            sample.llm_prefill_tps_live
-        } else {
-            sample.llm_generation_tps_live
-        };
-    if live && !sample.llm_remote && sample.correlation.is_material_drop() {
-        finding.title = if sample.correlation.cause == CorrelationCause::Stall {
-            "Generation stalled".into()
-        } else if prefill {
-            "Prefill slowed".into()
-        } else {
-            "Generation slowed".into()
-        };
-        finding.evidence = sample
-            .correlation
-            .summary
-            .split(" · ")
-            .next()
-            .unwrap_or("")
-            .to_owned();
-        // A slowdown that has lasted says for how long.
-        if let Some(episode) = sample
-            .correlation
-            .episode
-            .filter(|episode| episode.seconds >= 5.0)
-        {
-            finding.evidence = format!("{} for {:.0}s", finding.evidence, episode.seconds);
-        }
-        // The reason is whatever else is unusual at the same time.
-        finding.context = if sample.correlation.lead.is_empty() {
-            "Nothing else unusual".into()
-        } else {
-            format!("WITH {}", sample.correlation.lead)
-        };
-        finding.next = slowdown_next_step(sample);
-        finding.actionable = true;
-        finding.tone = sample.correlation.tone();
-        return finding;
-    }
+    let live = live_rate(sample);
     if live
         && sample
             .llm_waiting_requests

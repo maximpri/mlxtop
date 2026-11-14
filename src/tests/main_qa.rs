@@ -98,6 +98,14 @@ fn cases() -> Vec<Case> {
     summary.summary_open = true;
     let mut diagnostics = healthy();
     diagnostics.diagnostics_open = true;
+    // A slowdown while a host state is active: the slowdown leads.
+    let mut paging_slowdown = slowed(
+        healthy(),
+        CorrelationCause::Paging,
+        "paging 6.0 MiB/s (usual 0.5 MiB/s)",
+    );
+    paging_slowdown.collector.current.impact = "PAGING ACTIVE".into();
+    paging_slowdown.collector.current.impact_tone = Tone::Yellow;
     vec![
         Case {
             name: "idle",
@@ -137,6 +145,11 @@ fn cases() -> Vec<Case> {
                 CorrelationCause::Paging,
                 "paging 96.0 MiB/s (usual 2.0 MiB/s)",
             ),
+        },
+        Case {
+            name: "slowdown-with-paging-active",
+            impact: true,
+            app: paging_slowdown,
         },
         Case {
             name: "stall",

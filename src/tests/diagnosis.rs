@@ -309,3 +309,40 @@ fn verdict_holds_between_samples_and_while_paused() {
     sample.llm_status = "stale".into();
     assert_ne!(assess(&sample).title, "Generation slowed");
 }
+
+#[test]
+fn a_measured_slowdown_outranks_a_non_critical_host_state() {
+    let slowed = |impact: &str, cause: CorrelationCause| {
+        let mut sample = busy_sample();
+        sample.impact = impact.into();
+        sample.impact_tone = Tone::Yellow;
+        sample.correlation = CorrelationInsight {
+            direction: ThroughputDirection::Down,
+            cause,
+            summary: "GEN ↓66.9% (45.1→14.9 tok/s) · unusual: compression 94.5 MiB/s".into(),
+            lead: "compression 94.5 MiB/s (usual 2.0 MiB/s)".into(),
+            ..CorrelationInsight::default()
+        };
+        sample
+    };
+    for impact in [
+        "COMPRESSION ACTIVE",
+        "PAGING ACTIVE",
+        "WATCH PAGING",
+        "MEMORY STRESS",
+        "THERMAL LIMIT",
+    ] {
+        let finding = assess(&slowed(impact, CorrelationCause::Compression));
+        assert_eq!(finding.title, "Generation slowed", "{impact}");
+        assert!(finding.evidence.contains("45.1→14.9"), "{impact}");
+        let stalled = assess(&slowed(impact, CorrelationCause::Stall));
+        assert_eq!(stalled.title, "Generation stalled", "{impact}");
+    }
+    // A critical state keeps the headline; the banner says it too.
+    let finding = assess(&slowed("HEAVY PAGING", CorrelationCause::Paging));
+    assert_eq!(finding.title, "Heavy paging");
+    // With no slowdown, a host state reads as before.
+    let mut host_only = slowed("COMPRESSION ACTIVE", CorrelationCause::Compression);
+    host_only.correlation = CorrelationInsight::default();
+    assert_eq!(assess(&host_only).title, "Compression active");
+}
