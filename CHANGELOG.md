@@ -1,5 +1,106 @@
 # Changelog
 
+## 3.3.1-rc.1 — 2026-11-14
+
+Fixes from a full review of 3.3.0. **Update with the install script or
+Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS crates this
+release replaces.
+
+### Security and privacy
+
+- **TLS crates refreshed.** rustls 0.23.46, rustls-webpki 0.103.17 and
+  webpki-roots 1.0.12 clear RUSTSEC-2026-0346 to -0349, -0381 and -0382;
+  the last two let a distrusted certificate authority vouch for a server,
+  which mattered to `mlxtop update`. CI now runs every cargo-deny check,
+  weekly too.
+- **Recordings hold no command lines** and are created readable by you
+  only. A runtime's command line can carry a key or a home path, and a
+  recording is meant to go with a bug report. Recordings made by 3.3.0 do
+  contain them: check one before sharing it.
+- **No control characters reach the terminal** from `--once`, `doctor`,
+  `replay` or the exit summary, whatever a runtime or a recording holds.
+- **The oMLX key goes only to a found oMLX.** It is sent when an oMLX
+  process was detected or oMLX was chosen, never to another program
+  answering on port 8000. The updater accepts release assets only from
+  `https://github.com/`; the log is created owner-only.
+
+### The verdict
+
+- **A measured slowdown leads the headline.** A 67% drop read `Compression
+  active` while the chart and Journal showed the slowdown; any host state
+  other than a critical one now gives way to `Generation slowed` or
+  `Generation stalled`.
+- **The verdict holds between samples at every interval.** Freshness is
+  decided when a sample is taken, so a slowdown no longer turns `Healthy` 5 s
+  after a sample at long intervals or while paused. Slowdowns are found at
+  30 s and 60 s intervals, the session summary counts work above 10 s, and
+  counter-based runtimes keep their rates at 5 s and more.
+- **One bell and one story per incident.** A critical episode ends after
+  three calm samples (the bell rang 8 times in 75 s near a threshold), a
+  state already told within 10 samples is not told again, and a stall that
+  comes back within a minute is the same stall. `Paging active` begins at
+  the documented 4 MiB/s.
+- **A prompt being read is not a slowdown** on runtimes that count tokens
+  but list no requests, and a slowdown whose request ends is closed with an
+  `ENDED` row.
+- **Stopped sampling is shown.** `NO SAMPLE 12s` or `STOPPED` replaces the
+  heartbeat, and the verdict reads `Sampling stopped`; a panic message no
+  longer prints over the dashboard.
+
+### Readings
+
+- **A failed reading is unknown, not zero.** One failed `ps` made the
+  runtime vanish and emptied its speed chart; one failed `vm_stat` raised
+  `SWAP THRASHING` at 76 GiB/s. A comma-decimal locale (German, French,
+  ...) hid every process and zeroed swap; one non-UTF-8 argument anywhere
+  discarded the process list.
+- **Process names are real** on macOS (`Google Chrome`, not `Go`), and only
+  serving processes are runtimes: `tail -f ollama-notes.txt` is not Ollama.
+  Runtimes started through `python` or `node` are still found;
+  `MLXTOP_PROVIDER` forces a choice.
+- **A stock oMLX shows its speeds.** The key is read from
+  `MLXTOP_PROVIDER_API_KEY`, `OMLX_API_KEY`, `server.env` or `auth.api_key`
+  in oMLX's own `settings.json`; with none, the Overview says so.
+- **A runtime that hangs costs one short wait.** Every request of one poll
+  shares 1.5 s, so memory and paging keep being sampled; quit does not wait
+  for it. A runtime started after mlxtop shows within seconds, not 30.
+  `localhost` and kept-open connections work for oMLX.
+- **No runtime reads `No LLM runtime detected`**, and one that stopped
+  answering reads `UNREACHABLE` with its age. Every runtime's connection
+  changes are logged.
+- **llama.cpp averages come from its counters**, not gauges each scrape
+  resets; vLLM prefill leaves out cached tokens and is not called live;
+  mlx-serve restarts are seen; a server answering 401 or 503 on its second
+  port is found there.
+- **GPU memory is compared with a limit only when one is known**, and the
+  Linux memory panel no longer counts the page cache twice: cache and free
+  add up to `MemAvailable`.
+
+### Interface
+
+- **Signals restore the terminal.** `kill`, `pkill`, `timeout` or a closed
+  session no longer leave the shell in raw mode; Ctrl-C quits from Help.
+- **Small terminals show the verdict** above the size note, and keys other
+  than quit wait until the terminal is larger.
+- **The Journal reaches its oldest event** when rows wrap; Down past the end
+  no longer stores an index Up has to unwind.
+- **Replay lists every finding** (it stopped after about 120 requests),
+  reports lines it could not read, and refuses files that are not
+  recordings.
+- **Messages name what is wrong:** `mlxtop dcotor` says `unknown command`,
+  a `config.json` that does not parse is reported once, and Settings keeps a
+  symlinked config linked and private.
+- Smaller fixes: `CPU 0.0%`, not `-0.0%`; `1 request waiting`; the paging
+  panel says `memory is short` only from the warning rate; the
+  discrete-GPU layout drops `% resident` and `No paging traffic`.
+
+### Delivery
+
+- Each release is installed by a machine with both install scripts and
+  updated from the previous one, on macOS, Linux and Windows. Jobs have
+  timeouts, the toolchain action is pinned, a final release with no
+  changelog section fails, and a CI job checks Rust 1.88.
+
 ## 3.3.0 — 2026-11-11
 
 ### Diagnosis
