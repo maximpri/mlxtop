@@ -18,6 +18,30 @@ mod native;
 mod splash;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
+
+/// The sampler's poll interval in seconds, so rate windows can follow it.
+static POLL_INTERVAL_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn set_poll_interval(interval: Duration) {
+    POLL_INTERVAL_SECS.store(
+        interval.as_secs().max(1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The longest gap a rate may be computed over: `floor`, or two poll
+/// intervals and two seconds, whichever is longer. A wider gap is a backoff
+/// or a pause, not a measurement of the current speed.
+pub(crate) fn rate_span(floor: Duration) -> Duration {
+    rate_span_for(
+        floor,
+        POLL_INTERVAL_SECS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+pub(crate) fn rate_span_for(floor: Duration, interval_secs: u64) -> Duration {
+    floor.max(Duration::from_secs(interval_secs * 2 + 2))
+}
 const MLX_SERVE_PORT: u16 = 11234;
 const SPLASH_PORT: u16 = 8000;
 
@@ -722,7 +746,7 @@ impl LlamaRate {
         };
         let rate = self.previous.as_ref().and_then(|(old, at)| {
             let span = now.checked_duration_since(*at)?;
-            if span.is_zero() || span > LLAMA_RATE_SPAN {
+            if span.is_zero() || span > rate_span(LLAMA_RATE_SPAN) {
                 return None;
             }
             let mut grown = 0_u64;

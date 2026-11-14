@@ -215,10 +215,14 @@ fn live_requires_fresh_membership_and_file_history_keeps_its_age() {
         ..Sample::default()
     };
     let entry = history.entries.back().unwrap();
-    assert!(is_live(entry, &sample, now));
-    assert!(!is_live(entry, &sample, now + Duration::from_secs(6)));
+    assert!(is_live(entry, &sample));
+    // Freshness is decided when the sample is taken: a stale sample is not
+    // live, however recently it was drawn.
+    sample.llm_status = "stale".into();
+    assert!(!is_live(entry, &sample));
+    sample.llm_status = "generating".into();
     sample.llm_requests.clear();
-    assert!(!is_live(entry, &sample, now));
+    assert!(!is_live(entry, &sample));
     request.completed = true;
     request.observed_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1700000000));
     history.observe(&[request.clone()]);

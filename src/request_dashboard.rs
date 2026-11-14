@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 use crate::config::Thresholds;
-use crate::domain::{ChartMetric, Sample, TelemetrySource};
+use crate::domain::{ChartMetric, Sample};
 
 /// Prompts smaller than this keep a neutral CACHED color.
 const CACHE_GRADED_PROMPT: u64 = 4096;
@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 fn exact(n: u64) -> String {
     let digits = n.to_string();
     let mut output = String::new();
@@ -140,17 +140,11 @@ fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
     }
 }
 
-fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
-    sample.llm_source == TelemetrySource::Live
-        && sample.llm_status != "stale"
+fn is_live(entry: &Entry, sample: &Sample) -> bool {
+    // Live means listed in the current, fresh sample: decided when the
+    // sample was taken, not against the clock while it is drawn.
+    sample.llm_fresh()
         && !entry.usage.completed
-        && now
-            .duration_since(entry.last_seen)
-            .is_ok_and(|age| age <= Duration::from_secs(5))
-        && sample.llm_observed_at.is_some_and(|at| {
-            now.duration_since(at)
-                .is_ok_and(|age| age <= Duration::from_secs(5))
-        })
         && sample
             .llm_requests
             .iter()
@@ -371,8 +365,7 @@ pub(super) fn draw(
             .unwrap_or(0),
         1,
     );
-    let now = SystemTime::now();
-    let live = selected.is_some_and(|i| is_live(&history.entries[i], sample, now));
+    let live = selected.is_some_and(|i| is_live(&history.entries[i], sample));
     let cached = selected.and_then(|i| {
         let usage = &history.entries[i].usage;
         usage.cached.filter(|n| *n <= usage.prompt)
@@ -599,11 +592,7 @@ pub(super) fn draw(
     let first_x = plot.right() - visible as u16 * slot_width;
     for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
         let x = first_x + offset as u16 * slot_width;
-        let color = if is_live(old, sample, now) {
-            CYAN
-        } else {
-            BLUE
-        };
+        let color = if is_live(old, sample) { CYAN } else { BLUE };
         let bar_width = slot_width
             .saturating_sub(2)
             .min(12_u16.saturating_mul(zoom.max(1)))

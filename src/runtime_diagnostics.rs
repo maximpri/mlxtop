@@ -298,13 +298,7 @@ impl Capability {
                 telemetry_age(at)
             );
         }
-        let stale = sample.llm_status == "stale"
-            || (sample.llm_source == TelemetrySource::Live
-                && sample.llm_observed_at.is_some_and(|at| {
-                    SystemTime::now()
-                        .duration_since(at)
-                        .is_ok_and(|age| age.as_secs_f64() > 5.0)
-                }));
+        let stale = sample.llm_source == TelemetrySource::Live && !sample.llm_fresh();
         if stale {
             return format!("stale · {}", telemetry_age(sample.llm_observed_at));
         }

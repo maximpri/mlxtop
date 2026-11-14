@@ -193,9 +193,13 @@ pub(crate) fn duration_label(seconds: f64) -> String {
     }
 }
 
-/// A spinner frame that advances with every sample, from the sample's clock.
+/// A spinner frame that advances with every sample: from its sequence
+/// number, or (for samples not taken this session) from its clock.
 pub(crate) fn activity_frame(sample: &Sample) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    if sample.sequence > 0 {
+        return FRAMES[(sample.sequence % 10) as usize];
+    }
     sample
         .updated
         .chars()

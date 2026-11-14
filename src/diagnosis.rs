@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Separate measured problems from high resource use during normal work.
-use crate::domain::{CorrelationCause, Sample, TelemetrySource, ThroughputDirection, Tone};
+use crate::domain::{CorrelationCause, Sample, ThroughputDirection, Tone};
 use crate::formatting::{
     bytes, count, llm_generation_rate_label, percent_u8, pressure_state_label, rate,
 };
-use std::time::{Duration, SystemTime};
 
 pub(super) struct Finding {
     pub title: String,
@@ -199,13 +198,7 @@ fn assess_observation(sample: &Sample) -> Finding {
     }
 
     // Historical/reported rates must not become a current slowdown diagnosis.
-    let fresh = sample.llm_source == TelemetrySource::Live
-        && sample.llm_status != "stale"
-        && sample.llm_observed_at.is_some_and(|at| {
-            SystemTime::now()
-                .duration_since(at)
-                .is_ok_and(|age| age <= Duration::from_secs(5))
-        });
+    let fresh = sample.llm_fresh();
     let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
     let live = fresh
         && if prefill {

@@ -88,9 +88,11 @@ fn capabilities_preserve_sources_and_missing_or_stale_observations() {
                 || c.observed(&sample).contains("reported completions")
         );
     }
+    // An old reading is marked stale when the sample is taken; a fresh
+    // sample drawn later is still current.
     sample.llm_status = "running".into();
     sample.llm_observed_at = Some(SystemTime::now() - std::time::Duration::from_secs(60));
-    assert!(capabilities("oMLX")[1].observed(&sample).contains("stale"));
+    assert!(!capabilities("oMLX")[1].observed(&sample).contains("stale"));
     sample.llm_source = TelemetrySource::Report;
     assert_eq!(capabilities("Ollama")[1].source, "client recorder");
     assert!(capabilities("Ollama")[1]

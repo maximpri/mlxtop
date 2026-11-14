@@ -49,6 +49,7 @@ impl Sampler {
         let handle = thread::spawn(move || {
             let mut collector = build();
             let mut interval = interval;
+            crate::providers::set_poll_interval(interval);
             let mut paused = false;
             let mut next_sample = Instant::now();
 
@@ -89,6 +90,7 @@ impl Sampler {
                     }
                     Ok(SamplerCommand::SetInterval(value)) => {
                         interval = value;
+                        crate::providers::set_poll_interval(interval);
                         diagnostics_log(
                             "INFO",
                             "sampler_interval_changed",

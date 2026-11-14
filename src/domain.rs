@@ -565,6 +565,9 @@ pub(crate) struct Sample {
     #[serde(skip)]
     pub(crate) runtime: crate::runtime_diagnostics::RuntimeReport,
     pub(crate) updated: String,
+    /// Which sample of the session this is; turns the heartbeat.
+    #[serde(skip)]
+    pub(crate) sequence: u64,
     /// Local offset from UTC in seconds, read alongside `updated`. Request
     /// times use it so every clock on screen shares the Journal's zone.
     pub(crate) utc_offset: Option<i32>,
@@ -683,6 +686,14 @@ pub(crate) struct Sample {
 }
 
 impl Sample {
+    /// Whether the runtime's readings in this sample are current. Decided
+    /// once, when the sample is taken (telemetry older than a few seconds is
+    /// marked `stale` then), so a verdict holds until the next sample at any
+    /// interval and while paused.
+    pub(crate) fn llm_fresh(&self) -> bool {
+        self.llm_source == TelemetrySource::Live && self.llm_status != "stale"
+    }
+
     /// Paging rates are measured and the rate baseline is ready.
     pub(crate) fn paging_measured(&self) -> bool {
         self.swap_available && self.rate_ready && !self.paging_unavailable
@@ -736,6 +747,7 @@ impl Default for Sample {
         Self {
             runtime: Default::default(),
             updated: "waiting".into(),
+            sequence: 0,
             utc_offset: None,
             pressure: "UNKNOWN".into(),
             pressure_meaning: "unavailable".into(),

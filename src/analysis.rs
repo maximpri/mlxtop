@@ -768,6 +768,9 @@ pub(crate) struct CorrelationEngine {
     episode: Option<Episode>,
     /// When generation was last seen running.
     seen: Option<SystemTime>,
+    /// Seconds between the last two judged samples: the poll cadence, so
+    /// "idle long ago" means the same at a 1 s and a 60 s interval.
+    cadence: f64,
     /// Which requests were writing at the previous sample.
     writers: Vec<String>,
     /// Prefill is judged as generation is, with usual values of its own: a
@@ -865,9 +868,13 @@ impl CorrelationEngine {
             };
         }
         // A slowdown whose request went idle long ago is over.
-        if seconds_between(self.seen, current.at) >= SETTLE_SECONDS {
+        let gap = seconds_between(self.seen, current.at);
+        if gap >= SETTLE_SECONDS.max(3.0 * self.cadence) {
             self.keep_pending(thresholds);
             self.episode = None;
+        }
+        if gap > 0.0 {
+            self.cadence = gap;
         }
         self.seen = current.at;
         // A request that stops producing tokens is observed, not inferred.

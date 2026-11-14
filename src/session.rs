@@ -17,6 +17,8 @@ const MAX_GAP_SECONDS: f64 = 10.0;
 pub(crate) struct Session {
     pub(crate) started: Option<SystemTime>,
     last: Option<SystemTime>,
+    /// Seconds between the previous two samples: the poll cadence.
+    cadence: f64,
     /// Seconds watched while an answer was being written, or a prompt read.
     pub(crate) generating: f64,
     pub(crate) prefilling: f64,
@@ -39,7 +41,13 @@ impl Session {
             .replace(now)
             .and_then(|last| now.duration_since(last).ok())
             .map_or(0.0, |gap| gap.as_secs_f64());
-        if seconds <= 0.0 || seconds > MAX_GAP_SECONDS {
+        // A gap longer than the cadence allows was not watched (a pause, a
+        // suspended machine); the limit follows the interval.
+        let limit = MAX_GAP_SECONDS.max(2.0 * self.cadence);
+        if seconds > 0.0 {
+            self.cadence = seconds;
+        }
+        if seconds <= 0.0 || seconds > limit {
             return;
         }
         let insight = &sample.correlation;

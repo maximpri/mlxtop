@@ -96,7 +96,7 @@ impl SplashHistory {
                     && current.decoded >= old.decoded
                     && current.prefilled >= old.prefilled
                     && current.prefill_ms >= old.prefill_ms
-                    && current.at.duration_since(old.at) <= MAX_RATE_SPAN =>
+                    && current.at.duration_since(old.at) <= super::rate_span(MAX_RATE_SPAN) =>
             {
                 let seconds = current.at.duration_since(old.at).as_secs_f64();
                 self.generation = Some((current.decoded - old.decoded) as f64 / seconds);

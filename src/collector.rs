@@ -256,6 +256,7 @@ impl Collector {
         let sample_started = Instant::now();
         let now = sample_started;
         let mut sample = Sample {
+            sequence: self.current.sequence + 1,
             total_memory: self.total_memory,
             metal: self.metal.clone(),
             ..Sample::default()

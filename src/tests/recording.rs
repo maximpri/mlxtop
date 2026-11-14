@@ -236,3 +236,69 @@ fn a_file_of_unrelated_json_objects_is_not_a_recording() {
     assert!(samples.is_empty());
     assert_eq!(skipped, 2);
 }
+
+fn polled(at: u64, tps: f64, out: u64, swap: u64) -> Sample {
+    let mut sample = decoding(0, tps, swap);
+    sample.llm_observed_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(at));
+    sample.updated = format!("t{at}");
+    sample.llm_requests[0].id = "long".into();
+    sample.llm_requests[0].output = Some(out);
+    sample
+}
+
+#[test]
+fn a_slowdown_is_found_at_every_supported_interval() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    for step in [1u64, 10, 30, 60] {
+        let mut samples = Vec::new();
+        for i in 0..12u64 {
+            samples.push(polled(i * step, 50.0, 100 + i * 50, 0));
+        }
+        for i in 12..24u64 {
+            samples.push(polled(
+                i * step,
+                20.0,
+                700 + i * 20,
+                thresholds.swap_warn_rate * 2,
+            ));
+        }
+        let result = replay(&mut samples, thresholds);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|(_, state, _)| state == "SLOWDOWN"),
+            "interval {step}s: {:?}",
+            result.findings
+        );
+    }
+}
+
+#[test]
+fn the_session_counts_work_at_a_sixty_second_interval() {
+    let mut session = crate::session::Session::default();
+    for i in 0..20u64 {
+        session.observe(&polled(i * 60, 50.0, 100, 0));
+    }
+    assert!(session.generating >= 60.0 * 18.0, "{}", session.generating);
+    // A pause at a one-second interval is still not counted as work.
+    let mut session = crate::session::Session::default();
+    for at in [0u64, 1, 2, 3, 120, 121] {
+        session.observe(&polled(at, 50.0, 100, 0));
+    }
+    assert!(session.generating <= 4.0, "{}", session.generating);
+}
+
+#[test]
+fn rate_windows_follow_the_poll_interval() {
+    let five = Duration::from_secs(5);
+    assert_eq!(crate::providers::rate_span_for(five, 1), five);
+    assert_eq!(
+        crate::providers::rate_span_for(five, 10),
+        Duration::from_secs(22)
+    );
+    assert_eq!(
+        crate::providers::rate_span_for(Duration::from_secs(30), 60),
+        Duration::from_secs(122)
+    );
+}

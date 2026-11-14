@@ -770,7 +770,8 @@ impl MetricsHistory {
                 self.sessions = SessionSpeeds::default();
                 self.prefill = PrefillWindow::default();
             }
-            if old_provider == provider && elapsed > 0.0 && elapsed <= 5.0 && same_start {
+            let span = super::rate_span(Duration::from_secs(5)).as_secs_f64();
+            if old_provider == provider && elapsed > 0.0 && elapsed <= span && same_start {
                 result.generation_tps = metrics
                     .delta(previous, &series.generation)
                     .map(|n| n / elapsed);

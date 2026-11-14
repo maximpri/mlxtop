@@ -50,10 +50,10 @@ fn high_gpu_usage_is_evidence_not_a_slowdown_or_alarm() {
     sample.llm_active_requests = Some(1);
     assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
     sample.llm_active_requests = Some(0);
-    sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(60));
+    sample.llm_status = "stale".into();
     assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
     // oMLX's Splash engine busy with requests oMLX does not track.
-    sample.llm_observed_at = Some(SystemTime::now());
+    sample.llm_status = "healthy".into();
     sample.llm_status = "untracked".into();
     assert_eq!(
         assess(&sample).next,
@@ -167,7 +167,7 @@ fn compression_and_queue_findings_name_their_evidence() {
 
     // A stale or old reading must not produce a queue diagnosis.
     let mut stale = queued.clone();
-    stale.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(60));
+    stale.llm_status = "stale".into();
     let finding = assess(&stale);
     assert_eq!(finding.next, "Live generation rate unavailable.");
     assert!(!finding.actionable);
@@ -290,4 +290,22 @@ fn advice_carries_the_readings_that_make_it_worth_acting_on() {
     sample.correlation.lead = "paging 90.0 MiB/s".into();
     sample.correlation.unusual = vec![CorrelationCause::Paging];
     assert!(next(&mut sample, CorrelationCause::Stall).contains("beside paging 90.0 MiB/s"));
+}
+
+#[test]
+fn verdict_holds_between_samples_and_while_paused() {
+    let mut sample = busy_sample();
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Queueing,
+        summary: "GEN ↓20.0% (30.0→24.0 tok/s) · unusual: 2 waiting (usual 0)".into(),
+        lead: "2 waiting (usual 0)".into(),
+        ..CorrelationInsight::default()
+    };
+    // Drawn 30 s after it was taken (a long interval, or paused): still slow.
+    sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(30));
+    assert_eq!(assess(&sample).title, "Generation slowed");
+    // Marked stale when taken: not a current slowdown.
+    sample.llm_status = "stale".into();
+    assert_ne!(assess(&sample).title, "Generation slowed");
 }
