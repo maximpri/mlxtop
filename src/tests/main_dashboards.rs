@@ -2992,3 +2992,13 @@ fn the_overview_headline_names_a_slowdown_while_paging_is_active() {
     let rendered = render_app(&app, 80, 24);
     assert!(rendered.contains("Generation slowed"), "{rendered}");
 }
+
+#[test]
+fn with_no_runtime_the_header_says_so_once() {
+    let mut app = test_app(0);
+    app.collector.current.llm_provider = "none".into();
+    app.collector.current.llm_model = "not detected".into();
+    let rendered = render_app(&app, 120, 40);
+    assert!(rendered.contains("No LLM runtime detected"), "{rendered}");
+    assert!(!rendered.contains("none · not detected"));
+}

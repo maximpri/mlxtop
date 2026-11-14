@@ -142,6 +142,8 @@ pub(crate) struct Collector {
     /// same-story window is the same stall.
     pub(crate) last_stall_row: Option<std::time::SystemTime>,
     pub(crate) stall_row_skipped: bool,
+    /// The runtime connection state last written to the log.
+    pub(crate) runtime_logged: Option<String>,
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
     pub(crate) prefill_history: VecDeque<ChartPoint>,
@@ -258,6 +260,7 @@ impl Collector {
             journal_paging: Held::default(),
             last_stall_row: None,
             stall_row_skipped: false,
+            runtime_logged: None,
             slow_read_at: None,
             session: Default::default(),
             current: Sample::default(),
@@ -481,6 +484,7 @@ impl Collector {
         sample.llm_processes = llm_processes;
         let live_stats = self.llm_client.poll(detected_provider.as_deref());
         sample.runtime = self.llm_client.report();
+        self.log_runtime_change(&sample.runtime);
         let should_read_log = !self
             .llm_client
             .provider_adapter
@@ -885,6 +889,34 @@ impl Collector {
             signals: self.signals.clone(),
             request_history: self.request_history.clone(),
             operator_history: self.operator_history.clone(),
+        }
+    }
+
+    /// One log line when a runtime's connection or its failing probes
+    /// change, for every runtime: the log then says why readings are missing.
+    fn log_runtime_change(&mut self, report: &crate::runtime_diagnostics::RuntimeReport) {
+        let failures: Vec<String> = report
+            .probes
+            .iter()
+            .filter_map(|probe| {
+                probe
+                    .issue
+                    .as_ref()
+                    .map(|issue| format!("{}={issue}", probe.path))
+            })
+            .collect();
+        let state = format!(
+            "provider={} endpoint={} connected={} {}",
+            log_field(report.provider.as_deref().unwrap_or("none")),
+            log_field(&report.endpoint),
+            report.connected,
+            log_field(&failures.join(";"))
+        );
+        if self.runtime_logged.as_deref() != Some(state.as_str()) {
+            if report.attempted_at.is_some() {
+                diagnostics_log("INFO", "runtime_poll", &state);
+            }
+            self.runtime_logged = Some(state);
         }
     }
 

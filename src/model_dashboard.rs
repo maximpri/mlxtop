@@ -175,7 +175,7 @@ fn plain(value: String, color: Color) -> Line<'static> {
 
 fn identity(sample: &Sample, width: usize) -> Line<'static> {
     // With no runtime found, one statement, not "not detected" twice.
-    let text = if sample.llm_provider == "not detected" {
+    let text = if matches!(sample.llm_provider.as_str(), "not detected" | "none") {
         "No LLM runtime detected".to_owned()
     } else {
         format!("{} · {}", llm_runtime_label(sample), sample.llm_model)
@@ -191,6 +191,17 @@ fn identity(sample: &Sample, width: usize) -> Line<'static> {
 fn state(sample: &Sample) -> Line<'static> {
     // Prompt load shows prefill progress with its time left; the badge
     // names the state only.
+    // A runtime that stopped answering is unreachable; its last readings are
+    // not live, however recent they once were.
+    if sample.llm_status == "stale" {
+        return Line::from(vec![
+            tone_badge(llm_status_tone(&sample.llm_status), "UNREACHABLE"),
+            Span::styled(
+                format!("  {}", telemetry_age(sample.llm_observed_at)),
+                Style::default().fg(MUTED),
+            ),
+        ]);
+    }
     let status = sample.llm_status.to_ascii_uppercase();
     let badge = if llm_is_working(&sample.llm_status) {
         format!("{} {status}", activity_frame(sample))

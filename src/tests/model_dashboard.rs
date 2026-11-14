@@ -109,16 +109,20 @@ fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
 }
 
 #[test]
-fn long_model_never_hides_stale_state_or_source_age() {
+fn long_model_never_hides_unreachable_state_or_its_age() {
     let mut sample = live_sample();
     sample.llm_model = "a-very-long-model-name-".repeat(8);
     sample.llm_status = "stale".into();
     sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(3_600));
     for height in [3, 5] {
         let screen = render(&sample, &request_history::History::default(), 80, height);
-        for label in ["STALE", "LIVE", "1h old", "PROMPT 32.8k"] {
+        for label in ["UNREACHABLE", "1h old", "PROMPT 32.8k"] {
             assert!(screen.contains(label), "missing {label}\n{screen}");
         }
+        assert!(
+            !screen.contains("LIVE"),
+            "an unreachable runtime is not live\n{screen}"
+        );
         assert!(screen.contains('…'));
     }
 }

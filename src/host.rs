@@ -8,6 +8,28 @@ use std::{fs, thread};
 use crate::logging::{diagnostics_log, log_field};
 pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Programs whose start has failed and been logged since they last ran.
+static SPAWN_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// True the first time `program` fails to start (until it starts again).
+pub(crate) fn first_spawn_failure(program: &str) -> bool {
+    let Ok(mut failed) = SPAWN_FAILED.lock() else {
+        return true;
+    };
+    if failed.iter().any(|name| name == program) {
+        false
+    } else {
+        failed.push(program.to_owned());
+        true
+    }
+}
+
+fn spawned(program: &str) {
+    if let Ok(mut failed) = SPAWN_FAILED.lock() {
+        failed.retain(|name| name != program);
+    }
+}
+
 pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
     let command = || {
         format!(
@@ -34,13 +56,20 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(child) => child,
+        Ok(child) => {
+            spawned(program);
+            child
+        }
         Err(error) => {
-            diagnostics_log(
-                "WARN",
-                "command_spawn_failed",
-                format!("{} error={}", command(), log_field(&error.to_string())),
-            );
+            // A missing optional tool (nvidia-smi without NVIDIA drivers) is
+            // said once, not on every sample.
+            if first_spawn_failure(program) {
+                diagnostics_log(
+                    "WARN",
+                    "command_spawn_failed",
+                    format!("{} error={}", command(), log_field(&error.to_string())),
+                );
+            }
             return None;
         }
     };

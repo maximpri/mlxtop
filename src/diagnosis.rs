@@ -304,6 +304,11 @@ fn assess_observation(sample: &Sample) -> Finding {
     ) {
         // No generation rate is expected before the first token.
         finding.next = "".into();
+    } else if !live
+        && sample.llm_source == crate::domain::TelemetrySource::None
+        && matches!(sample.llm_provider.as_str(), "none" | "not detected")
+    {
+        finding.next = "No runtime found · d for setup".into();
     } else if !live && omlx_key_missing(sample) {
         // Connected, but the admin statistics need a key nobody gave.
         finding.next = "No live rates: oMLX admin key not set · d for setup".into();

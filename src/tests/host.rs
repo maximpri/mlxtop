@@ -85,3 +85,12 @@ fn command_output_with_invalid_utf8_is_kept() {
         .expect("an undecodable byte must not discard the reading");
     assert_eq!(output.lines().next(), Some("a"));
 }
+
+#[test]
+fn a_missing_program_is_reported_once_until_it_runs() {
+    let name = format!("mlxtop-missing-{}", std::process::id());
+    assert!(first_spawn_failure(&name));
+    assert!(!first_spawn_failure(&name));
+    assert_eq!(System.command(&name, &[]), None);
+    assert!(!first_spawn_failure(&name), "still missing: still quiet");
+}

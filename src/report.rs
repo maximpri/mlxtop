@@ -113,14 +113,23 @@ pub(crate) fn write_static(
         optional_bytes(sample.mlx.process_footprint),
         optional_bytes(sample.metal.resource_limit)
     )?;
-    writeln!(
-        out,
-        "LLM          {} · {} · {} · {}",
-        llm_runtime_label(sample),
-        sample.llm_status,
-        telemetry_source(sample),
-        llm_model_label(sample, 40)
-    )?;
+    if matches!(sample.llm_provider.as_str(), "none" | "not detected") {
+        writeln!(out, "LLM          none detected")?;
+    } else {
+        // Empty fields are left out rather than joined.
+        let fields = [
+            llm_runtime_label(sample),
+            sample.llm_status.clone(),
+            telemetry_source(sample),
+            llm_model_label(sample, 40),
+        ];
+        let fields: Vec<&str> = fields
+            .iter()
+            .map(String::as_str)
+            .filter(|field| !field.trim().is_empty())
+            .collect();
+        writeln!(out, "LLM          {}", fields.join(" · "))?;
+    }
     if let Some(details) = &sample.llm_details {
         writeln!(out, "PROVIDER     {details}")?;
     }

@@ -1429,3 +1429,19 @@ fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
     sample.vm_available = false;
     assert!(!write_doctor(&mut Vec::new(), &sample).unwrap());
 }
+
+#[test]
+fn the_static_report_says_plainly_when_no_runtime_was_found() {
+    let sample = Sample {
+        llm_provider: "none".into(),
+        llm_status: "offline".into(),
+        llm_model: "not detected".into(),
+        ..Sample::default()
+    };
+    let mut out = Vec::new();
+    write_static(&mut out, &sample, 2, Thresholds::default(), Platform::MacOs).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let line = text.lines().find(|line| line.starts_with("LLM ")).unwrap();
+    assert_eq!(line.trim_end(), "LLM          none detected");
+    assert!(!text.contains("·  ·"));
+}
