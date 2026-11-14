@@ -89,9 +89,11 @@ fn gpu_memory(sample: &Sample) -> Option<String> {
         return gpu::memory_totals(&sample.gpus)
             .map(|(used, total)| format!("VRAM sum {} / {}", bytes(used), bytes(total)));
     }
+    // Against a limit, or no denominator at all: the driver's current
+    // allocation grows with use and is not a limit.
     match (
         sample.gpu_in_use,
-        crate::memory_composition::gpu_limit(sample).or(sample.gpu_alloc),
+        crate::memory_composition::gpu_limit(sample),
     ) {
         (Some(used), Some(total)) => Some(format!("GPU mem {} / {}", bytes(used), bytes(total))),
         (Some(used), None) => Some(format!("GPU mem {}", bytes(used))),
@@ -229,7 +231,7 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
     } else {
         (
             sample.gpu_in_use?,
-            crate::memory_composition::gpu_limit(sample).or(sample.gpu_alloc)?,
+            crate::memory_composition::gpu_limit(sample)?,
         )
     };
     if total == 0 {

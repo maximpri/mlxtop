@@ -142,9 +142,9 @@ pub(crate) fn parse_linux_meminfo(text: &str) -> LinuxMeminfo {
     } else {
         anon_kb
     };
-    let file_kb = parse_meminfo_value_kb(text, "Active(file):")
-        .saturating_add(parse_meminfo_value_kb(text, "Inactive(file):"))
-        .saturating_add(parse_meminfo_value_kb(text, "Cached:"))
+    // The file LRU lists and Cached + Buffers count the same pages: one of
+    // them, not both.
+    let file_kb = parse_meminfo_value_kb(text, "Cached:")
         .saturating_add(parse_meminfo_value_kb(text, "Buffers:"));
     LinuxMeminfo {
         total_kb,
@@ -282,9 +282,13 @@ pub(crate) fn sample_linux_memory(
     sample.resident_memory =
         resident_memory_bytes(total, info.free_kb.and_then(|free| free.checked_mul(1024)));
     sample.vm_available = true;
+    // Laid out so that cache and free add up to what the kernel says is
+    // available: what is neither the apps' nor available (kernel, slab,
+    // unreclaimable cache) is drawn as wired.
+    let available = info.available_kb.saturating_mul(1024).min(total);
     sample.anonymous = info.anon_kb.saturating_mul(1024);
-    sample.file_backed = info.file_kb.saturating_mul(1024);
-    sample.wired = 0;
+    sample.file_backed = info.file_kb.saturating_mul(1024).min(available);
+    sample.wired = total.saturating_sub(sample.anonymous.saturating_add(available));
     sample.compressor = 0;
     sample.compressed_logical = 0;
 

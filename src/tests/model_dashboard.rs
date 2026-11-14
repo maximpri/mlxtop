@@ -21,6 +21,7 @@ fn live_sample() -> Sample {
         metal: MetalTelemetry {
             device_name: Some("Apple M4 Max".into()),
             gpu_cores: Some(32),
+            resource_limit: Some(16 * 1024_u64.pow(3)),
             ..MetalTelemetry::default()
         },
         ..Sample::default()
@@ -265,9 +266,12 @@ fn the_header_colours_a_reading_that_is_unusual() {
 fn gpu_memory_reads_against_the_limit_and_thermal_and_power_always_show() {
     let mut sample = live_sample();
     let history = request_history::History::default();
-    // Without a limit, the driver's allocation is all there is to compare with.
+    // Without a limit there is nothing to compare with: the driver's current
+    // allocation grows with use and is not one.
+    sample.metal.resource_limit = None;
     let screen = render(&sample, &history, 160, 6);
-    assert!(screen.contains("8.0 GiB / 16.0 GiB"), "{screen}");
+    assert!(screen.contains("GPU mem 8.0 GiB"), "{screen}");
+    assert!(!screen.contains("8.0 GiB / 16.0 GiB"), "{screen}");
     // With one, the header agrees with the memory legend's GPU limit.
     sample.metal.resource_limit = Some(32 * 1024_u64.pow(3));
     sample.system_power_mw = Some(61_400);

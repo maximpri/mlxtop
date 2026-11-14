@@ -112,7 +112,11 @@ fn linux_collector_reads_proc_nvidia_and_thermal_zones() {
     assert_eq!(first.pressure_meaning, "warning");
     assert_eq!(first.resident_memory, Some(14_000_000 * 1024));
     assert_eq!(first.anonymous, 7_000_000 * 1024);
-    assert_eq!(first.file_backed, 5_600_000 * 1024);
+    // Cached + Buffers, not also the file LRU lists that count the same
+    // pages; cache and free add up to MemAvailable.
+    assert_eq!(first.file_backed, 3_100_000 * 1024);
+    let sizes = crate::memory_composition::segments(&first).unwrap();
+    assert_eq!(crate::memory_headroom::left(sizes), 4_000_000 * 1024);
     assert_eq!(
         (first.swap_total, first.swap_used),
         (4_000_000 * 1024, 1_000_000 * 1024)
