@@ -635,10 +635,7 @@ impl Adapter {
             .get()
             .filter(|port| ports.contains(port))
             .unwrap_or_else(|| {
-                let port = ports
-                    .iter()
-                    .copied()
-                    .find(|port| self.endpoint.get(*port, path).is_ok())
+                let port = first_answering_port(ports, |port| self.endpoint.get(port, path))
                     .unwrap_or(ports[0]);
                 self.answered.set(Some(port));
                 port
@@ -728,7 +725,17 @@ impl Adapter {
             .observe(slots.as_ref().and_then(llama_progress), now);
         let slots = slots.and_then(|slots| parse_llama_slots(&slots));
         let metrics = self.get(port, "/metrics");
+        let averages = metrics
+            .as_deref()
+            .and_then(|text| self.llama.averages(text));
         let mut result = merge_llama_metrics(slots, metrics.as_deref());
+        // The `*_tokens_seconds` gauges average the window since the last
+        // scrape, and each scrape empties it: polled every second they read 0.
+        // The cumulative counters' growth is the average instead.
+        if let (Some(result), Some((generation, prefill))) = (result.as_mut(), averages) {
+            result.generation_tps = generation;
+            result.prefill_tps = prefill;
+        }
         // The server's own rates average finished requests and stay at zero
         // through a long first answer; a live rate replaces them while requests run.
         if let (Some(result), Some(rate)) = (result.as_mut(), live) {
@@ -780,6 +787,56 @@ fn llama_progress(slots: &Value) -> Option<Vec<SlotProgress>> {
 #[derive(Default)]
 pub(super) struct LlamaRate {
     previous: Option<(Vec<SlotProgress>, Instant)>,
+    /// The server's cumulative token and time counters at the last scrape,
+    /// and the averages last computed from them.
+    totals: Option<LlamaTotals>,
+    averages: (Option<f64>, Option<f64>),
+}
+
+/// llama-server's cumulative counters: `*_tokens_total` and the seconds
+/// spent on them. Their growth between two scrapes is the average speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct LlamaTotals {
+    predicted: f64,
+    predicted_seconds: f64,
+    prompt: f64,
+    prompt_seconds: f64,
+}
+
+impl LlamaRate {
+    /// The average generation and prefill speeds from the counters' growth,
+    /// held while nothing grows. `None` when the server has no counters.
+    pub(super) fn averages(&mut self, metrics: &str) -> Option<(Option<f64>, Option<f64>)> {
+        let totals = LlamaTotals {
+            predicted: metric(metrics, "llamacpp:tokens_predicted_total")?,
+            predicted_seconds: metric(metrics, "llamacpp:tokens_predicted_seconds_total")?,
+            prompt: metric(metrics, "llamacpp:prompt_tokens_total")?,
+            prompt_seconds: metric(metrics, "llamacpp:prompt_seconds_total")?,
+        };
+        let rate =
+            |tokens: f64, seconds: f64| (tokens > 0.0 && seconds > 0.0).then(|| tokens / seconds);
+        if let Some(old) = self.totals {
+            if totals.predicted < old.predicted || totals.prompt < old.prompt {
+                // A restarted server counts from zero again.
+                self.averages = (None, None);
+            } else {
+                if let Some(speed) = rate(
+                    totals.predicted - old.predicted,
+                    totals.predicted_seconds - old.predicted_seconds,
+                ) {
+                    self.averages.0 = Some(speed);
+                }
+                if let Some(speed) = rate(
+                    totals.prompt - old.prompt,
+                    totals.prompt_seconds - old.prompt_seconds,
+                ) {
+                    self.averages.1 = Some(speed);
+                }
+            }
+        }
+        self.totals = Some(totals);
+        Some(self.averages)
+    }
 }
 
 /// Samples further apart than this measure an average, not the current speed.
@@ -817,6 +874,18 @@ impl LlamaRate {
         self.previous = Some((current, now));
         rate
     }
+}
+
+/// The first port with a server on it: any HTTP reply counts, so a server
+/// that wants a key (401) or is still loading a model (503) is found.
+pub(super) fn first_answering_port(
+    ports: &[u16],
+    mut probe: impl FnMut(u16) -> Result<String, ProbeIssue>,
+) -> Option<u16> {
+    ports
+        .iter()
+        .copied()
+        .find(|port| matches!(probe(*port), Ok(_) | Err(ProbeIssue::Http(_))))
 }
 
 fn merge_llama_metrics(slots: Option<LlmTelemetry>, metrics: Option<&str>) -> Option<LlmTelemetry> {

@@ -1050,7 +1050,7 @@ fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
             };
             log.lock().unwrap().push(path.clone());
             let (status, body) = if path == "/metrics" {
-                ("200 OK", format!("vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nprocess_start_time_seconds {}\n", boot.lock().unwrap()))
+                ("200 OK", format!("vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nmlx_serve:process_start_time_seconds {}\n", boot.lock().unwrap()))
             } else {
                 ("404 Not Found", String::new())
             };
@@ -1301,4 +1301,50 @@ fn hung_runtime_costs_one_sample_at_most_the_poll_budget() {
         "second poll took {second:?}"
     );
     held.join().unwrap();
+}
+
+#[test]
+fn a_port_that_answers_with_401_is_kept() {
+    let port = first_answering_port(&[1337, 6767], |port| {
+        if port == 1337 {
+            Err(ProbeIssue::Transport)
+        } else {
+            Err(ProbeIssue::Http(401))
+        }
+    });
+    assert_eq!(port, Some(6767));
+    assert_eq!(
+        first_answering_port(&[1, 2], |_| Err(ProbeIssue::Timeout)),
+        None
+    );
+}
+
+#[test]
+fn llama_average_rates_come_from_counter_deltas_not_the_scrape_window_gauges() {
+    let scrape = |predicted: u64, predicted_s: u64, prompt: u64, prompt_s: u64| {
+        format!(
+            "llamacpp:tokens_predicted_total {predicted}\n\
+llamacpp:tokens_predicted_seconds_total {predicted_s}\n\
+llamacpp:prompt_tokens_total {prompt}\n\
+llamacpp:prompt_seconds_total {prompt_s}\n\
+llamacpp:predicted_tokens_seconds 0\n\
+llamacpp:prompt_tokens_seconds 0\n"
+        )
+    };
+    let mut rate = LlamaRate::default();
+    assert_eq!(rate.averages(&scrape(100, 2, 1000, 1)), Some((None, None)));
+    assert_eq!(
+        rate.averages(&scrape(300, 6, 3000, 2)),
+        Some((Some(50.0), Some(2000.0)))
+    );
+    // Nothing grew: the last averages hold.
+    assert_eq!(
+        rate.averages(&scrape(300, 6, 3000, 2)),
+        Some((Some(50.0), Some(2000.0)))
+    );
+    // Without the counters, the gauges are left to their own reading.
+    assert_eq!(
+        rate.averages("llamacpp:predicted_tokens_seconds 12\n"),
+        None
+    );
 }

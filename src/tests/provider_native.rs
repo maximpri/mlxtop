@@ -440,7 +440,7 @@ fn mlx_serve_restart_drops_per_session_rate_history() {
     let mut history = MetricsHistory::default();
     let metrics = |started: u64| {
         format!(
-            "{}process_start_time_seconds {started}\n",
+            "{}mlx_serve:process_start_time_seconds {started}\n",
             mlx_serve_decode(100, 1)
         )
     };
@@ -484,7 +484,11 @@ fn prometheus_rates_need_two_fresh_matching_counter_sets() {
         .unwrap();
     assert_eq!(second.generation_tps, Some(40.0));
     assert_eq!(second.prefill_tps, Some(100.0));
-    assert!(second.generation_tps_live && second.prefill_tps_live);
+    assert!(second.generation_tps_live);
+    assert!(
+        !second.prefill_tps_live,
+        "vLLM counts a prompt in one step: tokens per poll, not a live speed"
+    );
     let reset = history
         .observe("vLLM", &vllm(1, 1), now + Duration::from_secs(3))
         .unwrap();
@@ -1134,4 +1138,23 @@ fn vllm_0_9_and_earlier_report_a_hit_rate_from_the_gpu_prefix_cache_names() {
         .observe("vLLM", &both, Instant::now())
         .unwrap();
     assert_eq!(result.prefix_hit_rate, Some(10.0), "current names win");
+}
+
+#[test]
+fn vllm_prefill_rate_excludes_cached_tokens_and_is_not_live() {
+    let start = Instant::now();
+    let mut history = MetricsHistory::default();
+    let scrape = |prompt: u64, cached: u64| {
+        format!(
+            "vllm:num_requests_running 1\nvllm:num_requests_waiting 0\n\
+vllm:generation_tokens_total 10\nvllm:prompt_tokens_total {prompt}\n\
+vllm:prompt_tokens_cached_total {cached}\n"
+        )
+    };
+    history.observe("vLLM", &scrape(1000, 400), start);
+    let result = history
+        .observe("vLLM", &scrape(3000, 1400), start + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(result.prefill_tps, Some(500.0));
+    assert!(!result.prefill_tps_live);
 }

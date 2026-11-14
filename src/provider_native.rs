@@ -653,10 +653,21 @@ fn series(provider: &str, metrics: &Metrics) -> Option<Series> {
     Some(series)
 }
 
+/// The series that gives the server's start time: bare in Prometheus's
+/// convention, prefixed by mlx-serve. Sushi and multi-process vLLM have none.
+fn start_series(metrics: &Metrics) -> Option<&'static str> {
+    [
+        "process_start_time_seconds",
+        "mlx_serve:process_start_time_seconds",
+    ]
+    .into_iter()
+    .find(|name| metrics.values.contains_key(*name))
+}
+
 impl MetricsHistory {
     fn start_time(&self) -> Option<f64> {
         let (_, _, metrics) = self.previous.as_ref()?;
-        metrics.sum("process_start_time_seconds")
+        start_series(metrics).and_then(|name| metrics.sum(name))
     }
 
     /// A build without `/metrics.json` is asked again only after the server restarts.
@@ -764,8 +775,10 @@ impl MetricsHistory {
         );
         if let Some((old_provider, old_time, previous)) = &self.previous {
             let elapsed = now.saturating_duration_since(*old_time).as_secs_f64();
-            let same_start = metrics.values.get("process_start_time_seconds")
-                == previous.values.get("process_start_time_seconds");
+            let start = |metrics: &Metrics| {
+                start_series(metrics).and_then(|name| metrics.values.get(name).cloned())
+            };
+            let same_start = start(&metrics) == start(previous);
             if !same_start {
                 // A restarted server's gauges start over, so no earlier speed applies to them.
                 self.generation.reset();
@@ -778,6 +791,15 @@ impl MetricsHistory {
                     .delta(previous, &series.generation)
                     .map(|n| n / elapsed);
                 result.prefill_tps = metrics.delta(previous, &series.prompt).map(|n| n / elapsed);
+                if provider == "vLLM" {
+                    // Cached prompt tokens were never computed: leave them out.
+                    if let (Some(prefill), Some(cached)) = (
+                        result.prefill_tps,
+                        metrics.delta(previous, "vllm:prompt_tokens_cached_total"),
+                    ) {
+                        result.prefill_tps = Some((prefill - cached / elapsed).max(0.0));
+                    }
+                }
                 let queries = metrics.delta(previous, &series.queries);
                 let hits = metrics.delta(previous, &series.hits);
                 result.cache_interval_efficiency = hits
@@ -822,6 +844,11 @@ impl MetricsHistory {
         }
         if provider == "mlx-serve" {
             self.native_extras(&metrics, &series, &mut details, &mut result, now);
+        }
+        if provider == "vLLM" {
+            // A prompt's tokens, cached ones included, are counted in one
+            // step: tokens per poll, not a speed. Cached tokens were not read.
+            result.prefill_tps_live = false;
         }
         if provider == "TensorFold" {
             // Completion bursts do not measure the speed of an in-flight request.
