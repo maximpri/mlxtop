@@ -1166,6 +1166,17 @@ Client formats are documented by [MLX-LM](https://github.com/ml-explore/mlx-lm/b
 Native adapters target a single loopback server, without authentication;
 llama-server router mode and authenticated monitoring endpoints are not supported.
 
+## Overhead
+
+mlxtop's own process uses about 1% of one core and 8 MB of memory. Most of
+its cost is in the short-lived commands it runs each sample (`ps`, `ioreg`,
+`sysctl`, `vm_stat`, `memory_pressure`, `date`): measured on an Apple M4 with
+about 800 processes, all of it together came to 8–9% of one core at the
+default one-second interval, more than half of it `ps` listing every process.
+The cost falls with the interval: about 4–5% at `-i 2` and under 2% at
+`-i 5`. Activity Monitor shows those commands, not mlxtop, so its own row
+looks smaller than the whole.
+
 ## Data sources and privacy
 
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
