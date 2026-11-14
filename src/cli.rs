@@ -277,6 +277,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("run interactively, or use --once for a static report".into());
     }
 
+    crate::terminal::stop_on_signals();
     enable_raw_mode()?;
     let mut terminal_guard = TerminalGuard::new();
     let mut out = stdout();
@@ -290,7 +291,15 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(interval, history, config);
-    let result = run_app(&mut terminal, &mut app, &mut next_terminal_event);
+    // A terminal that goes away without SIGHUP (no controlling terminal)
+    // leaves crossterm's reader spinning; end the session instead.
+    let mut events = |timeout: Duration| {
+        if !io::stdin().is_terminal() {
+            crate::terminal::stop_flag().store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        next_terminal_event(timeout)
+    };
+    let result = run_app(&mut terminal, &mut app, &mut events);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

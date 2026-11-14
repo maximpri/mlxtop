@@ -430,6 +430,10 @@ impl App {
             return;
         }
         if self.help {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                self.quit = true;
+                return;
+            }
             if matches!(
                 key.code,
                 KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('h')

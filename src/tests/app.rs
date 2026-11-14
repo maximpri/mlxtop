@@ -601,6 +601,15 @@ fn help_overlay_swallows_keys_until_dismissed() {
     assert!(app.quit);
 }
 
+#[test]
+fn ctrl_c_quits_while_help_is_open() {
+    let mut app = test_app(0);
+    press(&mut app, &[KeyCode::Char('?')]);
+    assert!(app.help);
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit);
+}
+
 fn process(pid: u32, name: &str, rss: u64, cpu: f64) -> LlmProcess {
     LlmProcess {
         pid,

@@ -11,6 +11,39 @@ use std::io::stdout;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use std::{io, panic};
+/// Set by a termination signal, or when the terminal goes away: the loop
+/// then ends through the same path as `q`, so the terminal is restored.
+static STOP: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn stop_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    STOP.get_or_init(Default::default).clone()
+}
+
+pub(crate) fn stop_requested() -> bool {
+    STOP.get()
+        .is_some_and(|stop| stop.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// End the session on SIGTERM, SIGINT, SIGHUP and SIGQUIT the way `q` does.
+pub(crate) fn stop_on_signals() {
+    #[cfg(unix)]
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+        signal_hook::consts::SIGQUIT,
+    ] {
+        if let Err(error) = signal_hook::flag::register(signal, stop_flag()) {
+            diagnostics_log(
+                "WARN",
+                "signal_register_failed",
+                format!("signal={signal} error={}", log_field(&error.to_string())),
+            );
+        }
+    }
+}
+
 pub(crate) struct TerminalGuard {
     pub(crate) active: bool,
 }
@@ -118,7 +151,7 @@ pub(crate) fn run_app<B: Backend>(
             );
             return Err(error.into());
         }
-        if app.quit {
+        if app.quit || stop_requested() {
             break;
         }
         match next_event(Duration::from_millis(100))? {
