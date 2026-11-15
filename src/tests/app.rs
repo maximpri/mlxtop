@@ -1220,12 +1220,44 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
     let stress = classified(measured("YELLOW"));
     assert_eq!(stress.impact, "MEMORY STRESS");
 
-    for thermal in ["limited 70%", "warning reported"] {
+    // macOS holding the machine back for heat: a pressure level from Heavy
+    // up, or (Intel) a CPU speed limit.
+    for thermal in [
+        ThermalState {
+            level: Some(ThermalLevel::Heavy),
+            cpu_speed_limit: None,
+        },
+        ThermalState {
+            level: Some(ThermalLevel::Nominal),
+            cpu_speed_limit: Some(70),
+        },
+    ] {
         let hot = classified(Sample {
-            thermal: thermal.into(),
+            thermal: thermal.label(),
+            thermal_state: thermal,
             ..measured("GREEN")
         });
-        assert_eq!(hot.impact, "THERMAL LIMIT");
+        assert_eq!(hot.impact, "THERMAL LIMIT", "{thermal:?}");
+    }
+    // Nominal, Moderate ("slightly elevated"), no limit, or nothing read:
+    // not a limit on its own, and words alone are not a reading.
+    for thermal in [
+        ThermalState {
+            level: Some(ThermalLevel::Nominal),
+            cpu_speed_limit: Some(100),
+        },
+        ThermalState {
+            level: Some(ThermalLevel::Moderate),
+            cpu_speed_limit: None,
+        },
+        ThermalState::default(),
+    ] {
+        let cool = classified(Sample {
+            thermal: "limited 70%".into(),
+            thermal_state: thermal,
+            ..measured("GREEN")
+        });
+        assert_eq!(cool.impact, "IDLE", "{thermal:?}");
     }
 
     let idle = classified(measured("GREEN"));
@@ -1283,12 +1315,6 @@ fn small_formatters_cover_every_unit() {
     assert_eq!(
         signed_rate_bytes(0, u64::MAX, Duration::from_nanos(1)),
         i64::MIN
-    );
-    assert_eq!(parse_thermal("CPU_Speed_Limit = 80"), "limited 80%");
-    assert_eq!(parse_thermal("CPU_Speed_Limit = 100"), "no limit");
-    assert_eq!(
-        parse_thermal("Thermal warning level set to 2"),
-        "warning reported"
     );
     assert_eq!(find_number("Limit = 42", "Limit"), Some(42));
     assert_eq!(find_number("Limit 42", "Limit"), None);

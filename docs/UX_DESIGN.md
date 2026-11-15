@@ -26,7 +26,7 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Every line of text must tell the operator something the screen does not
   already show. Delete labels that describe the interface ("Includes file
   cache", "older → now", "auto", a SCOPE line), restate a chart, or report a
-  normal state ("THERMAL no warning", "0s old").
+  normal state ("THERMAL nominal", "0s old").
 - Prefer a graphic to words: an icon for a verdict (✓ ▲ ✖, → for an action),
   a meter for a share of capacity, a mark per item for small counts (`●`/`○`),
   a progress bar with time left for work under way, and a spinner for

@@ -435,6 +435,7 @@ impl Collector {
                     self.slow_read_at = Some(now);
                 } else {
                     sample.thermal = self.current.thermal.clone();
+                    sample.thermal_state = self.current.thermal_state;
                     sample.system_power_mw = self.current.system_power_mw;
                 }
             }
@@ -1291,17 +1292,20 @@ impl Collector {
                 add("GPU", summary, tone);
             }
 
+            // Heat that begins, changes or ends; not a reading that merely
+            // went missing and came back.
             if previous.thermal != sample.thermal
                 && sample.thermal != "unavailable"
                 && !sample.thermal.ends_with("°C measured")
+                && (sample.thermal_news() || previous.thermal_news())
             {
                 add(
                     "THERMAL",
                     sample.thermal.clone(),
-                    if sample.thermal == "no warning" {
-                        Tone::Green
-                    } else {
+                    if sample.thermal_news() {
                         Tone::Yellow
+                    } else {
+                        Tone::Green
                     },
                 );
             }

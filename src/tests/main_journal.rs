@@ -407,3 +407,56 @@ fn the_journal_has_one_row_as_a_request_starts_and_one_as_it_ends() {
         "r1 · 800 prompt · 25% cached · 64 out · 41.2 tok/s · first token 310 ms"
     );
 }
+
+#[test]
+fn the_journal_says_when_heat_begins_changes_and_ends_once_each() {
+    use ThermalLevel::{Heavy, Moderate, Nominal, Trapping};
+    let at = |level: Option<ThermalLevel>| {
+        let thermal_state = ThermalState {
+            level,
+            cpu_speed_limit: None,
+        };
+        Sample {
+            thermal: thermal_state.label(),
+            thermal_state,
+            ..Sample::default()
+        }
+    };
+    // A level that could not be read for a few seconds, with nominal on
+    // either side, is not news, nor is Moderate on its own; heat that
+    // limits the machine beginning, rising and ending is.
+    let samples = [
+        at(Some(Nominal)),
+        at(None),
+        at(Some(Nominal)),
+        at(Some(Moderate)),
+        at(Some(Heavy)),
+        at(Some(Heavy)),
+        at(Some(Trapping)),
+        at(Some(Nominal)),
+    ];
+    let mut collector = Collector::with_host(
+        200,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let rows: Vec<(String, Tone)> = collector
+        .signals
+        .iter()
+        .filter(|event| event.state == "THERMAL")
+        .map(|event| (event.summary.clone(), event.tone))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("heavy".to_owned(), Tone::Yellow),
+            ("trapping".to_owned(), Tone::Yellow),
+            ("nominal".to_owned(), Tone::Green),
+        ]
+    );
+}

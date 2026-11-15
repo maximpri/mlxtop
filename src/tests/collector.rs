@@ -56,7 +56,8 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
     );
     assert_eq!(first.metal.renderer_util, Some(91));
     assert_eq!(first.metal.tiler_util, Some(12));
-    assert_eq!(first.thermal, "no warning");
+    assert_eq!(first.thermal_state.level, Some(ThermalLevel::Nominal));
+    assert_eq!(first.thermal, "nominal");
     assert_eq!(first.llm_count, 1);
     assert_eq!(first.llm_pid, 101);
     assert_eq!(first.llm_top, "omlx-server");
@@ -99,7 +100,10 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
         .iter()
         .any(|(state, summary)| state == "PAGING" && summary.starts_with("active")));
     let calls = host.calls();
-    assert!(calls.contains(&"/usr/bin/pmset -g therm".to_string()));
+    assert!(calls.contains(&"/usr/bin/notifyutil -g com.apple.system.thermalpressurelevel".into()));
+    // Apple Silicon's pmset reports no CPU limit: with the level read, it
+    // is not run.
+    assert!(!calls.iter().any(|call| call.starts_with("/usr/bin/pmset")));
     assert!(!calls.iter().any(|call| call.starts_with("read /proc")));
 }
 
@@ -1371,7 +1375,7 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
     let count = |prefix: &str| calls.iter().filter(|call| call.starts_with(prefix)).count();
     assert_eq!(count("/usr/bin/vm_stat"), 2, "one per poll: {calls:?}");
     assert_eq!(
-        count("/usr/bin/pmset"),
+        count("/usr/bin/notifyutil"),
         1,
         "thermal is read every few seconds"
     );
@@ -1381,6 +1385,8 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
     );
     // Between readings, the last one stands.
     assert_eq!(second.thermal, first.thermal);
+    assert_eq!(second.thermal_state, first.thermal_state);
+    assert_eq!(second.thermal_state.level, Some(ThermalLevel::Nominal));
     assert_eq!(second.system_power_mw, first.system_power_mw);
     // Five seconds on, they are read again.
     collector.slow_read_at = collector
@@ -1391,7 +1397,7 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
         .calls()
         .into_iter()
         .skip(before)
-        .filter(|c| c.starts_with("/usr/bin/pmset"))
+        .filter(|c| c.starts_with("/usr/bin/notifyutil"))
         .count();
     assert_eq!(again, 2);
 }

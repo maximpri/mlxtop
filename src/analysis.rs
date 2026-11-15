@@ -8,7 +8,7 @@ use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
-    Phase, Sample, TelemetrySource, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
+    Phase, Sample, TelemetrySource, ThermalState, ThroughputDirection, Tone, MIB, SLOW_SAMPLES,
 };
 use crate::formatting::{
     bytes, compact_tokens, llm_generation_rate_label, llm_prefill_rate_label, percent, rate,
@@ -45,7 +45,8 @@ pub(crate) struct CorrelationObservation {
     pub(crate) paging_rate: u64,
     pub(crate) compression_rate: u64,
     pub(crate) pressure: u8,
-    pub(crate) thermal_limited: bool,
+    /// What macOS says about heat; unknown off macOS.
+    pub(crate) thermal: ThermalState,
     pub(crate) model_memory: Option<u64>,
     pub(crate) model_memory_max: Option<u64>,
     pub(crate) metal_in_use: Option<u64>,
@@ -197,7 +198,9 @@ impl Signal {
 
     fn value(self, o: &CorrelationObservation) -> Option<f64> {
         match self {
-            Self::Thermal => Some(f64::from(u8::from(o.thermal_limited))),
+            // Judged in the pressure level's steps, so heat that rises from
+            // a level held while speed was usual counts too.
+            Self::Thermal => o.thermal.rank().map(f64::from),
             Self::Pressure => Some(f64::from(o.pressure)),
             Self::Paging => Some(o.paging_rate as f64),
             // Cache blocks moved count as disk work whatever the byte rate.
@@ -250,7 +253,7 @@ impl Signal {
     /// The signal now, beside its usual value.
     fn describe(self, o: &CorrelationObservation, usual: f64) -> String {
         match self {
-            Self::Thermal => "thermal limit".into(),
+            Self::Thermal => o.thermal.reason(),
             Self::Pressure => format!(
                 "memory pressure {}",
                 if o.pressure >= 4 { "critical" } else { "watch" }
@@ -424,7 +427,7 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
             "DEGRADED",
             "tight memory",
         )
-    } else if sample.thermal.starts_with("limited") || sample.thermal == "warning reported" {
+    } else if sample.thermal_state.limited() {
         (
             "THERMAL LIMIT",
             Tone::Yellow,
@@ -1297,8 +1300,7 @@ impl CorrelationObservation {
             paging_rate: sample.paging_churn(),
             compression_rate: sample.compress.saturating_add(sample.decompress),
             pressure: pressure_rank(&sample.pressure),
-            thermal_limited: sample.thermal.starts_with("limited")
-                || sample.thermal == "warning reported",
+            thermal: sample.thermal_state,
             model_memory: sample.llm_model_memory,
             model_memory_max: sample.llm_model_memory_max,
             metal_in_use: sample.gpu_in_use,

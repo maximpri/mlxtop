@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! macOS, Linux and Windows host-counter collection through the injectable Host interface.
 use crate::config::Thresholds;
-use crate::domain::{ChartMetric, MetalTelemetry, Sample, Tone, VmCounters};
+use crate::domain::{
+    ChartMetric, MetalTelemetry, Sample, ThermalLevel, ThermalState, Tone, VmCounters,
+};
 use crate::gpu;
 use crate::host::{Host, WindowsReading};
 use crate::parsing::{
@@ -85,11 +87,8 @@ pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample, slo
     if !slow {
         return;
     }
-    sample.thermal = parse_thermal(
-        &host
-            .command("/usr/bin/pmset", &["-g", "therm"])
-            .unwrap_or_default(),
-    );
+    sample.thermal_state = macos_thermal(host, sample.metal.architecture.as_deref());
+    sample.thermal = sample.thermal_state.label();
     // Power telemetry needs no privileges; desktops publish it too.
     sample.system_power_mw = host
         .command(
@@ -514,18 +513,56 @@ pub(crate) fn parse_metal_hardware(text: &str) -> MetalTelemetry {
     }
 }
 
-pub(crate) fn parse_thermal(text: &str) -> String {
-    if let Some(value) = find_number(text, "CPU_Speed_Limit") {
-        if value < 100 {
-            return format!("limited {value}%");
-        }
-        return "no limit".into();
-    }
-    if text.is_empty() {
-        "unavailable".into()
-    } else if text.contains("No thermal warning") || text.contains("No performance warning") {
-        "no warning".into()
+/// The notify(3) key macOS posts its thermal pressure level under
+/// (`kOSThermalNotificationPressureLevelName`).
+pub(crate) const THERMAL_PRESSURE_KEY: &str = "com.apple.system.thermalpressurelevel";
+
+/// macOS's thermal pressure level, and pmset's CPU speed limit where it can
+/// give one. Intel Macs report a limit; Apple Silicon prints none, so there
+/// pmset is read only when the level could not be.
+pub(crate) fn macos_thermal(host: &dyn Host, architecture: Option<&str>) -> ThermalState {
+    let level = host
+        .command("/usr/bin/notifyutil", &["-g", THERMAL_PRESSURE_KEY])
+        .as_deref()
+        .and_then(parse_thermal_pressure);
+    let apple_silicon = architecture.is_some_and(|arch| arch.starts_with("arm64"));
+    let cpu_speed_limit = if level.is_some() && apple_silicon {
+        None
     } else {
-        "warning reported".into()
+        host.command("/usr/bin/pmset", &["-g", "therm"])
+            .as_deref()
+            .and_then(parse_cpu_speed_limit)
+    };
+    ThermalState {
+        level,
+        cpu_speed_limit,
     }
 }
+
+/// The level in what `notifyutil -g KEY` prints, `KEY STATE`. Anything
+/// else, such as an error it printed instead, is no reading.
+pub(crate) fn parse_thermal_pressure(text: &str) -> Option<ThermalLevel> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != THERMAL_PRESSURE_KEY {
+            return None;
+        }
+        let state = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        ThermalLevel::from_state(state)
+    })
+}
+
+/// `CPU_Speed_Limit` in `pmset -g therm`: the percent of full speed macOS
+/// allows the CPU.
+pub(crate) fn parse_cpu_speed_limit(text: &str) -> Option<u8> {
+    find_number(text, "CPU_Speed_Limit")
+        .and_then(|limit| u8::try_from(limit).ok())
+        .filter(|limit| *limit <= 100)
+}
+
+#[cfg(test)]
+#[path = "tests/platform.rs"]
+mod tests;
