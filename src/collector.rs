@@ -663,6 +663,7 @@ impl Collector {
             apply_hosted_splash(&mut sample, self.thresholds);
         }
         (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref(), self.platform);
+        sample.ts = epoch_millis(SystemTime::now());
         let previous = if self.current.updated == "waiting" {
             None
         } else {
@@ -808,48 +809,11 @@ impl Collector {
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
         self.view.session.observe(&sample);
-        // What generation was doing, so a log can be replayed against it.
-        let generating = crate::analysis::CorrelationObservation::from_sample(&sample);
         crate::recording::write(&sample);
         diagnostics_log(
             "INFO",
             "sample",
-            format!(
-                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={} writers={} disk_read={} disk_write={} disk_weights={} ssd_loads={} ssd_saves={}",
-                sample_started.elapsed().as_millis(),
-                log_field(&sample.llm_status),
-                log_field(&sample.llm_provider),
-                log_field(&sample.llm_model),
-                log_field(sample.llm_source.label()),
-                sample.llm_generation_tps_live,
-                log_optional_f64(sample.llm_generation_tps),
-                sample.llm_prefill_tps_live,
-                log_optional_f64(sample.llm_prefill_tps),
-                log_optional_f64(sample.llm_cache_efficiency),
-                log_optional_u64(sample.llm_active_requests),
-                log_optional_u64(sample.llm_waiting_requests),
-                log_optional_u8(sample.gpu_util),
-                log_optional_u8(sample.metal.renderer_util),
-                log_optional_u8(sample.metal.tiler_util),
-                log_optional_u64(resident_memory_percent(&sample)),
-                log_optional_u8(sample.availability),
-                sample.swap_in,
-                sample.swap_out,
-                sample.compress,
-                sample.decompress,
-                generating.generating,
-                log_optional_u64(generating.context),
-                if generating.writers.is_empty() {
-                    "-".to_owned()
-                } else {
-                    log_field(&generating.writers.join(","))
-                },
-                log_optional_u64(sample.disk.read),
-                log_optional_u64(sample.disk.write),
-                sample.disk.weights,
-                sample.disk.loads,
-                sample.disk.saves,
-            ),
+            sample_log_details(&sample, sample_started.elapsed().as_millis()),
         );
         self.view.current = sample.clone();
         sample
@@ -1503,6 +1467,73 @@ pub(crate) fn watched(start: &mut Option<(String, u64)>, runtime: &str, cached: 
             0
         }
     }
+}
+
+/// Milliseconds since the Unix epoch; unknown for a clock set before it.
+pub(crate) fn epoch_millis(at: SystemTime) -> Option<u64> {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_millis()).ok())
+}
+
+/// The `event=sample` log line: what the sample read and what generation
+/// was doing, so a log can be replayed against it. Fields are only ever
+/// added at the end, so scripts that read the earlier ones keep working;
+/// a reading that was not taken is `na`.
+pub(crate) fn sample_log_details(sample: &Sample, duration_ms: u128) -> String {
+    let generating = crate::analysis::CorrelationObservation::from_sample(sample);
+    // A reading the sample holds in words, unless it holds the word for
+    // nothing read.
+    let read = |value: &str, unread: &str| {
+        if value.is_empty() || value == unread {
+            "na".to_owned()
+        } else {
+            log_field(value)
+        }
+    };
+    format!(
+        "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={} writers={} disk_read={} disk_write={} disk_weights={} ssd_loads={} ssd_saves={} pressure={} thermal={} power_mw={} draft={} ts={}",
+        duration_ms,
+        log_field(&sample.llm_status),
+        log_field(&sample.llm_provider),
+        log_field(&sample.llm_model),
+        log_field(sample.llm_source.label()),
+        sample.llm_generation_tps_live,
+        log_optional_f64(sample.llm_generation_tps),
+        sample.llm_prefill_tps_live,
+        log_optional_f64(sample.llm_prefill_tps),
+        log_optional_f64(sample.llm_cache_efficiency),
+        log_optional_u64(sample.llm_active_requests),
+        log_optional_u64(sample.llm_waiting_requests),
+        log_optional_u8(sample.gpu_util),
+        log_optional_u8(sample.metal.renderer_util),
+        log_optional_u8(sample.metal.tiler_util),
+        log_optional_u64(resident_memory_percent(sample)),
+        log_optional_u8(sample.availability),
+        sample.swap_in,
+        sample.swap_out,
+        sample.compress,
+        sample.decompress,
+        generating.generating,
+        log_optional_u64(generating.context),
+        if generating.writers.is_empty() {
+            "-".to_owned()
+        } else {
+            log_field(&generating.writers.join(","))
+        },
+        log_optional_u64(sample.disk.read),
+        log_optional_u64(sample.disk.write),
+        sample.disk.weights,
+        sample.disk.loads,
+        sample.disk.saves,
+        read(&sample.pressure, "UNKNOWN"),
+        read(&sample.thermal, "unavailable"),
+        log_optional_u64(sample.system_power_mw),
+        // The share of draft tokens accepted since the last poll: what the
+        // runtime reports about speculative decoding.
+        log_optional_f64(sample.llm_draft_acceptance),
+        log_optional_u64(sample.ts),
+    )
 }
 
 pub(crate) fn cache_interval_efficiency(

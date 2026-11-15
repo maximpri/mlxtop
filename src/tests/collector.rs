@@ -104,6 +104,99 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
 }
 
 #[test]
+fn a_sample_carries_when_it_was_taken_and_its_recording_format() {
+    let mut collector = collector(macos_host(), Platform::MacOs, None);
+    let before = epoch_millis(SystemTime::now()).unwrap();
+    let sample = collector.sample();
+    let after = epoch_millis(SystemTime::now()).unwrap();
+    // The time of day repeats every day; the epoch time does not.
+    assert_eq!(sample.updated, "12:00:01");
+    let ts = sample.ts.expect("a sample knows when it was taken");
+    assert!(
+        (before..=after).contains(&ts),
+        "{before} <= {ts} <= {after}"
+    );
+    assert_eq!(sample.schema, SAMPLE_SCHEMA);
+    assert!(sample_log_details(&sample, 3).ends_with(&format!(" ts={ts}")));
+    let before_epoch = SystemTime::UNIX_EPOCH
+        .checked_sub(Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(epoch_millis(before_epoch), None);
+}
+
+#[test]
+fn the_sample_log_line_keeps_its_fields_and_adds_new_ones_at_the_end() {
+    let sample = Sample {
+        pressure: "YELLOW".into(),
+        thermal: "limited 60%".into(),
+        system_power_mw: Some(61_250),
+        llm_draft_acceptance: Some(0.78),
+        ts: Some(1_794_719_479_668),
+        ..Sample::default()
+    };
+    let line = sample_log_details(&sample, 12);
+    // Scripts read fields by name after `event=sample`: the earlier ones
+    // keep their order and the new ones follow them.
+    let keys: Vec<&str> = line
+        .split(' ')
+        .filter_map(|field| field.split_once('='))
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "duration_ms",
+            "status",
+            "provider",
+            "model",
+            "source",
+            "gen_live",
+            "gen_tps",
+            "prefill_live",
+            "prefill_tps",
+            "cache",
+            "active",
+            "waiting",
+            "gpu",
+            "renderer",
+            "tiler",
+            "ram_resident_percent",
+            "vm_availability",
+            "paging_in",
+            "paging_out",
+            "compress",
+            "decompress",
+            "generating",
+            "context",
+            "writers",
+            "disk_read",
+            "disk_write",
+            "disk_weights",
+            "ssd_loads",
+            "ssd_saves",
+            "pressure",
+            "thermal",
+            "power_mw",
+            "draft",
+            "ts",
+        ]
+    );
+    assert!(line.starts_with("duration_ms=12 status=offline "), "{line}");
+    assert!(
+        line.ends_with(
+            " pressure=YELLOW thermal=limited_60% power_mw=61250 draft=0.780 ts=1794719479668"
+        ),
+        "{line}"
+    );
+    // What was not read is na, never zero or a made-up word.
+    let unread = sample_log_details(&Sample::default(), 0);
+    assert!(
+        unread.ends_with(" pressure=na thermal=na power_mw=na draft=na ts=na"),
+        "{unread}"
+    );
+}
+
+#[test]
 fn linux_collector_reads_proc_nvidia_and_thermal_zones() {
     let host = linux_host();
     let mut collector = collector(host.clone(), Platform::Linux, None);

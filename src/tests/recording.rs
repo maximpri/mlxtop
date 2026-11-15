@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
-use crate::domain::{RequestUsage, TelemetrySource};
+use crate::domain::{RequestUsage, TelemetrySource, SAMPLE_SCHEMA};
 use std::time::{Duration, SystemTime};
 
 fn decoding(second: u64, tps: f64, swap: u64) -> Sample {
@@ -244,6 +244,32 @@ fn replay_reports_lines_it_could_not_read() {
     assert!(String::from_utf8(out)
         .unwrap()
         .contains("SKIPPED     2 lines"));
+}
+
+#[test]
+fn recordings_made_before_samples_carried_their_time_still_read() {
+    let mut sample = decoding(1, 50.0, 0);
+    sample.ts = Some(1_794_719_479_668);
+    let line = serde_json::to_string(&sample).unwrap();
+    assert!(line.contains("\"ts\":1794719479668"), "{line}");
+    assert!(
+        line.contains(&format!("\"schema\":{SAMPLE_SCHEMA}")),
+        "{line}"
+    );
+    let (back, _) = read_counted(line.as_bytes()).unwrap();
+    assert_eq!(back[0].ts, Some(1_794_719_479_668));
+    assert_eq!(back[0].schema, SAMPLE_SCHEMA);
+    // A line written before either field existed: its time is unknown, not
+    // zero, and it says it carries no format number.
+    let mut old: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let fields = old.as_object_mut().unwrap();
+    fields.remove("ts");
+    fields.remove("schema");
+    let (back, skipped) = read_counted(old.to_string().as_bytes()).unwrap();
+    assert_eq!(skipped, 0);
+    assert_eq!(back[0].ts, None);
+    assert_eq!(back[0].schema, 0);
+    assert_eq!(back[0].updated, "12:00:01");
 }
 
 #[test]

@@ -564,6 +564,10 @@ pub(crate) struct LlmTelemetry {
     pub(crate) mlx: MlxTelemetry,
 }
 
+/// The recording format samples are written in. 1: each sample carries `ts`
+/// and this number; recordings made before carry neither and read as 0.
+pub(crate) const SAMPLE_SCHEMA: u32 = 1;
+
 /// One poll of the machine and the runtime. It is written to a recording
 /// as it is and read back for replay; what is derived from it (the
 /// finding, the runtime report, process readings) is not recorded.
@@ -689,6 +693,16 @@ pub(crate) struct Sample {
     pub(crate) grade: String,
     pub(crate) limiter: String,
     pub(crate) rate_ready: bool,
+    /// When the sample was taken, in milliseconds since the Unix epoch.
+    /// `updated` is the time of day only, so a recording that runs past
+    /// midnight needs this to be read in order. Unknown in recordings made
+    /// before it was added.
+    #[serde(default)]
+    pub(crate) ts: Option<u64>,
+    /// The recording format it is written in: `SAMPLE_SCHEMA`, or 0 when
+    /// read from a recording that carries no number.
+    #[serde(default)]
+    pub(crate) schema: u32,
 }
 
 impl Sample {
@@ -879,6 +893,8 @@ impl Default for Sample {
             grade: "SAMPLING".into(),
             limiter: "collecting baseline".into(),
             rate_ready: false,
+            ts: None,
+            schema: SAMPLE_SCHEMA,
         }
     }
 }
