@@ -190,19 +190,20 @@ impl RuntimeReport {
                     self.selection
                 }
             ),
-            format!(
-                "Endpoint: {} · {}",
-                if self.endpoint.is_empty() {
-                    "—"
-                } else {
-                    &self.endpoint
-                },
-                if self.remote {
-                    "remote API; host counters are local"
-                } else {
-                    "local"
-                }
-            ),
+            if self.endpoint.is_empty() {
+                // No runtime asked: no endpoint, local or remote.
+                "Endpoint: —".into()
+            } else {
+                format!(
+                    "Endpoint: {} · {}",
+                    self.endpoint,
+                    if self.remote {
+                        "remote API; host counters are local"
+                    } else {
+                        "local"
+                    }
+                )
+            },
             format!(
                 "Credentials: {}",
                 if self.credentials_present {

@@ -117,6 +117,11 @@ fn diagnostics_are_read_only_sanitized_and_useful_without_a_runtime() {
     report.provider = Some("LM Studio".into());
     report.finish(true);
     assert_eq!(report.status(), "Connected · partial availability");
+    // Without an endpoint there is nothing to place, locally or remotely.
+    assert!(report
+        .lines(&Sample::default())
+        .contains(&"Endpoint: —".to_owned()));
+    report.endpoint = "https://example.net/llm".into();
     report.remote = true;
     report.credentials_present = true;
     let text = report.lines(&Sample::default()).join("\n");

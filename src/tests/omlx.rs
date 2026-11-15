@@ -6,6 +6,9 @@ use crate::model_facts::{read_mlx_model, weight_shards};
 use crate::test_support::{
     owner_models, reply, serve, Exchange, FakeHost, TempDir, OWNER_DRAFT, OWNER_MODEL,
 };
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
 
 const MODEL: &str = "Qwen3.8-27B-oQ4e-mtp";
 const GLOBAL_SETTINGS: &str = include_str!("fixtures/model_facts/omlx_global_settings.json");
@@ -651,4 +654,127 @@ fn the_client_says_a_model_on_omlxs_own_engine_without_settings_has_no_draft() {
     // Its own engine keeps KV in the activations' bf16.
     assert_eq!(facts.kv_bytes_per_token(), Some(65_536));
     server.join().unwrap();
+}
+
+/// A loopback server that answers each request by its path until `stop`,
+/// and returns the request lines it was sent.
+fn listening(answer: fn(&str) -> (u16, &'static str)) -> (u16, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let mut lines = Vec::new();
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head);
+            let line = head.lines().next().unwrap_or_default().to_owned();
+            if line.starts_with("STOP ") {
+                break;
+            }
+            let (status, body) = answer(line.split_whitespace().nth(1).unwrap_or_default());
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            lines.push(line);
+        }
+        lines
+    });
+    (port, server)
+}
+
+fn stop(port: u16, server: thread::JoinHandle<Vec<String>>) -> Vec<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.write_all(b"STOP / HTTP/1.1\r\n\r\n").unwrap();
+    server.join().unwrap()
+}
+
+/// A client that found its endpoint the way a stock install has it, in a
+/// file, with no `omx` host or port set: nothing chose oMLX.
+fn discovering(port: u16, home: &TempDir, key: &str) -> LlmTelemetryClient {
+    home.write(
+        ".config/omlx-coding/server.env",
+        &format!("HOST=127.0.0.1\nPORT={port}\n{key}"),
+    );
+    let client = LlmTelemetryClient::from_config(&Config::default(), Some(home.0.clone()));
+    assert_eq!((client.host.as_str(), client.port), ("127.0.0.1", port));
+    client
+}
+
+#[test]
+fn a_server_no_omlx_process_was_found_for_is_asked_nothing() {
+    // SGLang on oMLX's port, its process out of sight in a container: its
+    // `/health` generates a token unless told otherwise.
+    let (port, server) = listening(|path| match path {
+        "/health" | "/health_generate" => (200, ""),
+        "/v1/models" => (
+            200,
+            r#"{"object":"list","data":[{"id":"Qwen/Qwen3-8B","object":"model","owned_by":"sglang","root":"Qwen/Qwen3-8B","max_model_len":40960}]}"#,
+        ),
+        "/metrics" => (200, "sglang:num_running_reqs 0\n"),
+        _ => (404, r#"{"detail":"Not Found"}"#),
+    });
+    let home = TempDir::new("omlx-not-found");
+    let mut client = discovering(port, &home, "API_KEY=never-sent\n");
+    for _ in 0..5 {
+        client.next_poll = Instant::now();
+        assert!(client.poll(None).is_none());
+    }
+    let requests = stop(port, server);
+    let health = requests.iter().filter(|line| line.contains(" /health"));
+    assert_eq!(health.count(), 0, "{requests:?}");
+    assert!(requests.is_empty(), "{requests:?}");
+    // Diagnostics say no runtime was found, and ask for nothing.
+    let report = client.report();
+    assert_eq!(report.provider, None);
+    assert_eq!(report.status(), "No runtime detected");
+    assert_eq!(report.selection, "process detection");
+    assert!(report.endpoint.is_empty() && report.probes.is_empty());
+    assert!(report.credentials_present);
+    let lines = report.lines(&Sample::default());
+    assert_eq!(
+        lines[..3],
+        [
+            "Runtime: none · No runtime detected",
+            "Selection: process detection",
+            "Endpoint: —"
+        ]
+    );
+    assert!(!lines.iter().any(|line| line.contains("/health")));
+}
+
+#[test]
+fn an_omlx_found_after_mlxtop_started_is_asked_at_once() {
+    let (port, server) = listening(|path| match path {
+        "/health" => (
+            200,
+            r#"{"status":"healthy","default_model":"qwen","engine_pool":{"current_model_memory":1000,"final_ceiling":2000}}"#,
+        ),
+        _ => (404, r#"{"detail":"Not Found"}"#),
+    });
+    let home = TempDir::new("omlx-found-later");
+    let mut client = discovering(port, &home, "");
+    // A wait left over from a runtime that timed out earlier.
+    client.next_poll = Instant::now() + Duration::from_secs(30);
+    client.retry_backoff = Duration::from_secs(30);
+    for _ in 0..3 {
+        assert!(client.poll(None).is_none());
+    }
+    let telemetry = client.poll(Some("oMLX")).expect("the oMLX found is asked");
+    assert_eq!(telemetry.model.as_deref(), Some("qwen"));
+    let report = client.report();
+    assert_eq!(report.provider.as_deref(), Some("oMLX"));
+    assert_eq!(report.selection, "process detection; oMLX endpoint config");
+    assert!(report.connected);
+    assert_eq!(client.retry_backoff, Duration::from_secs(1));
+    // Health alone: without a key nothing else is asked.
+    assert_eq!(stop(port, server), ["GET /health HTTP/1.1"]);
 }

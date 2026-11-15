@@ -256,6 +256,30 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
 }
 
 #[test]
+fn detects_omlx_however_it_was_started() {
+    // oMLX runs only on Apple Silicon Macs, natively, so its process is in
+    // this Mac's list; mlxtop asks oMLX's port nothing until it finds one.
+    // macOS cuts the `comm` column to 16 characters.
+    for line in [
+        // The menu bar app's server (oMLX 0.8.0rc1, ServerProcess.swift).
+        "100 2097152 3.0 1.0 S 0 /Applications/oM /Applications/oMLX.app/Contents/Resources/Python/cpython-3.11/bin/python3 -m omlx.cli serve --base-path /Users/test/.omlx --port 8000",
+        // `brew services start omlx` runs the formula's `omlx serve`.
+        "101 2097152 3.0 1.0 S 0 /opt/homebrew/Ce /opt/homebrew/Cellar/omlx/0.8.0/libexec/bin/python3.11 /opt/homebrew/opt/omlx/bin/omlx serve",
+        // `omlx serve` from a uv tool or pip install.
+        "102 2097152 3.0 1.0 S 0 /Users/test/.loc /Users/test/.local/share/uv/tools/omlx/bin/python3 /Users/test/.local/bin/omlx serve --port 8000",
+        "103 2097152 3.0 1.0 S 0 python3 python3 -m omlx.server --model-dir /Users/test/models",
+        // The app itself, with its server stopped.
+        "104 204800 0.1 0.1 S 0 /Applications/oM /Applications/oMLX.app/Contents/MacOS/oMLX",
+    ] {
+        assert_eq!(
+            parse_processes(line).provider.as_deref(),
+            Some("oMLX"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
 fn detects_bionic_and_lmstudio_helpers_with_resource_totals() {
     let snapshot = parse_processes(
         "101 4096 12.5 0.1 S 0 Bionic /Applications/Bionic.app/Contents/MacOS/Bionic\n\

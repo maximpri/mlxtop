@@ -301,6 +301,15 @@ context.
 
 ## oMLX telemetry
 
+mlxtop asks oMLX for its readings only when an oMLX process runs on this Mac
+(the menu bar app, `omlx serve` and `python -m omlx.server` are all found),
+when `MLXTOP_PROVIDER=omlx` chooses it, or when an `omx` host or port is set
+in the config. Until then it sends nothing to oMLX's port, not even `/health`:
+another runtime may listen there out of sight, in a container or behind a
+tunnel, and SGLang answers `/health` by generating a token. An oMLX this Mac
+cannot see, such as one on another machine reached through a tunnel, needs
+`MLXTOP_PROVIDER=omlx` or an `omx` host or port.
+
 The oMLX adapter checks `http://127.0.0.1:8000/health` by default, oMLX's own
 default port. It discovers the host, port and optional API key from:
 
@@ -317,8 +326,7 @@ takes the first it finds: `MLXTOP_PROVIDER_API_KEY`, the **API key** in
 Settings (`api_key` in `config.json`), oMLX's own
 `OMLX_API_KEY`, an `API_KEY=` line in `server.env`, then `auth.api_key` in
 oMLX's `settings.json`. It sends the key only to a loopback address (unless
-`MLXTOP_ALLOW_REMOTE_AUTH=1`) and only when an oMLX process was found or oMLX
-was chosen (`MLXTOP_PROVIDER=omlx`, or an `omx` host or port in the config);
+`MLXTOP_ALLOW_REMOTE_AUTH=1`) and only to an oMLX found or chosen as above;
 another program answering on the port never receives it. With no key, the
 Overview says `No live rates: oMLX admin key not set`, and the first time
 that happens in a session mlxtop opens Settings on the API key, ready to
@@ -2139,7 +2147,9 @@ text: SGLang's `/health_generate`, `/flush_cache` and its profiler, memory and
 session routes, llama-swap's `/unload` and `/upstream/…`, KoboldCpp's
 `/api/extra/shutdown`, Foundry Local's load and unload routes and exo's benchmark.
 The SGLang adapter asks for `/metrics` alone, never `/health`, which generates a
-token by default. The
+token by default, and oMLX's port is asked nothing until an oMLX process is
+found or oMLX is chosen (see [oMLX telemetry](#omlx-telemetry)), so an SGLang
+server listening there unseen is not asked either. The
 application does not track how it is used, upload collected metrics, modify model
 state or send synthetic inference requests.
 `--once --json` and `mlxtop stream` write only to standard output, and
