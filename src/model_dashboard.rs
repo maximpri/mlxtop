@@ -272,10 +272,14 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
 
 /// The card's bottom edge: the machine, then what the runtime uses of it.
 /// Whole fields fit or drop, least important last; thermal only when it is
-/// not normal.
+/// not normal. The chip's peak bandwidth sits beside the chip and is the
+/// first field to go.
 fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     let muted = |text: String| vec![Span::styled(text, Style::default().fg(MUTED))];
-    let mut fields: Vec<Vec<Span<'static>>> = vec![muted(hardware_parts(sample).join(" · "))];
+    let hardware = muted(hardware_parts(sample).join(" · "));
+    let after_hardware =
+        (hardware.iter().map(Span::width).sum::<usize>() <= width).then_some(hardware.len());
+    let mut fields: Vec<Vec<Span<'static>>> = vec![hardware];
     // A reading that is unusual takes the anomaly colour here, where it is
     // shown, with its usual value.
     let insight = &sample.correlation;
@@ -316,6 +320,20 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
                 .push(Span::styled(" · ", Style::default().fg(DIM)));
         }
         line.spans.extend(field);
+    }
+    // A fact about the hardware, so muted: it goes in only where every other
+    // field still fits.
+    if let (Some(at), Some(bandwidth)) = (after_hardware, crate::chip_facts::of_sample(sample)) {
+        let bandwidth = bandwidth.label();
+        if line.width() + 3 + Line::from(bandwidth.as_str()).width() <= width {
+            line.spans.splice(
+                at..at,
+                [
+                    Span::styled(" · ", Style::default().fg(DIM)),
+                    Span::styled(bandwidth, Style::default().fg(MUTED)),
+                ],
+            );
+        }
     }
     line
 }

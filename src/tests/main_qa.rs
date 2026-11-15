@@ -8,7 +8,7 @@ use crate::theme::UNUSUAL;
 use ratatui::buffer::Buffer;
 
 /// Terminal sizes people run mlxtop in: a default window up to a big one.
-const SIZES: [(u16, u16); 5] = [(80, 24), (100, 30), (120, 40), (160, 48), (200, 60)];
+pub(super) const SIZES: [(u16, u16); 5] = [(80, 24), (100, 30), (120, 40), (160, 48), (200, 60)];
 
 /// Readouts and sentences the design removed as noise. None may come back.
 const NOISE: [&str; 9] = [
@@ -34,11 +34,12 @@ const BROKEN: [&str; 6] = [
 ];
 
 /// A state the judge renders: its name, whether the model is slowed (and so
-/// may show the anomaly colour), and the app in it.
-struct Case {
-    name: &'static str,
-    impact: bool,
-    app: App,
+/// may show the anomaly colour), and the app in it. Packages judge their
+/// own states from their own test files.
+pub(super) struct Case {
+    pub(super) name: &'static str,
+    pub(super) impact: bool,
+    pub(super) app: App,
 }
 
 fn slowed(mut app: App, cause: CorrelationCause, lead: &str) -> App {
@@ -255,7 +256,7 @@ fn text(buffer: &Buffer) -> Vec<String> {
 }
 
 /// Every rule a screen breaks, in words.
-fn judge(case: &Case, width: u16, height: u16) -> Vec<String> {
+pub(super) fn judge(case: &Case, width: u16, height: u16) -> Vec<String> {
     let buffer = draw(&case.app, width, height);
     let rows = text(&buffer);
     let screen = rows.join("\n");

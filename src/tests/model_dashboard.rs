@@ -312,3 +312,36 @@ fn with_no_runtime_the_header_says_so_once() {
     assert!(screen.contains("No LLM runtime detected"), "{screen}");
     assert!(!screen.contains("not detected · not detected"), "{screen}");
 }
+
+#[test]
+fn the_chips_bandwidth_sits_beside_it_and_is_the_first_field_to_go() {
+    let text = |line: &Line| -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+    let mut sample = live_sample();
+    // With room: after the chip and its cores, once, in the muted text colour.
+    let wide = host_footer(&sample, 160);
+    let all = text(&wide);
+    assert!(
+        all.starts_with("Apple M4 Max · 32 GPU cores · 410 GB/s · thermal ok · "),
+        "{all}"
+    );
+    assert_eq!(all.matches("GB/s").count(), 1, "{all}");
+    let figure = wide.spans.iter().find(|span| span.content == "410 GB/s");
+    assert_eq!(figure.and_then(|span| span.style.fg), Some(MUTED));
+    // One cell short of everything: the bandwidth goes, every other field stays.
+    let short = host_footer(&sample, wide.width() - 1);
+    assert_eq!(text(&short), all.replace(" · 410 GB/s", ""));
+    // The Overview strip at 80 columns has no room for it.
+    let strip = render(&sample, &request_history::History::default(), 80, 3);
+    assert!(!strip.contains("GB/s"), "{strip}");
+    assert!(strip.contains("8.0 GiB / 16.0 GiB"), "{strip}");
+    // Too narrow for the chip's own name: no figure without the chip it is for.
+    assert_eq!(text(&host_footer(&sample, 26)), "thermal ok");
+    // A bin mlxtop cannot tell shows nothing.
+    sample.metal.gpu_cores = None;
+    assert!(!text(&host_footer(&sample, 160)).contains("GB/s"));
+}

@@ -97,13 +97,17 @@ pub(crate) fn write_static(
     } else if platform == Platform::MacOs {
         writeln!(
             out,
-            "METAL        {} · {} cores · GPU {} · renderer {} · tiler {}",
+            "METAL        {} · {} cores{} · GPU {} · renderer {} · tiler {}",
             sample.metal.device_name.as_deref().unwrap_or("unavailable"),
             sample
                 .metal
                 .gpu_cores
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "—".into()),
+            // The chip's peak bandwidth, left out where the chip is unknown.
+            crate::chip_facts::of_sample(sample)
+                .map(|bandwidth| format!(" · {}", bandwidth.label()))
+                .unwrap_or_default(),
             sample
                 .gpu_util
                 .map(|v| format!("{v}%"))

@@ -392,7 +392,8 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     assert!(text.contains("SIGNAL       LLM READY · HEALTHY"));
     assert!(text.contains("MEMORY       16.0 GiB resident / 32.0 GiB total"));
     assert!(text.contains("PAGING       1.0 GiB / 4.0 GiB · 25% used · in 2.0 KiB/s · out 0 B/s"));
-    assert!(text.contains("METAL        Apple M3 · 10 cores · GPU 45% · renderer 40%"));
+    // The chip's peak bandwidth follows its cores.
+    assert!(text.contains("METAL        Apple M3 · 10 cores · 100 GB/s · GPU 45% · renderer 40%"));
     assert!(text.contains("LLM          oMLX · ready"));
     assert!(text.contains("PROVIDER     remote API · context capacity 8192 tokens"));
     assert!(text.contains("active 1"));
@@ -443,6 +444,8 @@ fn static_report_marks_missing_swap_and_unknown_hardware() {
     let empty = report(&Sample::default(), Platform::MacOs);
     assert!(empty.contains("PAGING       —"));
     assert!(empty.contains("METAL        unavailable · — cores · GPU — "));
+    // An unknown chip has no bandwidth to show, not a zero.
+    assert!(!empty.contains("GB/s"));
     assert!(empty.contains("MEMORY       — resident"));
     assert!(empty.contains("MLX          version — · active —"));
     assert!(!empty.contains("SLOWDOWN  "));
