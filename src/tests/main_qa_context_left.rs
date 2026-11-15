@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! The QA judge on what context left adds: the forecast under what memory
-//! has left, its arithmetic in Diagnostics, and the wired-limit advice.
+//! has left, its arithmetic in Diagnostics, the wired-limit advice, and
+//! peak memory per model load in the session summary.
 use super::qa::{judge, Case, SIZES};
 use super::*;
 use crate::chart_navigation::Chart;
@@ -113,6 +114,15 @@ fn cases() -> Vec<(Case, Option<&'static str>)> {
     diagnostics.diagnostics_open = true;
     let mut unknown = splash(&[63_673]);
     unknown.collector.current.model.kv_bytes_per_element = None;
+    let mut summary = splash(&[63_673]);
+    for (model, gib) in [("Qwen3.6-27B-4bit", 21), ("Qwen3.8-27B-oQ4e-mtp", 26)] {
+        let mut sample = summary.collector.current.clone();
+        sample.llm_model = model.into();
+        sample.llm_rss = gib * GIB;
+        sample.process_memory = None;
+        summary.collector.session.observe(&sample);
+    }
+    summary.summary_open = true;
     vec![
         (
             case("context-left-splash", splash(&[63_673])),
@@ -148,6 +158,7 @@ fn cases() -> Vec<(Case, Option<&'static str>)> {
         ),
         (case("context-left-unknown", unknown), None),
         (case("context-left-diagnostics", diagnostics), None),
+        (case("session-summary-loads", summary), None),
     ]
 }
 
@@ -345,6 +356,22 @@ fn diagnostics_give_the_arithmetic_after_the_models_facts() {
     assert!(!crate::report::diagnostic_lines(&unknown.collector.current)
         .iter()
         .any(|line| line.starts_with("Context left")));
+}
+
+#[test]
+fn the_session_summary_lists_peak_memory_per_model_load() {
+    let (case, _) = cases()
+        .into_iter()
+        .find(|(case, _)| case.name == "session-summary-loads")
+        .unwrap();
+    let screen = render_app(&case.app, 120, 40);
+    for line in [
+        "Peak memory per model load:",
+        "Qwen3.6-27B-4bit: 21.0 GiB with 63.7k tokens of context",
+        "Qwen3.8-27B-oQ4e-mtp: 26.0 GiB with 63.7k tokens of context · now",
+    ] {
+        assert!(screen.contains(line), "missing {line}\n{screen}");
+    }
 }
 
 /// The memory panel alone, `width` × `height`, for a machine whose GPU

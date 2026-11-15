@@ -709,12 +709,27 @@ that a corresponding process exists on the machine running mlxtop.
 
 `u` opens what the session amounted to: how long the model was watched and
 worked, the speed each cause cost, where requests' time went (queue, prompt,
-answer) with the slowest answers, the time the prompt cache saved and the
-energy per token. The same summary is printed when mlxtop exits, if the model
-did any work. Energy is the whole machine's power where macOS reports it;
-on Linux and Windows it is the power every GPU reports (none if one card
-gives no reading), labelled `GPU power only`, or `APU power only` for an AMD
-APU, whose reading covers its CPU cores too.
+answer) with the slowest answers, the time the prompt cache saved, the
+energy per token, and the peak memory of each model load. The same summary
+is printed when mlxtop exits, if the model did any work. Energy is the whole
+machine's power where macOS reports it; on Linux and Windows it is the power
+every GPU reports (none if one card gives no reading), labelled `GPU power
+only`, or `APU power only` for an AMD APU, whose reading covers its CPU cores
+too.
+
+A model load lasts while the runtime's live telemetry names the same model;
+it ends when another model is named or the runtime goes away, and is kept
+after that, the last eight loads in all. Its peak is the runtime's
+footprint at its highest, the figure the memory panel gives as `by app` (on
+macOS it includes the GPU memory the runtime holds), with the context in
+flight at that moment, so a quant that fit only before its context grew
+shows:
+
+```text
+Peak memory per model load:
+  Qwen3.6-27B-4bit: 21.0 GiB with 64.0k tokens of context in 2 requests
+  Qwen3.8-27B-oQ4e-mtp: 26.0 GiB with 1.9k tokens of context · now
+```
 
 ### Journal
 
