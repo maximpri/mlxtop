@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! What a session amounted to: how long the model worked and where its
-//! requests' time went, how much speed each cause cost, what the prompt
-//! cache saved, the energy per token, and the most memory each model load
-//! took. A finding scrolls out of the window; this keeps the total, so the
+//! requests' time went, how much speed each cause cost, what first tokens
+//! lost to cache misses, model loads and overlap, what the prompt cache
+//! saved, the energy per token, and the most memory each model load took.
+//! A finding scrolls out of the window; this keeps the total, so the
 //! change worth making is the one at the top.
 use crate::domain::{CorrelationCause, Phase, Sample, TelemetrySource};
 use crate::formatting::{bytes, compact_tokens, duration_label};
@@ -38,6 +39,9 @@ pub(crate) struct Session {
     /// What decode reached per verify pass while generation kept its usual
     /// speed, by context: the best this machine does with the model.
     pub(crate) decode: crate::efficiency::Record,
+    /// What requests lost before their first tokens: prompts read in full
+    /// after cached ones, model loads, overlap that bought nothing.
+    pub(crate) request_findings: crate::request_findings::Findings,
 }
 
 impl Session {
@@ -143,6 +147,7 @@ pub(crate) fn lines(
             lines.push(format!("  {:<26} {}", cause, duration_label(seconds)));
         }
     }
+    lines.extend(crate::request_findings::summary(&session.request_findings));
     lines.extend(session.decode.summary());
     let done: Vec<(&crate::domain::RequestUsage, Timing)> = requests
         .entries

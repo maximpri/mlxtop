@@ -11,6 +11,10 @@
     "splash_ssd_cache_gb": null,
     "splash_ane_prefill": true
   },
+  "scheduler": {
+    "max_concurrent_requests": 1,
+    "chunked_prefill": true
+  },
   "external_engines": {
     "splash": {
       "available": true,

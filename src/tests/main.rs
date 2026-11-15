@@ -738,5 +738,7 @@ mod qa_context_left;
 mod qa_efficiency;
 #[path = "main_qa_native_runtimes.rs"]
 mod qa_native_runtimes;
+#[path = "main_qa_request_findings.rs"]
+mod qa_request_findings;
 #[path = "main_runtimes.rs"]
 mod runtimes;

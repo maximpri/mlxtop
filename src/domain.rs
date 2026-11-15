@@ -52,7 +52,9 @@ impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
             "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED"
-            | "ENDED" | "SETTLED" => Self::Llm,
+            | "ENDED" | "SETTLED" | "CACHE MISS" | "MODEL LOAD" | "OVERLAP" | "KV CACHE FULL" => {
+                Self::Llm
+            }
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -649,6 +651,9 @@ pub(crate) struct LlmTelemetry {
     /// Requests the runtime preempted or recomputed for want of KV cache,
     /// counted since it started.
     pub(crate) preemptions_total: Option<u64>,
+    /// Requests the runtime is set to run at once, where its settings say:
+    /// oMLX's `max_concurrent_requests`.
+    pub(crate) max_concurrent: Option<u64>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -820,6 +825,10 @@ pub(crate) struct Sample {
     /// counted since it started.
     #[serde(default)]
     pub(crate) llm_preemptions_total: Option<u64>,
+    /// Requests the runtime is set to run at once, where its settings say:
+    /// oMLX's `max_concurrent_requests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) llm_max_concurrent: Option<u64>,
     /// What llama-server says of its slots, sleep and speculative decoding.
     #[serde(default)]
     pub(crate) llama: crate::providers::llama::LlamaReadings,
@@ -841,6 +850,11 @@ pub(crate) struct Sample {
     pub(crate) llm_remote: bool,
     #[serde(skip)]
     pub(crate) correlation: CorrelationInsight,
+    /// What the session's requests lost before their first tokens (cache
+    /// misses, model loads, overlap) and the evidence: derived, like the
+    /// correlation, never recorded.
+    #[serde(skip)]
+    pub(crate) request_findings: crate::request_findings::Evidence,
     pub(crate) llm_top: String,
     pub(crate) llm_pid: u32,
     pub(crate) impact: String,
@@ -1058,6 +1072,7 @@ impl Default for Sample {
             llm_kv_free_tokens: None,
             llm_kv_free_bytes: None,
             llm_preemptions_total: None,
+            llm_max_concurrent: None,
             llama: Default::default(),
             llm_request_timings: Vec::new(),
             llm_active_requests: None,
@@ -1071,6 +1086,7 @@ impl Default for Sample {
             llm_engine: None,
             llm_remote: false,
             correlation: CorrelationInsight::default(),
+            request_findings: Default::default(),
             llm_top: "none".into(),
             llm_pid: 0,
             impact: "SAMPLING".into(),

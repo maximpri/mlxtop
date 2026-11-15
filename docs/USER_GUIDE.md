@@ -267,6 +267,68 @@ lower speed holds for 30 seconds it becomes the usual speed for that work
 is what happens together, not proof of cause. mlxtop needs eight samples of
 generation before it has a usual speed to compare with.
 
+## Time lost before the first token
+
+Some costs never show as slower generation: they make the first token late.
+mlxtop names four, each in one sentence, from the requests a runtime lists
+or reports. None of them colours anything or changes the headline, since
+colour means a change in generation speed: each is a Journal row, the
+[session summary](#session-summary) adds the time it cost, and Diagnostics
+(`d`) gives the evidence.
+
+- **A long prompt was read in full right after a prompt of similar length
+  was almost all cached** (`CACHE MISS`): at least 4,096 prompt tokens
+  computed with under 10% from the cache, right after a request of the same
+  model at least 80% cached whose prompt was within a factor of two of it.
+  A much shorter or longer prompt is another context (an agent that
+  compacted its history, a new task) that no cache could have served. The
+  cost is the prompt's reading time at this machine's usual prefill speed:
+  the median of the prefill speeds measured this session, else the
+  runtime's own figure. oMLX lists no cached count beside a request; it
+  adds each request's prompt and cached tokens to its totals as the request
+  ends, and mlxtop reads the request's count from that rise.
+- **The first token waited for the model to load** (`MODEL LOAD`): a load
+  of a second or more that a runtime reported for the request: Ollama's
+  `load_duration`, LM Studio's `model_load_time_seconds`, or `model_load_ms`
+  in a [usage record](#client-reported-usage-file).
+- **Running two requests at once gained no throughput on this machine and
+  raised the wait for the first token N-fold** (`OVERLAP`, at most once a
+  session). It is judged once the session holds a minute of two requests
+  writing at once, from three pairs or more, and the first tokens of ten
+  requests that started alone and ten that started while another wrote.
+  Each request's speed while it shared is counted against its own speed
+  while it wrote alone (for two seconds or more): 1× is no gain, 2× is both
+  at full speed. It is told when two at once did under 1.1× the work of one
+  at a time and the first token waited at least 1.5 times as long. Where the
+  runtime says how many requests it is set to run at once (oMLX's
+  `max_concurrent_requests`, llama.cpp's `--parallel`) and more ran,
+  Diagnostics says so and the row adds it. It needs each request's own
+  speed while it shares, which oMLX and llama.cpp report and Splash on its
+  own does not.
+- **The KV cache was full: N requests were recomputed** (`KV CACHE FULL`):
+  the runtime's count of requests preempted, retracted or suspended for want
+  of KV cache rose (vLLM, SGLang, TensorFold, Splash). A rise within a
+  minute of the last row is the same story.
+
+```text
+OVERLAP        two requests at once gained no throughput (0.97× one at a time) and made first tokens wait 3.0× as long · oMLX is set to run 1 at a time
+CACHE MISS     b · 45.0k prompt read in full right after one of 44.0k was 98% cached · ≈2m 56s of prompt reading
+MODEL LOAD     cold · first token waited 6.5s for the model to load
+KV CACHE FULL  3 requests were recomputed
+```
+
+The thresholds were counted on a Mac Studio's own logs: Splash's record of
+10,653 requests over 23 active days and oMLX's of 18,658 since August. The
+cache rule fired 5 times (0.5 per 1,000 requests, never twice in a day),
+each costing 20 s to 3 minutes of prompt reading; without the similar-length
+condition it fired 60 times, 51 of them a prompt under half the cached one
+before it. Two requests wrote at once for minutes on 5 of the 23 days, though
+oMLX was set to run one request at a time; on 4 of them the overlap rule had
+its minute and its pairs, and first tokens waited 2.4 to 4.6 times as long
+beside another request. Requests that wrote almost wholly beside another ran
+at under half their speed alone, so two at once did 0.92 to 0.97 times the
+work of one. Sixteen requests waited for a model load, from 2.5 s to 82 s.
+
 ## Decode efficiency
 
 Writing an answer reads the model's weights for every forward pass, so the
@@ -748,6 +810,21 @@ Slots: 4 · 1.6 busy per decode step since the server started
 Speculative decoding: 3.4 tokens per verify pass, 60% of drafted tokens accepted, since the server started
 ```
 
+For every runtime, the readings end with what requests lost
+[before their first token](#time-lost-before-the-first-token), each line
+only once there is something to say:
+
+```text
+Cache misses: 1 long prompt read in full right after cached ones, ≈2m 56s of prompt reading; the last at 14:06:57, 45.0k after one of 44.0k was 98% cached
+Model loads: first tokens waited 6.5s for 1 load; the longest 6.5s at 14:06:58
+Two requests at once: 0.97× the work of one at a time over 3m 20s (10 pairs); first token median 6.0s when started beside another writing, 2.0s alone (10 and 23 requests)
+oMLX is set to run 1 request at a time (max_concurrent_requests), yet 2 ran at once
+KV cache full: 3 requests recomputed this session, the last at 14:07:00
+```
+
+The two-at-once line appears once the evidence is enough to judge, whether
+or not two at once paid.
+
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
 the panel. Tab/Shift-Tab and 1/2/3 close it and switch views. `p` pauses sampling,
 `a` acknowledges a critical alarm, and `q` or Ctrl-C quits. Opening the panel does
@@ -892,9 +969,10 @@ that a corresponding process exists on the machine running mlxtop.
 ### Session summary
 
 `u` opens what the session amounted to: how long the model was watched and
-worked, the speed each cause cost, decode by context, where requests' time
-went (queue, prompt, answer) with the slowest answers, the time the prompt cache saved, the
-energy per token, and the peak memory of each model load. The same summary
+worked, the speed each cause cost, the time first tokens lost, decode by
+context, where requests' time went (queue, prompt, answer) with the slowest
+answers, the time the prompt cache saved, the energy per token, and the peak
+memory of each model load. The same summary
 is printed when mlxtop exits, if the model did any work. Energy is the whole
 machine's power where macOS reports it; on Linux and Windows it is the power
 every GPU reports (none if one card gives no reading), labelled `GPU power
@@ -913,6 +991,21 @@ shows:
 Peak memory per model load:
   Qwen3.6-27B-4bit: 21.0 GiB with 64.0k tokens of context in 2 requests
   Qwen3.8-27B-oQ4e-mtp: 26.0 GiB with 1.9k tokens of context · now
+```
+
+The time first tokens lost is what the [findings before the first
+token](#time-lost-before-the-first-token) cost: the reading time of prompts
+read in full after cached ones, model loads, and, once two requests at once
+are found to buy nothing, how much longer requests that started beside
+another waited for their first token than the median request that started
+alone. A cause that cost under a second is left out, and with none the
+lines are not shown:
+
+```text
+Time lost before first tokens: 3m 43s
+  cache misses               2m 56s
+  model loads                7s
+  overlap                    40s
 ```
 
 Decode by context is the [decode efficiency](#decode-efficiency) estimate

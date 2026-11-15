@@ -47,8 +47,12 @@ fn omlx_settings_keep_only_what_serving_needs() {
             base_path: Some(PathBuf::from("/omlx")),
             splash_kv_format: Some("int8".into()),
             splash_version: Some("1.5.0".into()),
+            max_concurrent_requests: Some(1),
         }
     );
+    // A limit of none is no limit read.
+    let unset = OmlxSettings::parse(&json!({"scheduler": {"max_concurrent_requests": 0}}));
+    assert_eq!(unset.max_concurrent_requests, None);
     // The API key the response carries is not kept; text is printable.
     let settings = OmlxSettings::parse(&json!({
         "auth": {"api_key": "secret"},
