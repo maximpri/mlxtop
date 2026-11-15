@@ -410,7 +410,7 @@ fn the_journal_has_one_row_as_a_request_starts_and_one_as_it_ends() {
 
 #[test]
 fn the_journal_says_when_heat_begins_changes_and_ends_once_each() {
-    use ThermalLevel::{Heavy, Moderate, Nominal};
+    use ThermalLevel::{Heavy, Moderate, Nominal, Trapping};
     let at = |level: Option<ThermalLevel>| {
         let thermal_state = ThermalState {
             level,
@@ -423,7 +423,8 @@ fn the_journal_says_when_heat_begins_changes_and_ends_once_each() {
         }
     };
     // A level that could not be read for a few seconds, with nominal on
-    // either side, is not news; heat beginning, rising and ending is.
+    // either side, is not news, nor is Moderate on its own; heat that
+    // limits the machine beginning, rising and ending is.
     let samples = [
         at(Some(Nominal)),
         at(None),
@@ -431,6 +432,7 @@ fn the_journal_says_when_heat_begins_changes_and_ends_once_each() {
         at(Some(Moderate)),
         at(Some(Heavy)),
         at(Some(Heavy)),
+        at(Some(Trapping)),
         at(Some(Nominal)),
     ];
     let mut collector = Collector::with_host(
@@ -452,8 +454,8 @@ fn the_journal_says_when_heat_begins_changes_and_ends_once_each() {
     assert_eq!(
         rows,
         [
-            ("moderate".to_owned(), Tone::Yellow),
             ("heavy".to_owned(), Tone::Yellow),
+            ("trapping".to_owned(), Tone::Yellow),
             ("nominal".to_owned(), Tone::Green),
         ]
     );

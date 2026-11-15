@@ -288,9 +288,12 @@ impl ThermalState {
     }
 
     /// macOS is holding the machine back for heat: a pressure level from
-    /// Moderate up, or a CPU speed limit below full speed.
+    /// Heavy up, where Apple says performance is reduced, or a CPU speed
+    /// limit below full speed. Moderate is only "slightly elevated": it is
+    /// named when generation slows while it rises, never on its own.
     pub(crate) fn limited(&self) -> bool {
-        self.rank().is_some_and(|rank| rank > 0)
+        self.level.is_some_and(|level| level >= ThermalLevel::Heavy)
+            || self.cpu_speed_limit.is_some_and(|limit| limit < 100)
     }
 
     /// In words, as recorded and shown: `nominal`, `heavy`, `limited 70%`,

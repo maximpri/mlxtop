@@ -1220,11 +1220,11 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
     let stress = classified(measured("YELLOW"));
     assert_eq!(stress.impact, "MEMORY STRESS");
 
-    // macOS holding the machine back for heat: a raised pressure level, or
-    // (Intel) a CPU speed limit.
+    // macOS holding the machine back for heat: a pressure level from Heavy
+    // up, or (Intel) a CPU speed limit.
     for thermal in [
         ThermalState {
-            level: Some(ThermalLevel::Moderate),
+            level: Some(ThermalLevel::Heavy),
             cpu_speed_limit: None,
         },
         ThermalState {
@@ -1239,12 +1239,16 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         });
         assert_eq!(hot.impact, "THERMAL LIMIT", "{thermal:?}");
     }
-    // Nominal, no limit, or nothing read: not a limit, and words alone are
-    // not a reading.
+    // Nominal, Moderate ("slightly elevated"), no limit, or nothing read:
+    // not a limit on its own, and words alone are not a reading.
     for thermal in [
         ThermalState {
             level: Some(ThermalLevel::Nominal),
             cpu_speed_limit: Some(100),
+        },
+        ThermalState {
+            level: Some(ThermalLevel::Moderate),
+            cpu_speed_limit: None,
         },
         ThermalState::default(),
     ] {

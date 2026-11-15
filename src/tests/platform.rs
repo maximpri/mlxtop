@@ -179,7 +179,12 @@ fn the_thermal_state_ranks_says_and_explains_what_macos_reported() {
         ),
     ] {
         assert_eq!(state.rank(), rank, "{state:?}");
-        assert_eq!(state.limited(), rank.is_some_and(|rank| rank > 0));
+        assert_eq!(
+            state.limited(),
+            state.level.is_some_and(|level| level >= Heavy)
+                || state.cpu_speed_limit.is_some_and(|limit| limit < 100),
+            "{state:?}"
+        );
         assert_eq!(state.label(), words, "{state:?}");
         assert_eq!(state.reason(), reason, "{state:?}");
     }
