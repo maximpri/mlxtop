@@ -326,6 +326,13 @@ model and again only when a file changes, which it checks once a minute. A
 file it cannot read leaves its facts unknown, and a remote oMLX's files are not
 read at all.
 
+Other runtimes give what they report themselves, in the same lines: Ollama the
+quantization, the context it is loaded with, and from `/api/show` the parameters,
+trained context and experts (see [provider endpoints](#provider-endpoints)); LM
+Studio the quantization, the context it is loaded with and the model's own; vLLM the
+KV format and whether a draft is configured; SGLang the KV bytes per token, the
+context it allows and whether it drafts; TensorFold whether it drafts.
+
 ## MLX and Metal telemetry
 
 MLX allocator state belongs to the serving process. When an oMLX-compatible
@@ -521,6 +528,15 @@ Qwen3.8-27B through Splash:
 Model: 14.0 GiB read per pass · 4.69 bits per weight, 4/5-bit g64 · 26.9B parameters · draft 3.6 GiB
 Context: KV 32.5 KiB per token, int8 · 152.6 MiB state per sequence · 131.1k tokens allowed of 262.1k trained
 Version: oMLX 0.7.3 · Splash 1.5.0
+```
+
+For vLLM, SGLang and TensorFold it adds what their own counters say about
+speculative decoding and the KV cache, each only when reported (see
+[provider endpoints](#provider-endpoints)). On a vLLM server with a draft:
+
+```text
+Speculative decoding: 2.9 tokens per verify pass
+KV cache: 41.2k tokens free · 4 requests preempted since the server started
 ```
 
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
@@ -1100,7 +1116,7 @@ sessions to monitor independent endpoints concurrently.
 
 | Provider name | Default port | Read-only endpoints |
 | --- | --- | --- |
-| `ollama` | 11434 | `/api/ps` |
+| `ollama` | 11434 | `/api/ps`; `POST /api/show` once per model (read-only, see below) |
 | `lmstudio` or `llmster` | 1234 | `/api/v1/models`, fallback `/api/v0/models`, then `/v1/models` |
 | `vllm` | 8000 | `/metrics` |
 | `sglang` | 30000 | `/metrics` (requires `--enable-metrics`) |
@@ -1169,27 +1185,69 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   Slot capacity, processed prefill
   work and retained context are not treated as full request prompt counts. Use
   the usage-file integration below for exact completion usage.
-- **Ollama:** `/api/ps` supplies loaded models, summed resident VRAM and a single
-  model's configured context capacity. Residency does not establish request
-  activity. The native completion recorder preserves decode speed and cached
-  prompt tokens; total request duration is not used as decode time or TTFT.
-- **LM Studio:** native v1 supplies loaded instances and their context capacity;
-  v0 supplies loaded model identity. The final fallback supplies an available-model
-  catalogue. Download size is never reported as allocated RAM. Native completion
-  stats supply output speed and explicitly reported first-token time through the
-  usage recorder.
+- **Ollama:** `/api/ps` supplies loaded models and summed resident VRAM, and for a
+  single model its architecture and runner (`llama on llama.cpp`, `on MLX`), its
+  quantization and the context it is loaded with. Residency does not establish
+  request activity. For that model mlxtop also asks `POST /api/show` once per model
+  digest: a read-only request that reads the model's manifest and file header and
+  loads nothing. Its parameter count, trained context, experts and, for a GGUF model
+  of standard attention, its layers, KV heads and head dimension become the
+  [model's facts](#model-facts). A safetensors model on the MLX runner names no head
+  dimension or layer kinds there, so those stay unknown, as does the KV format, which
+  Ollama does not report. An answer that cannot be read is asked again a minute later,
+  never on every poll, and a cloud model is never asked about. The native completion
+  recorder preserves decode speed and cached prompt tokens; total request duration is
+  not used as decode time or TTFT.
+- **LM Studio:** native v1 supplies loaded instances; for a single instance also its
+  quantization, the experts it runs per token, the context it is loaded with and the
+  context the model supports (as model facts), its format, the size of its weights on
+  disk and how many requests it runs at once. v0 supplies loaded model identity. The
+  final fallback supplies an available-model catalogue. Download size is never
+  reported as allocated RAM. Native completion stats supply output speed and
+  explicitly reported first-token time through the usage recorder.
 - **vLLM/SGLang:** Prometheus polling sums active/waiting requests and computes
   server-wide generation/prompt-token rates from successive counter samples.
   These are sampled server rates, not per-request averages. The first sample,
   counter resets, changed series and gaps longer than five seconds produce no
   rate. vLLM supplies interval and cumulative prefix-token cache reuse (from
   `gpu_prefix_cache_*` on vLLM 0.9.1 and earlier). SGLang's reuse is its cached
-  prompt tokens over all prompt tokens. SGLang adds a request's tokens to its
-  counters only when it finishes, so its rates are averages, kept out of live
-  rate charts and slowdown detection.
+  prompt tokens over all prompt tokens. SGLang adds a request's prompt and output
+  tokens to those counters only when it finishes, so its decode rate comes from
+  `sglang:realtime_tokens_total{mode="decode"}`, which it advances on every decode
+  step: live, and zero through a stall. An SGLang without it falls back to its
+  `gen_throughput` gauge (the speed of its last few dozen decode steps), and one
+  with neither to completion averages, kept out of live rate charts and slowdown
+  detection. Its prefill rate stays a completion average.
   Processes shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
+  Diagnostics adds what each engine counts about its own work, each only when it
+  reports it:
+  - **Since the last poll:** the mean queue wait and time between tokens of the
+    work done (from the `_sum` and `_count` of `request_queue_time_seconds` and
+    `inter_token_latency_seconds`, or SGLang's `queue_time_seconds`); vLLM's share
+    of draft tokens accepted; SGLang's cached tokens evicted.
+  - **Speculative decoding:** the tokens a verify pass emits, the draft tokens
+    accepted plus the target's own: vLLM's accepted tokens per draft plus one,
+    SGLang's `spec_accept_length` while it decodes. Whether a draft is configured
+    at all is a model fact: vLLM registers its draft counters exactly when it has
+    one, and SGLang names its draft once it has decoded.
+  - **KV cache:** the room left in tokens, on the engine with the least: for vLLM
+    each engine's capacity from `vllm:cache_config_info` (`kv_cache_size_tokens`,
+    else blocks × block size) less what its usage gauge holds; for SGLang free
+    slots plus cached prefixes it would evict. SGLang also gives the bytes a token
+    costs (its KV pool over the tokens it holds; not for a hybrid sliding-window or
+    Mamba pool), so the room in bytes, and the context it allows. Then the requests
+    preempted (vLLM) or retracted (SGLang) for KV room since the server started.
+    vLLM's KV format (`cache_dtype`) is a model fact unless it is `auto`.
+  - **SGLang's time:** over the last half-minute, the share each scheduler spent
+    with the GPU running forward passes (only with
+    `SGLANG_ENABLE_METRICS_DEVICE_TIMER=1`), idle with no work at all, and on its
+    own CPU time across threads. SGLang credits these about once a second and an
+    idle stretch when work resumes, so a poll credited more than its own length is
+    left out.
+  A counter that falls (a restart) gives no figure for that interval, never a
+  negative or inflated one.
 - **mlx-serve / sushi:** polls `/metrics` (start mlx-serve with `--metrics`; sushi
   serves it by default; set
   `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
@@ -1235,11 +1293,17 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
 - **TensorFold:** detected by the `tensorfold` or `tensorfold-native` executable,
   or selected with `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
-  completion-counter throughput, prefix-cache reuse, KV occupancy and model memory
+  throughput, prefix-cache reuse, KV occupancy and model memory
   (device memory on CUDA, the process footprint on a Mac);
-  `/v1/models` supplies model names. Throughput needs two samples and advances when
-  requests finish; these rates are labeled as averages and excluded from live throughput
-  charts and slowdown alarms. Request history and individual
+  `/v1/models` supplies model names. The decode rate is the growth of the tokens its
+  running streams hold (`generation_tokens_running`) plus its finished total, so a
+  request ending between two polls neither adds nor loses tokens: it is live and needs
+  two samples. A TensorFold without that gauge, and the prefill rate always, advance
+  only when requests finish; those rates are labeled as averages and excluded from live
+  throughput charts and slowdown alarms. Diagnostics adds the tokens a decode round of
+  the requests finished since the last poll emitted with MTP drafting (whether it
+  drafts is a model fact, known once requests have finished), the requests that gave a
+  lane up to a later one, and the requests its admission limits refused. Request history and individual
   prompt/cache counts require the client usage recorder. No dashboard flag is required.
   For an authenticated local server, replace `/path/to/api-key` with the key file
   configured for that server:
@@ -1402,8 +1466,16 @@ and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
 supported adapters. For a model oMLX serves on this machine it reads the
 model's `config.json`, the headers of its safetensors shards (never the
-weights) and oMLX's `model_settings.json`, once per model and change. The application does not track how it is used, upload
-collected metrics, modify model state or send synthetic inference requests.
+weights) and oMLX's `model_settings.json`, once per model and change. Besides
+oMLX's admin login, the one runtime request that is not a GET is Ollama's
+read-only `POST /api/show`, sent once per model. mlxtop never asks for these routes, which change a runtime's state or generate
+text: SGLang's `/health_generate`, `/flush_cache` and its profiler, memory and
+session routes, llama-swap's `/unload` and `/upstream/…`, KoboldCpp's
+`/api/extra/shutdown`, Foundry Local's load and unload routes and exo's benchmark.
+The SGLang adapter asks for `/metrics` alone, never `/health`, which generates a
+token by default. The
+application does not track how it is used, upload collected metrics, modify model
+state or send synthetic inference requests.
 
 Provider credentials are read only when needed and are never displayed. See
 [SECURITY.md](../SECURITY.md) for responsible vulnerability reporting and the

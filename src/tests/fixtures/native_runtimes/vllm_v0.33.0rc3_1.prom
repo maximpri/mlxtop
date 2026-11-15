@@ -1,0 +1,77 @@
+# vLLM v0.33.0rc3 /metrics as its Prometheus logger writes it: names, help
+# and labels from vllm/v1/metrics/loggers.py, vllm/v1/spec_decode/metrics.py
+# and vllm/config/cache.py (CacheConfig.metrics_info) at that tag. One engine
+# serves Qwen/Qwen3-8B with a three-token draft and an fp8 KV cache; two
+# seconds after vllm_v0.33.0rc3_0.prom.
+# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="Qwen/Qwen3-8B",engine="0"} 2.0
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="Qwen/Qwen3-8B",engine="0"} 1.0
+# HELP vllm:num_requests_waiting_by_reason Number of requests waiting, by reason.
+# TYPE vllm:num_requests_waiting_by_reason gauge
+vllm:num_requests_waiting_by_reason{model_name="Qwen/Qwen3-8B",engine="0",reason="capacity"} 1.0
+vllm:num_requests_waiting_by_reason{model_name="Qwen/Qwen3-8B",engine="0",reason="deferred"} 0.0
+# HELP vllm:engine_sleep_state Engine sleep state; awake = 0 means engine is sleeping; awake = 1 means engine is awake; weights_offloaded = 1 means sleep level 1; discard_all = 1 means sleep level 2.
+# TYPE vllm:engine_sleep_state gauge
+vllm:engine_sleep_state{model_name="Qwen/Qwen3-8B",engine="0",sleep_state="awake"} 1.0
+vllm:engine_sleep_state{model_name="Qwen/Qwen3-8B",engine="0",sleep_state="weights_offloaded"} 0.0
+vllm:engine_sleep_state{model_name="Qwen/Qwen3-8B",engine="0",sleep_state="discard_all"} 0.0
+# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{model_name="Qwen/Qwen3-8B",engine="0"} 0.62
+# HELP vllm:prefix_cache_queries_total Prefix cache queries, in terms of number of queried tokens.
+# TYPE vllm:prefix_cache_queries_total counter
+vllm:prefix_cache_queries_total{model_name="Qwen/Qwen3-8B",engine="0"} 52200.0
+# HELP vllm:prefix_cache_hits_total Prefix cache hits, in terms of number of cached tokens.
+# TYPE vllm:prefix_cache_hits_total counter
+vllm:prefix_cache_hits_total{model_name="Qwen/Qwen3-8B",engine="0"} 31120.0
+# HELP vllm:num_preemptions_total Cumulative number of preemption from the engine.
+# TYPE vllm:num_preemptions_total counter
+vllm:num_preemptions_total{model_name="Qwen/Qwen3-8B",engine="0"} 4.0
+# HELP vllm:prompt_tokens_total Number of prefill tokens processed.
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{model_name="Qwen/Qwen3-8B",engine="0"} 52200.0
+# HELP vllm:prompt_tokens_cached_total Number of cached prompt tokens (local + external).
+# TYPE vllm:prompt_tokens_cached_total counter
+vllm:prompt_tokens_cached_total{model_name="Qwen/Qwen3-8B",engine="0"} 31120.0
+# HELP vllm:generation_tokens_total Number of generation tokens processed.
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="Qwen/Qwen3-8B",engine="0"} 18480.0
+# HELP vllm:spec_decode_num_drafts_total Number of spec decoding drafts.
+# TYPE vllm:spec_decode_num_drafts_total counter
+vllm:spec_decode_num_drafts_total{model_name="Qwen/Qwen3-8B",engine="0"} 6230.0
+# HELP vllm:spec_decode_num_draft_tokens_total Number of draft tokens.
+# TYPE vllm:spec_decode_num_draft_tokens_total counter
+vllm:spec_decode_num_draft_tokens_total{model_name="Qwen/Qwen3-8B",engine="0"} 18690.0
+# HELP vllm:spec_decode_num_accepted_tokens_total Number of accepted tokens.
+# TYPE vllm:spec_decode_num_accepted_tokens_total counter
+vllm:spec_decode_num_accepted_tokens_total{model_name="Qwen/Qwen3-8B",engine="0"} 11757.0
+# HELP vllm:spec_decode_num_accepted_tokens_per_pos_total Accepted tokens per draft position.
+# TYPE vllm:spec_decode_num_accepted_tokens_per_pos_total counter
+vllm:spec_decode_num_accepted_tokens_per_pos_total{model_name="Qwen/Qwen3-8B",engine="0",position="0"} 5124.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{model_name="Qwen/Qwen3-8B",engine="0",position="1"} 3919.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{model_name="Qwen/Qwen3-8B",engine="0",position="2"} 2714.0
+# HELP vllm:time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{le="0.5",model_name="Qwen/Qwen3-8B",engine="0"} 23.0
+vllm:time_to_first_token_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-8B",engine="0"} 37.0
+vllm:time_to_first_token_seconds_bucket{le="+Inf",model_name="Qwen/Qwen3-8B",engine="0"} 42.0
+vllm:time_to_first_token_seconds_count{model_name="Qwen/Qwen3-8B",engine="0"} 42.0
+vllm:time_to_first_token_seconds_sum{model_name="Qwen/Qwen3-8B",engine="0"} 34.4
+# HELP vllm:inter_token_latency_seconds Histogram of inter-token latency in seconds.
+# TYPE vllm:inter_token_latency_seconds histogram
+vllm:inter_token_latency_seconds_bucket{le="0.025",model_name="Qwen/Qwen3-8B",engine="0"} 9064.0
+vllm:inter_token_latency_seconds_bucket{le="+Inf",model_name="Qwen/Qwen3-8B",engine="0"} 12080.0
+vllm:inter_token_latency_seconds_count{model_name="Qwen/Qwen3-8B",engine="0"} 12080.0
+vllm:inter_token_latency_seconds_sum{model_name="Qwen/Qwen3-8B",engine="0"} 301.92
+# HELP vllm:request_queue_time_seconds Histogram of time spent in WAITING phase for request.
+# TYPE vllm:request_queue_time_seconds histogram
+vllm:request_queue_time_seconds_bucket{le="1.0",model_name="Qwen/Qwen3-8B",engine="0"} 32.0
+vllm:request_queue_time_seconds_bucket{le="+Inf",model_name="Qwen/Qwen3-8B",engine="0"} 42.0
+vllm:request_queue_time_seconds_count{model_name="Qwen/Qwen3-8B",engine="0"} 42.0
+vllm:request_queue_time_seconds_sum{model_name="Qwen/Qwen3-8B",engine="0"} 14.4
+# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
+# TYPE vllm:cache_config_info gauge
+vllm:cache_config_info{block_size="16",user_specified_block_size="False",kv_cache_layout="NHD",prefix_match_unit="None",gpu_memory_utilization="0.92",cache_dtype="fp8_e4m3",is_attention_free="False",num_gpu_blocks_override="None",sliding_window="None",enable_prefix_caching="True",prefix_caching_hash_algo="sha256",kv_cache_dtype_skip_layers="[]",mamba_block_size="None",mamba_cache_dtype="auto",mamba_cache_mode="none",num_gpu_blocks="6784",num_cpu_blocks="None",effective_attention_block_size="16",kv_cache_size_tokens="108544",kv_cache_max_concurrency="3.3125",hash_block_size="16",cache_hit_alignment_tokens="16",kv_sharing_fast_prefill="False",kv_cache_memory_bytes="None",kv_offloading_size="None",kv_offloading_backend="native",engine="0"} 1.0

@@ -729,5 +729,7 @@ mod other;
 mod qa;
 #[path = "main_qa_chip_facts.rs"]
 mod qa_chip_facts;
+#[path = "main_qa_native_runtimes.rs"]
+mod qa_native_runtimes;
 #[path = "main_runtimes.rs"]
 mod runtimes;

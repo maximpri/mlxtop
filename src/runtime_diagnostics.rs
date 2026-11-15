@@ -231,6 +231,7 @@ impl RuntimeReport {
                     .collect::<String>()
             ));
         }
+        lines.extend(sample.native_runtime_lines());
         lines.extend(crate::model_facts::lines(&sample.model));
         for probe in &self.probes {
             lines.push(format!(
@@ -411,7 +412,7 @@ fn capabilities(provider: &str) -> Vec<Capability> {
         ),
         "TensorFold" => (
             "native available-model catalogue",
-            "sampled completed-request throughput; needs two counter samples",
+            "live decode tokens; completion-counter averages otherwise",
             "sampled completed-request throughput; needs two counter samples",
             "native active / waiting",
             "client recorder",

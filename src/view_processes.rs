@@ -13,6 +13,28 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
+/// The ` · `-separated readings of `text` that fit in `room` columns, whole
+/// and in order; the first alone is cut at a word when even it does not fit.
+fn whole_readings(text: &str, room: usize) -> String {
+    let mut shown = String::new();
+    for reading in text.split(" · ") {
+        let next = if shown.is_empty() {
+            reading.to_owned()
+        } else {
+            format!("{shown} · {reading}")
+        };
+        if Line::from(next.as_str()).width() > room {
+            break;
+        }
+        shown = next;
+    }
+    if shown.is_empty() {
+        crate::diagnostics_view::fit_words(text, room)
+    } else {
+        shown
+    }
+}
+
 impl App {
     pub(crate) fn draw_llm_top(&self, frame: &mut Frame, area: Rect) {
         let details = self.collector.current.llm_details.as_deref();
@@ -30,9 +52,12 @@ impl App {
         // An empty f64 sum is -0.0; adding 0.0 keeps the title at "0.0%".
         let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>() + 0.0;
         if let Some(text) = details {
+            // One line inside the border: later readings drop whole before
+            // one is cut. Diagnostics has them all.
+            let room = usize::from(rows[0].width.saturating_sub(3));
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!(" {text}"),
+                    format!(" {}", whole_readings(text, room)),
                     Style::default().fg(CYAN),
                 )))
                 .block(panel(
