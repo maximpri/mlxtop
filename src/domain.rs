@@ -920,13 +920,21 @@ impl Sample {
     /// Where this machine's GPU memory comes from: a pool of its own, or
     /// the same RAM everything else uses.
     pub(crate) fn gpu_memory(&self) -> gpu::Memory {
-        if cfg!(target_os = "macos") {
-            gpu::Memory::Shared
-        } else if self.has_discrete_gpus() {
+        if self.has_discrete_gpus() {
             gpu::memory(&self.gpus)
+        } else if self.apple_gpu() || cfg!(target_os = "macos") {
+            gpu::Memory::Shared
         } else {
             gpu::Memory::Unknown
         }
+    }
+
+    /// An Apple GPU was read. Its memory is the machine's RAM wherever the
+    /// sample is shown, so a Mac's recording keeps its one pool on Linux.
+    pub(crate) fn apple_gpu(&self) -> bool {
+        self.metal.device_name.is_some()
+            || self.metal.gpu_cores.is_some()
+            || self.metal.architecture.is_some()
     }
 }
 
