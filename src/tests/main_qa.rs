@@ -616,3 +616,7 @@ fn the_gpu_panel_edge_adds_power_and_memory_activity_while_it_has_room() {
     let two = text(&draw_devices(&linux_cards(2), 200, 60)).join("\n");
     assert!(two.contains("saturated · 750/900 W ─"), "{two}");
 }
+
+// Model facts in Diagnostics, judged as every screen is.
+#[path = "main_qa_model_facts.rs"]
+mod model_facts;

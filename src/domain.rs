@@ -669,6 +669,8 @@ pub(crate) struct LlmTelemetry {
     pub(crate) remote: bool,
     pub(crate) cache_interval_efficiency: Option<f64>,
     pub(crate) mlx: MlxTelemetry,
+    /// What the model reads per pass and holds per token and sequence.
+    pub(crate) model_facts: crate::model_facts::ModelFacts,
 }
 
 /// The recording format samples are written in. 1: each sample carries `ts`
@@ -727,6 +729,9 @@ pub(crate) struct Sample {
     pub(crate) gpus: Vec<gpu::Device>,
     pub(crate) metal: MetalTelemetry,
     pub(crate) mlx: MlxTelemetry,
+    /// The serving model's facts: bytes per pass, KV per token, state.
+    #[serde(default)]
+    pub(crate) model: crate::model_facts::ModelFacts,
     /// The thermal state in words, as recorded and shown: macOS's pressure
     /// level or CPU speed limit, or a temperature measured elsewhere.
     pub(crate) thermal: String,
@@ -975,6 +980,7 @@ impl Default for Sample {
             gpus: Vec::new(),
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
+            model: Default::default(),
             thermal: "unavailable".into(),
             thermal_state: ThermalState::default(),
             system_power_mw: None,

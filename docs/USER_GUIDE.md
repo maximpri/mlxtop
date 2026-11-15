@@ -286,6 +286,46 @@ benchmark on Splash?) · no live rates`, and prompt load says it is busy outside
 oMLX. Splash's own `/status` needs the key oMLX generates, so mlxtop does not
 read it.
 
+### Model facts
+
+For the one model oMLX serves on this machine, mlxtop works out what the
+model costs per token and per sequence, and shows it in Diagnostics (`d`):
+
+- **Read per pass**: the weight bytes one forward pass reads, from the JSON
+  header at the start of each of the model's `model*.safetensors` shards. It
+  counts the decoder layers and the output head, and leaves out what a text
+  token never reads: a vision tower, an MTP head and the embedding table, which
+  is only a lookup (unless the model ties it to the output head). For MoE models
+  it counts the experts one token uses.
+- **Bits per weight** over those bytes, scales and biases included, with the
+  quantization from `config.json` (`4-bit g64` for 4-bit weights with a scale
+  and bias per group of 64, `4/5-bit g64` where some layers differ, `mxfp4`),
+  and the parameters.
+- **KV per token**: keys and values for every layer that keeps them (a
+  hybrid model's linear-attention layers do not), in the format the KV cache
+  is stored in: for Splash, `integrations.splash_kv_format` in oMLX's settings
+  (`int8` costs a byte a value and a byte of scale per 64 values); for oMLX's
+  own engine, the model's activation dtype unless its `turboquant_kv_*`
+  settings quantize the cache, whose size mlxtop does not work out.
+- **State per sequence**: what a sequence holds whatever its length: the
+  recurrent state of linear-attention (Gated DeltaNet) layers, full sliding
+  windows, and with Splash the DFlash draft's context window it keeps beside
+  each state.
+- **Draft**: Splash always drafts with a DFlash2 checkpoint; its size is shown
+  when the draft configured in `dflash_draft_model` fits the model. On oMLX's
+  own engine, the model's MTP head or a DFlash draft, as its settings say.
+- **Context** oMLX allows for the model (`/v1/models/status`) and the context
+  the model was trained for, and the oMLX and Splash versions.
+
+The model's directory comes from oMLX's `/v1/models/status` and oMLX's version
+from `/api/status`, asked once a minute and sent the same API key as the admin
+login, under the same rules; the per-model settings come from
+`model_settings.json` in oMLX's base directory. mlxtop reads only
+`config.json` and the shard headers, never the weights; it reads them once per
+model and again only when a file changes, which it checks once a minute. A
+file it cannot read leaves its facts unknown, and a remote oMLX's files are not
+read at all.
+
 ## MLX and Metal telemetry
 
 MLX allocator state belongs to the serving process. When an oMLX-compatible
@@ -472,6 +512,16 @@ connected inventory API does not establish live throughput. Native live rates,
 server averages, last completions, and client-reported usage retain their separate
 meanings. A missing reading stays unavailable. Optional endpoint failures can
 leave a connection partially available; legacy LM Studio fallbacks remain usable.
+
+For a model oMLX serves on this machine, the connection section also gives the
+[model's facts](#model-facts), each only when known. On a Mac Studio serving
+Qwen3.8-27B through Splash:
+
+```text
+Model: 14.0 GiB read per pass · 4.69 bits per weight, 4/5-bit g64 · 26.9B parameters · draft 3.6 GiB
+Context: KV 32.5 KiB per token, int8 · 152.6 MiB state per sequence · 131.1k tokens allowed of 262.1k trained
+Version: oMLX 0.7.3 · Splash 1.5.0
+```
 
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
 the panel. Tab/Shift-Tab and 1/2/3 close it and switch views. `p` pauses sampling,
@@ -1350,7 +1400,9 @@ every five seconds, and per-process GPU memory where described above),
 the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
-supported adapters. The application does not track how it is used, upload
+supported adapters. For a model oMLX serves on this machine it reads the
+model's `config.json`, the headers of its safetensors shards (never the
+weights) and oMLX's `model_settings.json`, once per model and change. The application does not track how it is used, upload
 collected metrics, modify model state or send synthetic inference requests.
 
 Provider credentials are read only when needed and are never displayed. See
