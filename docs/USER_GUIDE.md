@@ -263,6 +263,13 @@ labels that fallback with its age:
 ~/.omlx-coding/logs/launchd.stderr.log
 ```
 
+oMLX logs a request's tokens over the time after its first token, but over
+the whole request, the wait for the first token included, when it recorded no
+first token: an answer that was not streamed, which on one Mac Studio was most
+short requests served through Splash. That figure is no generation speed, so
+the fallback shows a logged rate only when it is clearly faster than the
+request's tokens over its whole time, and leaves `GEN` unknown otherwise.
+
 API credentials are sent only to loopback endpoints by default. To use an
 intentionally remote oMLX endpoint, set `MLXTOP_ALLOW_REMOTE_AUTH=1` and use a
 trusted, protected network path.

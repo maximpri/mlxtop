@@ -21,7 +21,7 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
     let home = TempDir::new("macos-home");
     home.write(
         ".omlx-coding/logs/server.log",
-        "noise\nINFO Chat completion: model=qwen-coder, 120 tokens in 2.00s (60.0 tok/s), prompt: 500, cached: 0\n",
+        "noise\nINFO Chat completion: model=qwen-coder, 120 tokens in 3.00s (60.0 tok/s), prompt: 500, cached: 0\n",
     );
     let mut collector = collector(host.clone(), Platform::MacOs, Some(home.0.clone()));
     assert_eq!(collector.total_memory, 36 * 1024 * MIB);
@@ -413,7 +413,7 @@ fn sampling_clears_rate_histories_when_the_model_changes() {
     let home = TempDir::new("model-switch");
     let log = home.write(
         ".omlx-coding/logs/server.log",
-        "Chat completion: model=first, 10 tokens in 1.00s (10.0 tok/s)\n",
+        "Chat completion: model=first, 10 tokens in 2.00s (10.0 tok/s)\n",
     );
     let mut collector = collector(macos_host(), Platform::MacOs, Some(home.0.clone()));
     collector.sample();
@@ -421,7 +421,7 @@ fn sampling_clears_rate_histories_when_the_model_changes() {
     assert_eq!(collector.generation_history.len(), 2);
     fs::write(
         &log,
-        "Chat completion: model=second, 10 tokens in 1.00s (10.0 tok/s)\n",
+        "Chat completion: model=second, 10 tokens in 2.00s (10.0 tok/s)\n",
     )
     .unwrap();
     let sample = collector.sample();

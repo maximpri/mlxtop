@@ -59,9 +59,9 @@ pub(crate) fn parse_llm_completion_line(line: &str) -> Option<LlmLogStats> {
     let (output, rest) = rest.split_once(" tokens in ")?;
     let output_tokens = output.trim().parse().ok()?;
     let (seconds, rest) = rest.split_once("s (")?;
-    seconds.trim().parse::<f64>().ok()?;
+    let seconds = seconds.trim().parse::<f64>().ok()?;
     let (throughput, rest) = rest.split_once(" tok/s)")?;
-    let tokens_per_second = throughput.trim().parse().ok()?;
+    let logged = throughput.trim().parse::<f64>().ok()?;
     let prompt_tokens = rest.find("prompt: ").and_then(|prompt_start| {
         rest[prompt_start + "prompt: ".len()..]
             .split(',')
@@ -72,9 +72,22 @@ pub(crate) fn parse_llm_completion_line(line: &str) -> Option<LlmLogStats> {
     });
     Some(LlmLogStats {
         model: Some(model.trim().into()),
-        tokens_per_second: Some(tokens_per_second),
+        tokens_per_second: generation_rate(output_tokens, seconds, logged),
         output_tokens: Some(output_tokens),
         prompt_tokens,
         observed_at: None,
     })
 }
+
+/// oMLX logs a request's tokens over its time after the first token, but over the whole
+/// request, the wait for the first token included, when it recorded no first token: on one
+/// server, most short requests served through Splash. That figure is no generation speed, so
+/// a logged rate counts only when it is clearly faster than the tokens over the whole time.
+fn generation_rate(output: u64, seconds: f64, logged: f64) -> Option<f64> {
+    let overall = output as f64 / seconds;
+    (logged.is_finite() && overall.is_finite() && logged > overall * 1.02).then_some(logged)
+}
+
+#[cfg(test)]
+#[path = "tests/completion_log.rs"]
+mod tests;

@@ -353,7 +353,7 @@ fn classification_reports_unknown_data_and_actionable_compression() {
 #[test]
 fn parses_llm_completion_stats() {
     let stats = parse_llm_completion_line(
-        "2026-08-25 03:00:00 Chat completion: model=oQ4e-mtp, 128 tokens in 4.0s (32.0 tok/s), prompt: 4096, finish_reason=stop, max_tokens=512",
+        "2026-08-25 03:00:00 Chat completion: model=oQ4e-mtp, 128 tokens in 6.0s (32.0 tok/s), prompt: 4096, finish_reason=stop, max_tokens=512",
     )
     .expect("completion should parse");
     assert_eq!(stats.model.as_deref(), Some("oQ4e-mtp"));
@@ -371,7 +371,9 @@ fn parses_omlx_responses_api_stats_without_prompt_count() {
     assert_eq!(stats.model.as_deref(), Some("Qwen3.8-27B-oQ4e-mtp"));
     assert_eq!(stats.output_tokens, Some(8407));
     assert_eq!(stats.prompt_tokens, None);
-    assert_eq!(stats.tokens_per_second, Some(18.7));
+    // 8,407 tokens over the request's 449.88 s: the wait for the first token is in it, so it
+    // is no generation speed.
+    assert_eq!(stats.tokens_per_second, None);
 }
 
 #[test]
