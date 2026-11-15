@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.1-rc.5 — 2026-11-14
+## 3.3.1-rc.6 — 2026-11-15
 
 Fixes from a full review of 3.3.0. **Update with the install script or
 Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS crates this
