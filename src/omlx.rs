@@ -32,8 +32,8 @@ pub(crate) struct LlmTelemetryClient {
     pub(crate) runtime: RuntimeReport,
     using_adapter: bool,
     configured_endpoint: bool,
-    /// Whether this poll may send the admin key: only to an oMLX that was
-    /// detected or chosen, not to whatever answers on the polled port.
+    /// Whether an oMLX was detected or chosen: only then is its port asked
+    /// anything, the admin key included, not whatever answers there.
     pub(crate) login_allowed: bool,
     /// When a login was last refused: a wrong key is retried once a minute,
     /// not on every poll.
@@ -85,27 +85,23 @@ impl LlmTelemetryClient {
         if self.using_adapter {
             return providers::with_poll_deadline(|| self.provider_adapter.poll());
         }
+        self.login_allowed = detected_provider == Some("oMLX")
+            || self.configured_endpoint
+            || self.provider_adapter.provider() == Some("oMLX");
+        if !self.login_allowed {
+            return self.no_runtime();
+        }
         let now = Instant::now();
         if now < self.next_poll {
             return self.cached.clone();
         }
-        self.login_allowed = detected_provider == Some("oMLX")
-            || self.configured_endpoint
-            || self.provider_adapter.provider() == Some("oMLX");
-        self.runtime.provider = self
-            .provider_adapter
-            .provider()
-            .map(str::to_owned)
-            .or_else(|| self.configured_endpoint.then(|| "oMLX".into()))
-            .or_else(|| self.runtime.provider.clone());
+        self.runtime.provider = Some("oMLX".into());
         self.runtime.selection = if self.provider_adapter.explicitly_selected() {
             "MLXTOP_PROVIDER; oMLX endpoint config"
         } else if self.configured_endpoint {
             "oMLX endpoint config"
-        } else if detected_provider.is_some() {
-            "process detection; oMLX endpoint config"
         } else {
-            "automatic oMLX discovery"
+            "process detection; oMLX endpoint config"
         };
         let authority = if self.host.contains(':') && !self.host.starts_with('[') {
             format!("[{}]", self.host)
@@ -126,9 +122,6 @@ impl LlmTelemetryClient {
             providers::with_poll_deadline(|| self.poll_once())
         };
         self.runtime.finish(telemetry.is_some());
-        if telemetry.is_some() {
-            self.runtime.provider = Some("oMLX".into());
-        }
 
         if let Some(mut telemetry) = telemetry {
             telemetry.remote = !is_loopback_host(&self.host);
@@ -156,6 +149,24 @@ impl LlmTelemetryClient {
             self.next_poll = Instant::now() + self.retry_backoff;
             self.retry_backoff = providers::next_backoff(self.retry_backoff, timed_out);
         }
+        self.cached.clone()
+    }
+
+    /// No oMLX process was found, and oMLX was neither chosen nor configured:
+    /// its port is asked nothing. Another runtime may listen there, unseen in
+    /// a container or behind a tunnel, and SGLang answers `/health` by
+    /// generating a token. An oMLX found later is asked at once.
+    fn no_runtime(&mut self) -> Option<LlmTelemetry> {
+        self.runtime = RuntimeReport {
+            selection: "process detection",
+            credentials_present: omlx_api_key(self.home.as_deref(), self.api_key.as_deref())
+                .is_some(),
+            attempted_at: Some(SystemTime::now()),
+            succeeded_at: self.runtime.succeeded_at,
+            ..RuntimeReport::default()
+        };
+        self.next_poll = Instant::now();
+        self.retry_backoff = Duration::from_secs(1);
         self.cached.clone()
     }
 
