@@ -277,6 +277,8 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
     lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
     // What holds each card back, in words: never a finding of its own.
     lines.extend(crate::gpu_findings::evidence(sample));
+    // GPU memory near its wired limit, unless the next step says it.
+    lines.extend(diagnosis::wired_limit_note(sample, &finding.next));
     lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));
     lines

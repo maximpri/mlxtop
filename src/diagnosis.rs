@@ -27,7 +27,6 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
             )
         })
         .unwrap_or_default();
-    let limit = crate::memory_composition::gpu_limit(sample);
     let blamed = |cause| sample.correlation.unusual.contains(&cause);
     // A stall blames the disk only when it ran differently while fast.
     let disk =
@@ -42,14 +41,11 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
         CorrelationCause::MemoryPressure => format!(
             "Memory is under pressure{headroom}: close other apps or models, or shorten the context."
         ),
-        CorrelationCause::ModelMemory | CorrelationCause::MetalMemory => match limit {
-            Some(limit) if sample.wired.saturating_mul(10) >= limit.saturating_mul(9) => format!(
-                "Wired memory is {} of the {} GPU limit: raise it (sudo sysctl iogpu.wired_limit_mb=…) or shorten the context.",
-                bytes(sample.wired),
-                bytes(limit)
-            ),
-            _ => "The model's memory is near its ceiling: shorten the context or lower concurrency.".into(),
-        },
+        CorrelationCause::ModelMemory | CorrelationCause::MetalMemory => wired_limit_step(sample)
+            .unwrap_or_else(|| {
+                "The model's memory is near its ceiling: shorten the context or lower concurrency."
+                    .into()
+            }),
         // A card holding its clocks down for heat: its cooling, not the Mac's.
         CorrelationCause::Thermal if crate::gpu::heat_limited(&sample.gpus) => {
             crate::gpu_findings::heat_step(sample)
@@ -107,6 +103,40 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
             "Nothing on the machine explains it: the text, the draft model or the runtime itself; check the runtime's log at this time.".into()
         }
     }
+}
+
+/// The wired-limit advice for Diagnostics, unless the assessment's next
+/// step, `next`, already gives it.
+pub(crate) fn wired_limit_note(sample: &Sample, next: &str) -> Option<String> {
+    wired_limit_step(sample).filter(|step| step != next)
+}
+
+/// The wired-limit advice, once GPU memory reaches 90% of the kernel's GPU
+/// wired limit (`iogpu.wired_limit_mb`, or the runtime's report of it) or
+/// of Metal's recommended working set: where mlx-lm warns that generation
+/// "can be slow". Metal's own count of GPU memory is held against the
+/// nearer limit, else wired RAM, which bounds it.
+pub(crate) fn wired_limit_step(sample: &Sample) -> Option<String> {
+    let used = sample.gpu_in_use.unwrap_or(sample.wired);
+    let (limit, working_set) = [
+        (sample.metal.resource_limit, false),
+        (sample.mlx.recommended_working_set, true),
+    ]
+    .into_iter()
+    .filter_map(|(limit, working_set)| Some((limit.filter(|limit| *limit > 0)?, working_set)))
+    .filter(|(limit, _)| used.saturating_mul(10) >= limit.saturating_mul(9))
+    .min_by_key(|(limit, _)| *limit)?;
+    let reading = if sample.gpu_in_use.is_some() {
+        "GPU memory"
+    } else {
+        "Wired memory"
+    };
+    let (used, limit) = (bytes(used), bytes(limit));
+    Some(if working_set {
+        format!("{reading} is {used} of Metal's {limit} recommended working set, where MLX warns that generation can be slow: raise iogpu.wired_limit_mb (sudo sysctl iogpu.wired_limit_mb=…) or shorten the context.")
+    } else {
+        format!("{reading} is {used} of the {limit} GPU limit, where MLX warns that generation can be slow: raise it (sudo sysctl iogpu.wired_limit_mb=…) or shorten the context.")
+    })
 }
 
 pub(super) fn assess(sample: &Sample) -> Finding {

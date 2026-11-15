@@ -523,6 +523,13 @@ Context: KV 32.5 KiB per token, int8 · 152.6 MiB state per sequence · 131.1k t
 Version: oMLX 0.7.3 · Splash 1.5.0
 ```
 
+Once GPU memory reaches 90% of the GPU wired limit (`iogpu.wired_limit_mb`)
+or of Metal's recommended working set, where MLX warns that generation can
+be slow, the assessment here adds the advice in words: raise the limit
+(`sudo sysctl iogpu.wired_limit_mb=…`) or shorten the context. It changes no
+verdict and no colour; a slowdown blamed on model or Metal memory gives the
+same advice as its next step.
+
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
 the panel. Tab/Shift-Tab and 1/2/3 close it and switch views. `p` pauses sampling,
 `a` acknowledges a critical alarm, and `q` or Ctrl-C quits. Opening the panel does
