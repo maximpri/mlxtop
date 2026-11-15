@@ -280,9 +280,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   over after 30 idle seconds.
 - A slowdown's reason is whatever else is unusual at the same time, judged
   by the same rule against its own usual value: thermal limiting, memory
-  pressure, paging, the runtime's disk work, a prompt prefilling beside the
-  answer, compression, the queue, model and Metal memory, the runtime's CPU,
-  and a GPU left idle. The host's limits
+  pressure, paging, requests recomputed because the KV cache was full (a rise
+  in the runtime's count of preempted requests), the runtime's disk work, a
+  prompt prefilling beside the answer, compression, the queue, model and
+  Metal memory, the runtime's CPU, and a GPU left idle. The host's limits
   come first when several are unusual; an idle GPU comes last, because it is
   what a slowdown looks like and a reason only by itself. Each
   is said beside its usual value (`paging 96.0 MiB/s (usual 2.0 MiB/s)`,

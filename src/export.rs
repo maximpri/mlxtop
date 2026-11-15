@@ -1218,6 +1218,7 @@ pub(crate) fn cause_name(cause: CorrelationCause) -> &'static str {
         CorrelationCause::Cpu => "cpu",
         CorrelationCause::GpuIdle => "gpu_idle",
         CorrelationCause::DraftAcceptance => "draft_acceptance",
+        CorrelationCause::KvPreemption => "kv_preemption",
     }
 }
 

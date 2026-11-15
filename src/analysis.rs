@@ -90,6 +90,10 @@ pub(crate) struct CorrelationObservation {
     /// Tokens held by the requests writing an answer (prompt and output so
     /// far, together), when the runtime lists its requests.
     pub(crate) context: Option<u64>,
+    /// Requests the runtime recomputed for want of KV cache since the
+    /// previous sample: the rise of its count, unknown when either reading
+    /// is missing or the count went back (the runtime restarted).
+    pub(crate) preempted: Option<f64>,
     /// Who is writing: the generating requests' ids, or, where the runtime
     /// lists none, how many are active. Empty when nothing is.
     pub(crate) writers: Vec<String>,
@@ -141,6 +145,8 @@ pub(crate) enum Signal {
     Thermal,
     Pressure,
     Paging,
+    /// Requests recomputed because the KV cache was full.
+    KvPreemption,
     Disk,
     Prefill,
     Compression,
@@ -155,10 +161,13 @@ pub(crate) enum Signal {
 /// Every signal, the host's limits before the workload: when several are
 /// unusual at once, the first is named as the reason. An idle GPU comes
 /// last: it is what a slowdown looks like, and a reason only by itself.
-pub(crate) const SIGNALS: [Signal; 12] = [
+/// A full KV cache comes before the disk work and the prefill it causes: a
+/// recomputed request reads its prompt again, from the SSD cache or anew.
+pub(crate) const SIGNALS: [Signal; 13] = [
     Signal::Thermal,
     Signal::Pressure,
     Signal::Paging,
+    Signal::KvPreemption,
     Signal::Disk,
     Signal::Prefill,
     Signal::Compression,
@@ -187,6 +196,12 @@ fn usual_rate(usual: f64) -> String {
     }
 }
 
+/// Requests recomputed, in words: `1 request`, `3 requests`.
+fn recomputed(count: Option<f64>) -> String {
+    let count = count.unwrap_or_default().max(0.0) as u64;
+    format!("{count} request{}", if count == 1 { "" } else { "s" })
+}
+
 impl Signal {
     /// A reading of the host or the runtime, which is watched all the time.
     /// The rest is the workload (requests and their prompts): that changes
@@ -200,6 +215,7 @@ impl Signal {
             Self::Thermal => CorrelationCause::Thermal,
             Self::Pressure => CorrelationCause::MemoryPressure,
             Self::Paging => CorrelationCause::Paging,
+            Self::KvPreemption => CorrelationCause::KvPreemption,
             Self::Disk => CorrelationCause::DiskIo,
             Self::Prefill => CorrelationCause::ConcurrentPrefill,
             Self::Compression => CorrelationCause::Compression,
@@ -224,6 +240,7 @@ impl Signal {
                 .map(f64::from),
             Self::Pressure => Some(f64::from(o.pressure)),
             Self::Paging => Some(o.paging_rate as f64),
+            Self::KvPreemption => o.preempted,
             // Cache blocks moved count as disk work whatever the byte rate.
             Self::Disk => {
                 let traffic = o.disk.read.unwrap_or(0).max(o.disk.write.unwrap_or(0));
@@ -255,7 +272,8 @@ impl Signal {
 
     fn limits(self, thresholds: Thresholds) -> Limits {
         let (from, share, least) = match self {
-            Self::Thermal | Self::Prefill | Self::Queue => (1.0, 0.0, 1.0),
+            // One request recomputed is already a full cache.
+            Self::Thermal | Self::Prefill | Self::Queue | Self::KvPreemption => (1.0, 0.0, 1.0),
             Self::Pressure => (2.0, 0.0, 1.0),
             Self::Paging => (thresholds.swap_warn_rate as f64, 0.5, 0.0),
             Self::Disk => (DISK_ACTIVE_RATE as f64, 0.5, 0.0),
@@ -280,6 +298,10 @@ impl Signal {
                 if o.pressure >= 4 { "critical" } else { "watch" }
             ),
             Self::Paging => format!("paging {} ({})", rate(o.paging_rate), usual_rate(usual)),
+            Self::KvPreemption => format!(
+                "KV cache full · {} recomputed (usual {usual:.0})",
+                recomputed(o.preempted)
+            ),
             Self::Disk => format!(
                 "{} ({})",
                 o.disk_label().unwrap_or_else(|| "disk work".into()),
@@ -737,6 +759,9 @@ pub(crate) struct CorrelationEngine {
     prefill: Option<Box<CorrelationEngine>>,
     /// The reason last journaled, and when it was last seen.
     told: Option<(CorrelationCause, Option<SystemTime>)>,
+    /// The runtime's count of requests recomputed for want of KV cache,
+    /// as last read.
+    preemptions: Option<u64>,
 }
 
 /// A slowdown from its first slow sample. The speed it fell from is fixed
@@ -772,12 +797,22 @@ impl CorrelationEngine {
             self.reset();
             return CorrelationInsight::default();
         }
-        let current = CorrelationObservation::from_sample(sample);
+        let mut current = CorrelationObservation::from_sample(sample);
         // Usual values belong to one model on one runtime.
         let model = (current.provider.clone(), current.model.clone());
         if self.model.as_ref() != Some(&model) {
             self.reset();
             self.model = Some(model);
+        }
+        // A count that went back is a runtime that restarted: no rise.
+        let total = sample.llm_preemptions_total;
+        current.preempted = self
+            .preemptions
+            .zip(total)
+            .and_then(|(before, now)| now.checked_sub(before))
+            .map(|rise| rise as f64);
+        if total.is_some() {
+            self.preemptions = total;
         }
         // With no answer being written, a prompt being read is the work to
         // judge. Beside an answer it is a reason, not a subject.
@@ -1236,6 +1271,16 @@ impl CorrelationEngine {
         if current.pressure >= 2 {
             weigh(Signal::Pressure, "memory pressure".into());
         }
+        // A request recomputed for KV room waits for its prompt again.
+        if current.preempted.is_some_and(|count| count >= 1.0) {
+            weigh(
+                Signal::KvPreemption,
+                format!(
+                    "KV cache full, {} recomputed",
+                    recomputed(current.preempted)
+                ),
+            );
+        }
         if running(current) > 1 {
             with.push(format!("{} requests running", running(current)));
         }
@@ -1425,6 +1470,8 @@ impl CorrelationObservation {
                     .map(|r| r.prompt.saturating_add(r.output.unwrap_or(0)))
                     .sum()
             }),
+            // A rise needs the reading before: the engine fills it in.
+            preempted: None,
             writers: if sample.llm_requests.is_empty() {
                 sample
                     .llm_active_requests

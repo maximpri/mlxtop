@@ -362,6 +362,8 @@ pub(crate) enum CorrelationCause {
     GpuIdle,
     /// Speculative decoding accepting unusually few draft tokens.
     DraftAcceptance,
+    /// The runtime recomputed requests because its KV cache was full.
+    KvPreemption,
 }
 
 impl CorrelationCause {
@@ -381,6 +383,7 @@ impl CorrelationCause {
             Self::Cpu => "runtime CPU",
             Self::GpuIdle => "GPU underused",
             Self::DraftAcceptance => "draft acceptance",
+            Self::KvPreemption => "KV cache full",
         }
     }
 
@@ -395,7 +398,8 @@ impl CorrelationCause {
             | Self::DiskIo
             | Self::Cpu
             | Self::GpuIdle
-            | Self::DraftAcceptance => Tone::Yellow,
+            | Self::DraftAcceptance
+            | Self::KvPreemption => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }

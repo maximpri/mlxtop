@@ -99,6 +99,8 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
         {
             "The runtime paused with the GPU idle and nothing on this machine out of the ordinary: the cause is inside it; check its log at this time.".into()
         }
+        CorrelationCause::KvPreemption => KV_FULL.into(),
+        CorrelationCause::Stall if blamed(CorrelationCause::KvPreemption) => KV_FULL.into(),
         CorrelationCause::Stall | CorrelationCause::DiskIo if disk && lead.contains("SSD cache full") => {
             "The SSD prompt cache is evicting to make room as it reads: a faster disk, or a larger cache, keeps prefixes ready.".into()
         }
@@ -134,10 +136,27 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
         CorrelationCause::DraftAcceptance => {
             "The draft model is guessing worse on this text: the machine is not the limit; a better-matched draft, or none, may be faster.".into()
         }
+        // Judged per verify pass, how well the draft guesses is already
+        // allowed for: the passes themselves ran slower.
+        CorrelationCause::None if judged_per_pass(sample) => {
+            "Nothing on the machine explains it, and it is slower per verify pass, so not the text: the runtime or its draft model; check the runtime's log at this time.".into()
+        }
         CorrelationCause::None => {
             "Nothing on the machine explains it: the text, the draft model or the runtime itself; check the runtime's log at this time.".into()
         }
     }
+}
+
+/// What a full KV cache costs, and what to change.
+const KV_FULL: &str = "The KV cache was full, so requests were recomputed: give the runtime more KV memory, or run fewer requests at once.";
+
+/// Whether generation speed was judged per verify pass: the runtime counts
+/// the tokens each pass emits, so the draft's guessing is allowed for.
+fn judged_per_pass(sample: &Sample) -> bool {
+    sample.correlation.phase == crate::domain::Phase::Generation
+        && sample
+            .llm_tokens_per_pass
+            .is_some_and(|tokens| tokens.is_finite() && tokens >= 1.0)
 }
 
 /// The wired-limit advice for Diagnostics, unless the assessment's next

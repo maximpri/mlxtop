@@ -722,6 +722,8 @@ mod config;
 mod dashboards;
 #[path = "main_detection.rs"]
 mod detection;
+#[path = "main_detection_kv.rs"]
+mod detection_kv;
 #[path = "main_detection_per_pass.rs"]
 mod detection_per_pass;
 #[path = "main_journal.rs"]
@@ -738,5 +740,7 @@ mod qa_context_left;
 mod qa_efficiency;
 #[path = "main_qa_native_runtimes.rs"]
 mod qa_native_runtimes;
+#[path = "main_qa_slowdown_reasons.rs"]
+mod qa_slowdown_reasons;
 #[path = "main_runtimes.rs"]
 mod runtimes;

@@ -214,11 +214,21 @@ similar prompts, and a slow one reads `PREFILL ↓61% (180.0→70.0 tok/s)`. A
 sample in which a request started or ended is not judged: its tokens are
 divided over an interval it worked for only part of. The reason given is
 whatever else is unusual at the same time: thermal limiting, memory pressure,
-paging, the runtime's disk work, a prompt prefilling beside the answer,
-compression, the queue, model or Metal memory, the runtime's CPU, or a GPU
-left idle. Request count and prompt size are never the reason: the usual
-speed already allows for them. A signal at its usual level is never the
-reason, however high that level is.
+paging, requests the runtime recomputed because its KV cache was full, the
+runtime's disk work, a prompt prefilling beside the answer, compression, the
+queue, model or Metal memory, the runtime's CPU, or a GPU left idle. Request
+count and prompt size are never the reason: the usual speed already allows
+for them. A signal at its usual level is never the reason, however high that
+level is.
+
+A full KV cache is read from the runtime's own count of the requests it
+preempted to make room (vLLM and TensorFold preempt, SGLang retracts, Splash
+suspends) and recomputes later: a rise in that count during a slowdown is its
+reason, `KV cache full · 2 requests recomputed (usual 0)`, with the next step
+"The KV cache was full, so requests were recomputed: give the runtime more KV
+memory, or run fewer requests at once." It comes after the host's memory
+limits and before the disk work and prompt reading that a recomputed request
+causes. A count that goes back (the runtime restarted) is no rise.
 
 The generation chart's bottom edge says what speed it judges against, for
 the work being done, for example `usual 30.0 for 2 requests · 131.2k
@@ -263,7 +273,10 @@ RECOVERED  generation back to 50.0 tok/s after 42s · low 25.0 tok/s
 
 When nothing else is unusual the row says `nothing else unusual`, and if the
 lower speed holds for 30 seconds it becomes the usual speed for that work
-(`SETTLED`). This
+(`SETTLED`). Its next step names what is left: the text, the draft model or
+the runtime itself; judged per verify pass, how well the draft guesses is
+already allowed for, so the text is ruled out and the runtime or its draft
+model remain. This
 is what happens together, not proof of cause. mlxtop needs eight samples of
 generation before it has a usual speed to compare with.
 
