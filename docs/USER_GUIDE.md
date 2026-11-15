@@ -21,13 +21,22 @@ intervals it reads `NO SAMPLE 12s` in red instead of the spinner, and
 stopped`; the log has the reason).
 
 Overview starts with the **runtime card**: the provider, engine and model, a
-status badge, and the machine along its bottom edge (device, GPU cores, a GPU
-memory meter graded at 90% and 97%, the runtime's memory and CPU). The badge
-spins while work is under way and reads, for example, `PREFILLING 52%` while
-one prompt is prefilled. The source shows its age only once a reading is 3 s
-old, and thermal state appears only when it is not normal. The card's top
-border repeats the runtime's prompt counters only when they differ from the
-request shown in prompt load.
+status badge, and the machine along its bottom edge (device, GPU cores, the
+chip's peak memory bandwidth, a GPU memory meter graded at 90% and 97%, the
+runtime's memory and CPU). The badge spins while work is under way and reads,
+for example, `PREFILLING 52%` while one prompt is prefilled. The source shows
+its age only once a reading is 3 s old, and thermal state appears only when it
+is not normal. The card's top border repeats the runtime's prompt counters
+only when they differ from the request shown in prompt load.
+
+The bandwidth, for example `410 GB/s`, is the peak the chip's maker
+publishes, and it bounds generation, which reads every weight for each token.
+mlxtop looks it up from what it already reads: on a Mac the chip, its GPU core
+count and its RAM, because bins of one chip differ (a 32-core M4 Max has
+410 GB/s, a 40-core one 546, and an M6 153 GB/s with 16 GB but 170 with 24 or
+32 GB); elsewhere the one card's name and memory. A chip it does not know, or
+whose bin those readings cannot tell, shows no figure. It is the first field
+to go when the edge runs short; `--once` prints it on the `METAL` line.
 
 Below it, a one-line **assessment** leads with an icon: ✓ for
 `Healthy · no bottleneck`, ▲ for a condition to inspect, ✖ for a critical one.
@@ -372,6 +381,14 @@ their UUIDs without pagination. These are physical-device readings, not
 per-process measurements or a breakdown of MIG instances. Renderer/tiler splits
 and core counts are Apple-only and stay unavailable. Thermals come from
 `/sys/class/thermal` (plus the NVIDIA or AMD card temperature when available).
+
+With one card, the runtime card's bottom edge gives its peak memory bandwidth
+when the card's name settles it. A name several cards share needs the card's
+memory to tell them apart: amdgpu's `Radeon RX 9070/9070 XT/9070 GRE` is
+640 GB/s with 16 GB and 432 GB/s with 12 GB, and an RTX 3080 has a figure
+only as the 10 GB card. An RTX 4070 (sold with two kinds of memory), a bare
+`A100` and Strix Halo, whose pci.ids name also covers a 128-bit part, show
+none; neither do several cards.
 
 ## Controls
 

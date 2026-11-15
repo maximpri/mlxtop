@@ -755,5 +755,7 @@ mod journal;
 mod other;
 #[path = "main_qa.rs"]
 mod qa;
+#[path = "main_qa_chip_facts.rs"]
+mod qa_chip_facts;
 #[path = "main_runtimes.rs"]
 mod runtimes;

@@ -50,8 +50,10 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Use one border per chart. Place a dense full-width runtime card above the
   histories; do not wrap charts in another throughput box.
   The runtime card owns the provider, engine, model and status badge, and on
-  its bottom edge the hardware identity, cores, GPU memory meter and the
-  runtime's memory and CPU; thermal state appears only when it is not normal.
+  its bottom edge the hardware identity, cores, the chip's published peak
+  memory bandwidth (a muted fact, the first field to drop), GPU memory meter
+  and the runtime's memory and CPU; thermal state appears only when it is not
+  normal.
   Put a fixed borderless assessment below it: an icon and the finding, with
   evidence only when something is wrong, then a second line only for the next
   check (→) or a missing reading worth knowing about. Lead with the verdict:

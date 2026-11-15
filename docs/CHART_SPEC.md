@@ -38,7 +38,7 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 
 | Panel | Contents |
 | --- | --- |
-| runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, GPU memory meter (orange from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
+| runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, the chip's peak memory bandwidth (muted, first to drop), GPU memory meter (orange from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
 | generation / prefill | Separate tok/s bar histories with independent axes; no outer throughput box |
 | prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling; generated tokens under the sizes when the panel keeps four bar rows |
 | memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), orange from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache); a trace of what was left, in each sample's pressure colour |

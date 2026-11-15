@@ -9,6 +9,7 @@ mod chart_navigation;
 mod chart_panels;
 mod chart_render;
 mod chart_scale;
+mod chip_facts;
 mod cli;
 mod collector;
 mod completion_log;
