@@ -411,6 +411,8 @@ its minute and its pairs, and first tokens waited 2.4 to 4.6 times as long
 beside another request. Requests that wrote almost wholly beside another ran
 at under half their speed alone, so two at once did 0.92 to 0.97 times the
 work of one. Sixteen requests waited for a model load, from 2.5 s to 82 s.
+`mlxtop replay FILE` counts each finding on a recording, as it counts
+slowdowns (see [Command-line options](#command-line-options)).
 
 ## Decode efficiency
 
@@ -1179,7 +1181,8 @@ milliseconds since the epoch), so a recording that runs past midnight stays
 in order. `mlxtop replay FILE` runs them through today's rules and Journal
 and prints how many generation and prefill samples there were, how long
 generation ran, how many samples fell inside a slowdown or stall, a tally of
-the reasons given, and each finding with its time:
+the reasons given, a tally of what requests lost before their first tokens,
+and each finding with its time:
 
 ```text
 GENERATION  7000 samples over 2h 0m · 21 in a slowdown or stall (0.3%)
@@ -1188,12 +1191,24 @@ REASON                      SLOW  EPISODES  PER HOUR
 paging                        12         3      1.50
 nothing else unusual           6         1      0.50
 generation stalled             3         1      0.50
+BEFORE FIRST TOKEN          ROWS  PER HOUR      LOST
+cache miss                     5      2.50    9m 24s
+KV cache full                  4      2.00         —
+model load                     2      1.00       13s
 ```
 
 For each reason, `SLOW` counts the samples inside a slowdown or stall it was
 given for, `EPISODES` the slowdowns and stalls the Journal began with it, and
 `PER HOUR` those episodes per hour of generation; the reason told most often
-comes first. That count is how a change to the rules is checked: record a
+comes first. Each [finding before the first
+token](#time-lost-before-the-first-token) is counted the same way: `ROWS`
+counts the rows the Journal wrote of it (`CACHE MISS`, `MODEL LOAD`,
+`KV CACHE FULL`, and `OVERLAP` at most once), `PER HOUR` those rows per hour
+of generation, and `LOST` the time first tokens lost to it as the [session
+summary](#session-summary) counts it; a full KV cache's cost is not counted
+(`—`). Their rows are listed with the slowdowns, in time order; a tally
+with nothing to count is left out. That count is how a change to the rules
+is checked: record a
 session in which the model slowed, replay it before and after the change, and
 compare. A replay starts with nothing learned, as a session without kept
 speeds does; `--baselines KEPT` judges it against the

@@ -75,6 +75,20 @@ const PAIRS_KEPT: usize = 512;
 const WAITS_KEPT: usize = 4_096;
 const SPEEDS_KEPT: usize = 300;
 
+/// The Journal states the findings are told under.
+pub(crate) const CACHE_MISS: &str = "CACHE MISS";
+pub(crate) const MODEL_LOAD: &str = "MODEL LOAD";
+pub(crate) const KV_CACHE_FULL: &str = "KV CACHE FULL";
+pub(crate) const OVERLAP: &str = "OVERLAP";
+
+/// Each finding's Journal state, and the name a tally gives it.
+pub(crate) const STATES: [(&str, &str); 4] = [
+    (CACHE_MISS, "cache miss"),
+    (MODEL_LOAD, "model load"),
+    (KV_CACHE_FULL, "KV cache full"),
+    (OVERLAP, "overlap"),
+];
+
 /// A request's identity: provider, model and id.
 type Key = (String, String, String);
 
@@ -639,7 +653,7 @@ impl Findings {
             if let Some(seconds) = seconds {
                 summary.push_str(&format!(" · ≈{} of prompt reading", seconds_label(seconds)));
             }
-            rows.push(("CACHE MISS", summary));
+            rows.push((CACHE_MISS, summary));
             self.evidence.full_reads += 1;
             self.evidence.full_read_seconds += seconds.unwrap_or(0.0);
             self.evidence.last_full_read = Some(read);
@@ -668,7 +682,7 @@ impl Findings {
             seen.load_told = true;
             let seconds = ms as f64 / 1000.0;
             rows.push((
-                "MODEL LOAD",
+                MODEL_LOAD,
                 format!(
                     "{} · first token waited {} for the model to load",
                     timing.id,
@@ -714,7 +728,7 @@ impl Findings {
         }
         self.preemption_row = now;
         Some((
-            "KV CACHE FULL",
+            KV_CACHE_FULL,
             format!(
                 "{} {} recomputed",
                 requests(rise),
@@ -779,7 +793,7 @@ impl Findings {
                 limit.provider, limit.configured
             ));
         }
-        Some(("OVERLAP", summary))
+        Some((OVERLAP, summary))
     }
 
     /// Seconds first tokens lost: to prompts read in full after cached
@@ -795,6 +809,19 @@ impl Findings {
             ("model loads", self.evidence.load_seconds),
             ("overlap", overlap),
         ]
+    }
+
+    /// Seconds first tokens lost to the finding told as `state`, as
+    /// `lost` counts them; none for a full KV cache, whose cost is not
+    /// counted.
+    pub(crate) fn lost_to(&self, state: &str) -> Option<f64> {
+        let [cache_misses, model_loads, overlap] = self.lost().map(|(_, seconds)| seconds);
+        match state {
+            CACHE_MISS => Some(cache_misses),
+            MODEL_LOAD => Some(model_loads),
+            OVERLAP => Some(overlap),
+            _ => None,
+        }
     }
 }
 
