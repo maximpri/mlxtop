@@ -180,6 +180,7 @@ fn command_line_options_override_config_and_validate_ranges() {
         interval,
         history,
         once,
+        json: false,
         record: None,
     };
     assert_eq!(parse_args(&[], &config).unwrap(), run(5, 600, false));
@@ -190,6 +191,7 @@ fn command_line_options_override_config_and_validate_ranges() {
             interval: 5,
             history: 600,
             once: false,
+            json: false,
             record: Some("/tmp/s.jsonl".into()),
         }
     );
@@ -262,6 +264,106 @@ fn command_line_options_override_config_and_validate_ranges() {
     }
     assert!(parse_args(&args(&["fast"]), &Config::default()).is_err());
     assert!(help_text(Platform::MacOs).contains("~/Library/Logs/mlxtop/mlxtop.log"));
+}
+
+#[test]
+fn json_and_the_stream_sample_at_the_dashboards_interval_and_check_the_schema() {
+    let config = Config {
+        interval: Some(5),
+        history: Some(600),
+        ..Config::default()
+    };
+    // --json is the static report as JSON: it implies --once.
+    for input in [
+        &["--json"][..],
+        &["--once", "--json"],
+        &["-1", "--json", "--schema", "1"],
+    ] {
+        assert_eq!(
+            parse_args(&args(input), &config).unwrap(),
+            CliAction::Run {
+                interval: 5,
+                history: 600,
+                once: true,
+                json: true,
+                record: None,
+            },
+            "{input:?}"
+        );
+    }
+    // The stream samples at the dashboard's interval: the config's, unless
+    // one is given.
+    let stream = |interval, record: Option<&str>| CliAction::Stream {
+        interval,
+        history: 600,
+        record: record.map(Into::into),
+    };
+    assert_eq!(
+        parse_args(&args(&["stream"]), &config).unwrap(),
+        stream(5, None)
+    );
+    assert_eq!(
+        parse_args(
+            &args(&["stream", "-i", "2", "--schema", "1", "--json"]),
+            &config
+        )
+        .unwrap(),
+        stream(2, None)
+    );
+    assert_eq!(
+        parse_args(&args(&["stream", "--record", "s.jsonl"]), &config).unwrap(),
+        stream(5, Some("s.jsonl"))
+    );
+    assert!(matches!(
+        parse_args(&args(&["stream", "--help"]), &config).unwrap(),
+        CliAction::Print(_)
+    ));
+    for (input, error) in [
+        (
+            &["stream", "--once"][..],
+            "stream cannot be combined with --once",
+        ),
+        (
+            &["stream", "-i", "0"][..],
+            "interval must be between 1 and 60 seconds",
+        ),
+        (
+            &["stream", "--schema", "2"][..],
+            "unsupported JSON schema 2: this mlxtop writes schema 1",
+        ),
+        (
+            &["--json", "--schema", "7"][..],
+            "unsupported JSON schema 7: this mlxtop writes schema 1",
+        ),
+        (
+            &["--schema", "1"][..],
+            "--schema goes with --json or stream",
+        ),
+        (
+            &["--once", "--schema", "x"][..],
+            "schema must be a whole number (got \"x\")",
+        ),
+        (&["stream", "--schema"][..], "missing schema"),
+        (
+            &["doctor", "--json"][..],
+            "doctor cannot be combined with --json",
+        ),
+        (&["--once", "stream"][..], "unknown option: stream"),
+    ] {
+        assert_eq!(
+            parse_args(&args(input), &config).unwrap_err().to_string(),
+            error,
+            "{input:?}"
+        );
+    }
+    let help = help_text(Platform::MacOs);
+    for words in [
+        "mlxtop stream [--interval N] [--schema 1]",
+        "--json            static report as one line of JSON (schema 1, experimental)",
+        "--schema N",
+    ] {
+        assert!(help.contains(words), "help lacks {words}");
+    }
 }
 
 // --- static report ----------------------------------------------------------
@@ -493,7 +595,7 @@ fn once_mode_samples_twice_and_reports_measured_rates() {
         None,
     );
     let mut out = Vec::new();
-    run_once(&mut collector, Duration::ZERO, &mut out).unwrap();
+    run_once(&mut collector, Duration::ZERO, false, &mut out).unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(text.starts_with("mlxtop · static report (0s sample)"));
     assert!(text.contains("PRESSURE     "));

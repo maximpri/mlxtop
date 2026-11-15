@@ -56,7 +56,15 @@ pub(crate) enum CliAction {
         interval: u64,
         history: usize,
         once: bool,
+        /// The static report as one line of JSON, the snapshot `stream` writes.
+        json: bool,
         /// Append every sample to this file as a JSON line.
+        record: Option<std::path::PathBuf>,
+    },
+    /// Write a JSON snapshot of every sample to stdout, one line each.
+    Stream {
+        interval: u64,
+        history: usize,
         record: Option<std::path::PathBuf>,
     },
     /// Read a recording back through today's rules and report what fires.
@@ -71,13 +79,16 @@ pub(crate) enum CliAction {
 
 pub(crate) fn help_text(platform: Platform) -> String {
     format!(
-        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
+        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop stream [--interval N] [--schema 1]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
+         stream writes the --json snapshot of every sample, a line each, until stopped\n\
          update installs the latest release in place; --rc includes release candidates\n\
          replay reads a recording back through the detection rules and counts what fires\n\
          Options:\n\
          \x20 -i, --interval N  refresh interval in seconds, 1–60 (default 1)\n\
          \x20 -n, --history N   chart and journal history, 20–3600 samples\n\
          \x20 -1, --once        static report\n\
+         \x20 --json            static report as one line of JSON (schema {}, experimental)\n\
+         \x20 --schema N        with --json or stream: stop unless the schema written is N\n\
          \x20 --record FILE     append every sample to FILE (one JSON line, about 3 KB, each)\n\
          \x20 -V, --version     show version\n\
          \x20 -h, --help        show help\n\
@@ -86,6 +97,7 @@ pub(crate) fn help_text(platform: Platform) -> String {
          Config file: {}\n\
          Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
          Interactive keys: q quit · 1 overview · 2 processes · 3 journal · 4 settings · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · p pause · r reset · a acknowledge alarm · d diagnostics · u session summary · ? help",
+        crate::export::SCHEMA_VERSION,
         if platform == Platform::Windows {
             r"%USERPROFILE%\.config\mlxtop\config.json"
         } else {
@@ -156,11 +168,25 @@ pub(crate) fn parse_args(
     }
     let mut once = false;
     let mut doctor = false;
+    let mut stream = false;
+    let mut json = false;
+    let mut schema = None;
     let mut record = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "doctor" if i == 0 => doctor = true,
+            "stream" if i == 0 => stream = true,
+            "--json" => json = true,
+            "--schema" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing schema")?;
+                schema = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("schema must be a whole number (got \"{value}\")"))?,
+                );
+            }
             "-i" | "--interval" => {
                 i += 1;
                 let value = args.get(i).ok_or("missing interval")?;
@@ -197,32 +223,66 @@ pub(crate) fn parse_args(
     if !(HISTORY_MIN..=HISTORY_MAX).contains(&history) {
         return Err("history must be between 20 and 3600".into());
     }
+    // A reader that wants another schema is told which one it would get.
+    if let Some(wanted) = schema {
+        if !json && !stream {
+            return Err("--schema goes with --json or stream".into());
+        }
+        if wanted != crate::export::SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported JSON schema {wanted}: this mlxtop writes schema {}",
+                crate::export::SCHEMA_VERSION
+            )
+            .into());
+        }
+    }
     if doctor {
         if once {
             return Err("doctor cannot be combined with --once".into());
+        }
+        if json {
+            return Err("doctor cannot be combined with --json".into());
         }
         if record.is_some() {
             return Err("doctor cannot be combined with --record".into());
         }
         return Ok(CliAction::Doctor { interval, history });
     }
+    if stream {
+        // Every line is JSON already; a single report is --once --json.
+        if once {
+            return Err("stream cannot be combined with --once".into());
+        }
+        return Ok(CliAction::Stream {
+            interval,
+            history,
+            record,
+        });
+    }
     Ok(CliAction::Run {
         interval,
         history,
-        once,
+        once: once || json,
+        json,
         record,
     })
 }
 
-/// Take two samples `interval` apart, so rates are measured, and report.
+/// Take two samples `interval` apart, so rates are measured, and report:
+/// as text, or as the JSON snapshot `stream` writes when `json` is set.
 pub(crate) fn run_once(
     collector: &mut Collector,
     interval: Duration,
+    json: bool,
     out: &mut dyn Write,
 ) -> io::Result<()> {
     collector.sample();
     thread::sleep(interval);
     let sample = collector.sample();
+    if json {
+        let snapshot = crate::export::snapshot(&sample, collector.platform, interval.as_secs());
+        return crate::export::write_line(out, &snapshot);
+    }
     if let Some(reason) = &collector.config_ignored {
         writeln!(
             out,
@@ -238,6 +298,14 @@ pub(crate) fn run_once(
     )
 }
 
+/// JSON keeps standard output to JSON: a config file that was ignored is
+/// said on standard error instead of in a NOTE line.
+fn note_config_ignored(collector: &Collector) {
+    if let Some(reason) = &collector.config_ignored {
+        eprintln!("mlxtop: config.json ignored, defaults used: {reason}");
+    }
+}
+
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let config = if args.first().is_some_and(|arg| arg == "doctor") {
@@ -245,7 +313,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         load_config()
     };
-    let (interval, history, once) = match parse_args(&args, &config)? {
+    let (interval, history, once, json) = match parse_args(&args, &config)? {
         CliAction::Print(text) => {
             println!("{text}");
             return Ok(());
@@ -269,17 +337,47 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             crate::recording::run(&path, thresholds, &mut PlainText(stdout().lock()))?;
             return Ok(());
         }
-        CliAction::Run {
+        CliAction::Stream {
             interval,
             history,
-            once,
             record,
         } => {
             if let Some(path) = record {
                 crate::recording::start(&path)
                     .map_err(|error| format!("cannot record to {}: {error}", path.display()))?;
             }
-            (interval, history, once)
+            diagnostics_log(
+                "INFO",
+                "configuration",
+                format!(
+                    "interval_seconds={interval} history_limit={history} stream=true config_path={}",
+                    config_path().display()
+                ),
+            );
+            // A signal ends the stream between lines, never inside one.
+            crate::terminal::stop_on_signals();
+            let mut collector = Collector::new(history, config);
+            note_config_ignored(&collector);
+            crate::export::stream(
+                &mut collector,
+                Duration::from_secs(interval),
+                &mut PlainText(stdout().lock()),
+                &crate::terminal::stop_requested,
+            )?;
+            return Ok(());
+        }
+        CliAction::Run {
+            interval,
+            history,
+            once,
+            json,
+            record,
+        } => {
+            if let Some(path) = record {
+                crate::recording::start(&path)
+                    .map_err(|error| format!("cannot record to {}: {error}", path.display()))?;
+            }
+            (interval, history, once, json)
         }
     };
 
@@ -295,9 +393,13 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if once {
         let mut collector = Collector::new(history, config);
+        if json {
+            note_config_ignored(&collector);
+        }
         run_once(
             &mut collector,
             Duration::from_secs(interval),
+            json,
             &mut PlainText(stdout().lock()),
         )?;
         return Ok(());

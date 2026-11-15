@@ -590,14 +590,20 @@ again each time Settings opens, so edits made by hand show up.
 -i, --interval N   refresh interval in seconds, 1–60 (default: 1)
 -n, --history N    chart/journal history, 20–3600 (default: 300)
 -1, --once         print a static report and exit
+--json             print the static report as one line of JSON (implies --once)
+--schema N         with --json or stream: stop unless the JSON is schema N
 --record FILE      append every sample to FILE, one JSON line each
 -V, --version      print the installed version and exit
 -h, --help         show help
 
+mlxtop stream [--interval N]   write the JSON snapshot of every sample, one line each
 mlxtop doctor [--interval N]   diagnose the connection and readings, then exit
 mlxtop update [--rc]           install the latest release (--rc: or release candidate)
 mlxtop replay FILE             read a recording back through the detection rules
 ```
+
+`--once --json` and `mlxtop stream` are described under
+[JSON output](#json-output).
 
 A recording keeps every sample as mlxtop saw it: the machine's readings and
 the runtime's, request by request, each with the moment it was taken (`ts`,
@@ -637,6 +643,210 @@ published as GitHub prereleases. Homebrew installs are pointed to
 `brew upgrade mlxtop`, and an install in a root-owned directory, such as the
 macOS package in `/usr/local/bin`, needs `sudo mlxtop update`. Restart open
 sessions afterwards.
+
+## JSON output
+
+`mlxtop --once --json` prints the static report as one line of JSON, and
+`mlxtop stream` writes the same snapshot for every sample, one line each, for
+scripts, agents and other tools:
+
+```sh
+mlxtop --once --json | jq .verdict
+mlxtop stream | jq -c '{ts: .ts_ms, gen: .runtime.generation.tok_per_s, verdict: .verdict.state}'
+mlxtop stream -i 5 >> samples.ndjson
+```
+
+Like `--once`, `--once --json` takes two samples an interval apart, so that
+rates are measured. `mlxtop stream` takes a first sample to start the rates,
+then writes a line every `--interval` seconds, or at the configured interval,
+as the dashboard does, until it is stopped. It ends with exit status 0 and
+says nothing when whatever reads it goes away (`mlxtop stream | head -3`) and
+on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.5–3.3 KB: about 2.7 KB for
+a machine serving a model, about 3.3 KB while a slowdown and its request are
+named. Standard output carries only JSON; a config file that was ignored is
+said on standard error.
+
+The layout carries a `schema_version`, now 1, and is **experimental through
+3.4**: until then a field may still change without a new number. After that,
+fields are only added within a version, and renaming or removing one, or
+changing its unit or meaning, takes a new number, so a reader should ignore
+fields it does not know. `--schema N` stops mlxtop with an error that names
+both numbers unless it writes schema N, so a script that pins its schema
+hears about a change instead of misreading it.
+
+Every field follows the same rules:
+
+- Units are in the names: `_bytes`, `_bytes_per_s`, `_tok_per_s`, `_tokens`,
+  `_s` (seconds), `_ms` (milliseconds; times are milliseconds since the Unix
+  epoch), `_w` (watts) and `_celsius`. Shares are ratios from 0 to 1, named
+  `_ratio`; nothing is a percentage. `relative_change` is a plain number:
+  -0.5 is half as fast.
+- A reading that is unknown is `null`, never 0: a counter that could not be
+  read, a platform that has none, a runtime that does not report it.
+- Where a figure comes from is the `source` of the object that holds it,
+  which covers everything inside it: `host` (measured by mlxtop from the
+  operating system), `runtime` (reported by the runtime, through its API, its
+  log or a usage file) or `estimate` (mlxtop's own judgement from other
+  readings: the usual speed and what is slow against it). The GPU memory
+  limit, which can come from either side, names its own in `limit_source`.
+- Values that name a state are lowercase words joined by underscores.
+- There are no process names, command lines or process ids, so a stream can
+  go to another machine. Runtime and model names stay.
+
+### Fields
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | The layout's version, 1 |
+| `mlxtop_version` | The mlxtop that wrote it |
+| `ts_ms` | When the sample was taken |
+| `interval_s` | Seconds between samples: what rates are measured over |
+| `verdict.state` | The verdict by name: `healthy`, `no_bottleneck` (nothing found, but memory pressure is not reported normal), `collecting_baseline`, `counters_incomplete`, `generation_slowed`, `prefill_slowed`, `generation_stalled`, `requests_waiting`, `memory_bottleneck`, `memory_stress`, `swap_thrashing`, `heavy_paging`, `page_in_recovery`, `paging_active`, `watch_paging`, `compression_active`, `thermal_limit`, `cpu_offload`, `vram_full` or `gpu_throttled` |
+| `verdict.severity` | Its icon on screen: `ok` ✓, `warning` ▲, `critical` ✖ or `neutral` ● |
+| `verdict.title` | The headline, as the Overview shows it |
+| `verdict.evidence` | The reading behind it |
+| `verdict.context` | What else bears on it, as the static report's EVIDENCE line ends |
+| `verdict.next` | The line under the headline, or `null` when there is none |
+| `verdict.actionable` | `next` is a step to take (→), not a note |
+| `host.source` | `host`: everything under `host` was measured from the operating system |
+| `host.platform` | `macos`, `linux` or `windows` |
+| `host.arch` | CPU architecture: `arm64`, `x86_64` |
+| `host.chip` | The Apple chip, as its GPU is named (`Apple M4 Max`) |
+| `host.gpu_cores` | The Apple GPU's cores |
+| `host.ram_bytes` | All of RAM |
+| `host.memory.layout` | `unified` (the GPU's memory is RAM: Apple Silicon, DGX Spark), `dedicated` (cards with VRAM), or `null` with no GPU reading |
+| `host.memory.pressure` | The operating system's memory pressure: `normal`, `warning` (shown as "watch") or `critical` |
+| `host.memory.tight` | Pressure is raised or little memory is free, so file paging counts against the machine |
+| `host.memory.available_ratio` | The share of RAM the operating system reports available |
+| `host.memory.ram.used_bytes` | Wired, app and compressed memory: what the RAM meter fills |
+| `host.memory.ram.left_bytes` | Free memory and file cache: what a model can still grow into |
+| `host.memory.ram.wired_bytes` | Memory that cannot be paged out (on Linux, the kernel's and other memory that cannot be reclaimed) |
+| `host.memory.ram.app_bytes` | Apps' memory |
+| `host.memory.ram.compressed_bytes` | What the compressor holds (macOS) |
+| `host.memory.ram.file_cache_bytes` | File cache |
+| `host.memory.ram.free_bytes` | Free memory |
+| `host.memory.gpu` | The GPU's part of RAM on unified memory, else `null` |
+| `host.memory.gpu.used_bytes` | What the GPU holds (Metal's in-use count) |
+| `host.memory.gpu.limit_bytes` | The GPU's wired-memory limit: `iogpu.wired_limit_mb`, else Metal's recommended working set as the runtime's MLX reports it |
+| `host.memory.gpu.limit_source` | `host` for the macOS setting, `runtime` for the runtime's report |
+| `host.memory.gpu.left_bytes` | The room left under the limit; 0 once over it |
+| `host.memory.vram` | The cards' own memory, all cards together, where they have any; else `null` |
+| `host.memory.vram.used_bytes` | VRAM in use |
+| `host.memory.vram.total_bytes` | All VRAM |
+| `host.memory.vram.left_bytes` | VRAM left |
+| `host.memory.swap.total_bytes` | Swap allocated |
+| `host.memory.swap.used_bytes` | Swap in use |
+| `host.memory.swap.in_bytes_per_s` | Swapped in |
+| `host.memory.swap.out_bytes_per_s` | Swapped out |
+| `host.memory.swap.growth_bytes_per_s` | How fast swap use grows (negative while it shrinks) |
+| `host.memory.file_paging.in_bytes_per_s` | Pages read from disk outside swap (macOS): model loads, and a full Mac's paging with swap off |
+| `host.memory.file_paging.out_bytes_per_s` | Pages written to disk outside swap (macOS) |
+| `host.memory.compression.compress_bytes_per_s` | Memory compressed (macOS) |
+| `host.memory.compression.decompress_bytes_per_s` | Memory decompressed (macOS) |
+| `host.gpus` | The Apple GPU of a Mac, or each NVIDIA and AMD card |
+| `host.gpus[].index` | Its number |
+| `host.gpus[].vendor` | `apple`, `nvidia` or `amd` |
+| `host.gpus[].name` | Its name |
+| `host.gpus[].busy_ratio` | How busy it is |
+| `host.gpus[].renderer_ratio` | The Apple GPU's renderer, busy for this share |
+| `host.gpus[].tiler_ratio` | The Apple GPU's tiler, busy for this share |
+| `host.gpus[].memory_used_bytes` | A card's own memory in use |
+| `host.gpus[].memory_total_bytes` | A card's own memory |
+| `host.gpus[].temperature_celsius` | A card's temperature |
+| `host.gpus[].throttle` | Why the driver holds a card's clocks down: `thermal`, `power_brake`, `hardware_slowdown`, `power_cap` or `none` |
+| `host.thermal.level` | macOS's thermal pressure level: `nominal`, `moderate`, `heavy`, `trapping` or `sleeping` |
+| `host.thermal.limited` | macOS is holding the machine back for heat: pressure from `heavy` up, or a CPU speed limit |
+| `host.thermal.cpu_speed_limit_ratio` | The share of full CPU speed macOS allows (Intel Macs) |
+| `host.thermal.hottest_celsius` | The hottest temperature measured: thermal zones and GPUs on Linux, GPUs on Windows |
+| `host.system_power_w` | What the whole machine draws, where macOS reports it |
+| `host.runtime_process.count` | The runtime's processes |
+| `host.runtime_process.memory_bytes` | What the runtime holds: its largest process's footprint (GPU memory included) or the resident size of all its processes, whichever is more |
+| `host.runtime_process.peak_bytes` | Its largest process's lifetime peak footprint (macOS) |
+| `host.runtime_process.growth_bytes_per_s` | How fast that footprint grows |
+| `host.runtime_process.cpu_cores` | CPU its processes use, in cores |
+| `host.runtime_process.disk_read_bytes_per_s` | Its storage reads: a prompt cache on disk, or weights streamed from it (macOS) |
+| `host.runtime_process.disk_write_bytes_per_s` | Its storage writes (macOS) |
+| `runtime.source` | `runtime`: everything under `runtime` is what the runtime reported |
+| `runtime.provider` | The runtime: `oMLX`, `Ollama`, `llama.cpp` … |
+| `runtime.engine` | The engine it serves through when that is not its own (oMLX's Splash) |
+| `runtime.model` | The model it names |
+| `runtime.status` | Its state in its own word: `generating`, `prefilling`, `idle` …; `null` when no runtime was found |
+| `runtime.telemetry` | Where its readings came from: `live_api`, `completion_log` (the last finished request in its log) or `reported_usage` (a usage file) |
+| `runtime.fresh` | Its readings are live and current |
+| `runtime.observed_at_ms` | When it last answered; its age is `ts_ms` minus this |
+| `runtime.connected` | Its API answered the last poll; `null` when no runtime was found to ask |
+| `runtime.remote` | It runs on another machine: the `host` readings are not its own |
+| `runtime.details` | Its own facts in words, as the static report's PROVIDER line |
+| `runtime.model_memory_bytes` | Memory its models take |
+| `runtime.model_memory_ceiling_bytes` | The most memory it lets them take |
+| `runtime.model_size_bytes` | The loaded model's size (Ollama) |
+| `runtime.model_offloaded_bytes` | The part of the model it placed outside GPU memory (Ollama) |
+| `runtime.mlx` | The MLX allocator inside it, where it reports one; else `null` |
+| `runtime.mlx.version` | Its MLX version |
+| `runtime.mlx.active_bytes` | MLX's active memory |
+| `runtime.mlx.cache_bytes` | MLX's cache |
+| `runtime.mlx.peak_bytes` | MLX's peak |
+| `runtime.mlx.process_footprint_bytes` | The serving process's footprint, as the runtime reports it |
+| `runtime.generation.tok_per_s` | How fast the answer is written |
+| `runtime.generation.basis` | What that rate is: `live` (over the last interval), `average` (the runtime's own, while it reports no live rate) or `last_request` (the last finished request's), as the screen's GEN, AVG GEN and LAST GEN |
+| `runtime.prefill.tok_per_s` | How fast prompts are read |
+| `runtime.prefill.basis` | What that rate is, as for generation |
+| `runtime.prefill.done_tokens` | Prompt tokens read so far by the prefill in flight |
+| `runtime.prefill.expected_tokens` | Prompt tokens it will read |
+| `runtime.requests.active` | Requests running |
+| `runtime.requests.waiting` | Requests queued |
+| `runtime.requests.prefilling` | Running requests reading their prompt, where the runtime lists its requests |
+| `runtime.requests.generating` | Running requests writing their answer, where it lists them |
+| `runtime.requests.context_tokens` | Tokens the requests writing an answer hold, prompt and output together: the context their speed is judged at |
+| `runtime.requests.prompt_tokens` | The runtime's prompt token count, as the static report's TOKENS line |
+| `runtime.requests.output_tokens` | Its output token count, as the TOKENS line |
+| `runtime.requests.list` | Each request it lists |
+| `runtime.requests.list[].id` | The id the runtime gave it |
+| `runtime.requests.list[].state` | `queued`, `prefilling`, `generating` or `completed` |
+| `runtime.requests.list[].prompt_tokens` | Its prompt, cached tokens included |
+| `runtime.requests.list[].cached_tokens` | Prompt tokens served from cache |
+| `runtime.requests.list[].prefilled_tokens` | Prompt tokens read so far, while the prompt is read |
+| `runtime.requests.list[].output_tokens` | Tokens written |
+| `runtime.requests.list[].tok_per_s` | Its output speed: the latest interval's while it writes, its average once completed |
+| `runtime.requests.list[].first_token_ms` | Time to its first token |
+| `runtime.requests.list[].idle_s` | How long it has gone without a token, where the runtime says |
+| `runtime.cache.reuse_ratio` | The share of prompt tokens served from cache since the runtime started |
+| `runtime.cache.recent_reuse_ratio` | The same over the last interval |
+| `runtime.cache.prefix_hit_ratio` | Prefix-cache hits |
+| `runtime.cache.prompt_tokens_total` | Prompt tokens it was sent, its own total |
+| `runtime.cache.cached_tokens_total` | Of those, the ones served from cache |
+| `runtime.cache.ssd_used_bytes` | Its prompt cache on disk (oMLX) |
+| `runtime.cache.ssd_capacity_bytes` | That cache's size |
+| `runtime.draft.acceptance_ratio` | The share of drafted tokens accepted since the last poll (speculative decoding) |
+| `usual_speed` | The usual speed for the work being done, once there is one; else `null` |
+| `usual_speed.source` | `estimate` |
+| `usual_speed.phase` | `generation` or `prefill` |
+| `usual_speed.tok_per_s` | What earlier samples of similar work ran at |
+| `usual_speed.slow_below_tok_per_s` | Below this, this work is slow |
+| `usual_speed.work` | The work it is for: `1 request · 41.0k context` |
+| `usual_speed.relative_change` | This sample's speed against it as a relative change: -0.5 is half as fast, 0 the usual; in a slowdown, against the speed it fell from |
+| `unusual` | What else is unusual in this sample, the most telling first: an estimate against each signal's usual value |
+| `unusual[].cause` | The signal, by the names `slowdown.cause` uses |
+| `unusual[].note` | It beside its usual value, in words |
+| `slowdown` | The slowdown or stall under way, or `null` |
+| `slowdown.source` | `estimate` |
+| `slowdown.phase` | `generation` or `prefill` |
+| `slowdown.stalled` | An answer has stopped producing tokens |
+| `slowdown.cause` | The reason it is given: `none` (nothing else unusual), `stall`, `paging`, `compression`, `memory_pressure`, `thermal`, `metal_memory`, `queueing`, `concurrent_prefill`, `model_memory`, `disk_io`, `cpu`, `gpu_idle` or `draft_acceptance` |
+| `slowdown.reason` | The reason in words, with its usual value |
+| `slowdown.usual_tok_per_s` | The speed it fell from |
+| `slowdown.lowest_tok_per_s` | The slowest it has been |
+| `slowdown.duration_s` | How long it has lasted |
+| `slowdown.samples` | Its samples so far |
+| `slowdown.stalled_s` | How long a stalled answer has gone without a token |
+| `slowdown_ended` | Set on the one sample where a slowdown ended, else `null` |
+| `slowdown_ended.source` | `estimate` |
+| `slowdown_ended.phase` | `generation` or `prefill` |
+| `slowdown_ended.how` | `recovered` (speed came back), `settled` (the slower speed held with nothing else unusual and is now the usual) or `finished` (the request ended while slow) |
+| `slowdown_ended.duration_s` | How long it lasted |
+| `slowdown_ended.lowest_tok_per_s` | The slowest it was |
+| `slowdown_ended.tok_per_s` | The speed it ended at |
+| `slowdown_ended.usual_tok_per_s` | The speed it had fallen from |
 
 ## Configuration
 
@@ -1268,6 +1478,8 @@ and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
 supported adapters. The application does not track how it is used, upload
 collected metrics, modify model state or send synthetic inference requests.
+`--once --json` and `mlxtop stream` write only to standard output, and hold
+no process names, command lines or process ids.
 
 Provider credentials are read only when needed and are never displayed. See
 [SECURITY.md](../SECURITY.md) for responsible vulnerability reporting and the

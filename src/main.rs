@@ -18,6 +18,7 @@ mod diagnosis;
 mod diagnostics_view;
 mod domain;
 mod drop_marks;
+mod export;
 mod formatting;
 mod gpu;
 mod gpu_amd;
