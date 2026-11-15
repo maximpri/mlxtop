@@ -115,3 +115,81 @@ fn a_session_counts_work_energy_and_the_speed_each_cause_cost() {
         .iter()
         .any(|line| line.contains("no slowdown or stall")));
 }
+
+#[test]
+fn energy_counts_the_gpus_own_power_where_the_machine_reports_none() {
+    use crate::gpu::{Device, Limits, Vendor};
+    let card = |uuid: &str, milliwatts: Option<u64>| Device {
+        index: 0,
+        uuid: uuid.into(),
+        vendor: Vendor::Nvidia,
+        name: "NVIDIA RTX 4090".into(),
+        utilization: Some(97),
+        used: Some(1 << 30),
+        total: Some(24 << 30),
+        temperature: Some(70),
+        throttle_reasons: None,
+        unified: false,
+        limits: Limits {
+            power_mw: milliwatts,
+            ..Limits::default()
+        },
+    };
+    let on_cards = |gpus: Vec<Device>, system: Option<u64>| {
+        let mut session = Session::default();
+        for second in 0..10 {
+            let mut sample = writing(second, 50.0);
+            sample.system_power_mw = system;
+            sample.gpus = gpus.clone();
+            session.observe(&sample);
+        }
+        session
+    };
+    // Linux and Windows: the cards' own power, every card's.
+    let cards = vec![card("GPU-a", Some(180_000)), card("GPU-b", Some(20_000))];
+    let session = on_cards(cards.clone(), None);
+    assert_eq!(session.joules, 9.0 * 200.0);
+    assert!(session.gpu_power);
+    assert_eq!(session.joules_per_token(), Some(1800.0 / 450.0));
+    let sample = Sample {
+        gpus: cards.clone(),
+        ..Sample::default()
+    };
+    let text = lines(&session, &History::default(), &sample, None).join("\n");
+    assert!(
+        text.contains("Energy: 4.00 J per token written · 0.5 Wh while working · GPU power only"),
+        "{text}"
+    );
+    // An APU's reading covers its CPU cores too.
+    let mut apu = card("AMD-apu", Some(86_000));
+    apu.vendor = Vendor::Amd;
+    apu.unified = true;
+    let apu_session = on_cards(vec![apu.clone()], None);
+    let text = lines(
+        &apu_session,
+        &History::default(),
+        &Sample {
+            gpus: vec![apu],
+            ..Sample::default()
+        },
+        None,
+    )
+    .join("\n");
+    assert!(text.contains("· APU power only"), "{text}");
+    // The whole machine, where the OS reports it, wins.
+    let session = on_cards(cards, Some(60_000));
+    assert_eq!(session.joules, 9.0 * 60.0);
+    assert!(!session.gpu_power);
+    let text = lines(&session, &History::default(), &Sample::default(), None).join("\n");
+    assert!(
+        text.contains("Wh while working\n") || text.ends_with("Wh while working"),
+        "{text}"
+    );
+    // One card without a reading: unknown, not the other card's share.
+    let session = on_cards(
+        vec![card("GPU-a", Some(180_000)), card("GPU-b", None)],
+        None,
+    );
+    assert_eq!(session.joules, 0.0);
+    assert_eq!(session.joules_per_token(), None);
+}

@@ -1298,7 +1298,8 @@ impl CorrelationObservation {
             compression_rate: sample.compress.saturating_add(sample.decompress),
             pressure: pressure_rank(&sample.pressure),
             thermal_limited: sample.thermal.starts_with("limited")
-                || sample.thermal == "warning reported",
+                || sample.thermal == "warning reported"
+                || crate::gpu::heat_limited(&sample.gpus),
             model_memory: sample.llm_model_memory,
             model_memory_max: sample.llm_model_memory_max,
             metal_in_use: sample.gpu_in_use,

@@ -50,6 +50,10 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
             ),
             _ => "The model's memory is near its ceiling: shorten the context or lower concurrency.".into(),
         },
+        // A card holding its clocks down for heat: its cooling, not the Mac's.
+        CorrelationCause::Thermal if crate::gpu::heat_limited(&sample.gpus) => {
+            crate::gpu_findings::heat_step(sample)
+        }
         CorrelationCause::Thermal => match sample.system_power_mw {
             Some(milliwatts) => format!(
                 "macOS is limiting speed for heat at {:.0} W: improve airflow, or run fewer requests at once.",

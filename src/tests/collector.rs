@@ -605,6 +605,8 @@ fn app_applies_new_views_and_keeps_the_selected_gpu_by_uuid() {
         total: None,
         temperature: None,
         throttle_reasons: None,
+        unified: false,
+        limits: Default::default(),
     };
     let mut view = empty_view();
     view.current.gpus = vec![device(0, "GPU-a"), device(1, "GPU-b")];
