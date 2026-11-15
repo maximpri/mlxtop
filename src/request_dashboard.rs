@@ -291,6 +291,12 @@ fn output_summary(entry: &Entry, live: bool, sample: &Sample, width: u16) -> Lin
             width,
         );
     }
+    append_detail(
+        &mut line,
+        crate::omlx::draft_note(sample, &entry.usage, live),
+        MUTED,
+        width,
+    );
     line
 }
 

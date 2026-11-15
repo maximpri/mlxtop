@@ -232,6 +232,7 @@ impl RuntimeReport {
             ));
         }
         lines.extend(crate::model_facts::lines(&sample.model));
+        lines.extend(crate::omlx::draft_lines(sample));
         for probe in &self.probes {
             lines.push(format!(
                 "{}: {}",
