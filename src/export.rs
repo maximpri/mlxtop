@@ -17,11 +17,11 @@
 //!   measured from the operating system, `runtime` for what the runtime
 //!   reported, `estimate` for mlxtop's own judgement from other readings
 //!   (the usual speed and what is slow against it, decode per verify pass,
-//!   the context left). A figure whose source varies says so beside it
-//!   (`limit_source`).
-//! - What only a session knows (the best decode reached here) is in the
-//!   snapshots `stream` and `serve` write from their session; `--once`
-//!   watches none, so it is `null` there.
+//!   the context left, what first tokens lost). A figure whose source
+//!   varies says so beside it (`limit_source`).
+//! - What only a session knows (the best decode reached here, what first
+//!   tokens lost) is in the snapshots `stream` and `serve` write from their
+//!   session; `--once` watches none, so it is `null` there.
 //! - No process names, command lines or process ids: the stream is meant to
 //!   cross a network. Runtime and model names stay.
 //! - Fields are added without a new version, so a reader ignores fields it
@@ -37,6 +37,7 @@ use crate::diagnosis::{assess, assess_session, Verdict};
 use crate::domain::{CorrelationCause, DropEnd, Phase, Sample, TelemetrySource, Tone};
 use crate::efficiency::Record;
 use crate::host::Platform;
+use crate::session::Session;
 use serde::Serialize;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -80,6 +81,9 @@ pub(crate) struct Snapshot {
     pub(crate) context_left: Option<ContextLeft>,
     /// The usual speed for the work being done, once there is one.
     pub(crate) usual_speed: Option<UsualSpeed>,
+    /// Generation clearly below its usual from earlier sessions, while this
+    /// session has no usual of its own for the work.
+    pub(crate) earlier_sessions: Option<EarlierSessions>,
     /// What else is unusual in this sample, the most telling first: an
     /// estimate, against the same signals' usual values.
     pub(crate) unusual: Vec<Unusual>,
@@ -87,6 +91,8 @@ pub(crate) struct Snapshot {
     pub(crate) slowdown: Option<Slowdown>,
     /// Set on the one sample where a slowdown ended.
     pub(crate) slowdown_ended: Option<SlowdownEnd>,
+    /// What first tokens lost this session, while a runtime is found.
+    pub(crate) lost_before_first_tokens: Option<LostBeforeFirstTokens>,
 }
 
 /// The snapshot of `sample`, taken `interval_s` seconds after the one
@@ -99,8 +105,8 @@ pub(crate) fn snapshot(sample: &Sample, platform: Platform, interval_s: u64) -> 
 /// The snapshot of `sample`, the sample `collector` just took, as its
 /// session sees it, the way the dashboard does: with what the session
 /// watched decode reach, so the best share and a healthy verdict's note
-/// near it are known. What `mlxtop stream` writes and `mlxtop serve`
-/// answers with.
+/// near it are known, and what its requests' first tokens lost. What
+/// `mlxtop stream` writes and `mlxtop serve` answers with.
 pub(crate) fn session_snapshot(
     collector: &Collector,
     sample: &Sample,
@@ -110,7 +116,7 @@ pub(crate) fn session_snapshot(
         sample,
         collector.platform,
         interval_s,
-        Some(&collector.session.decode),
+        Some(&collector.session),
     )
 }
 
@@ -118,9 +124,10 @@ fn build(
     sample: &Sample,
     platform: Platform,
     interval_s: u64,
-    decode: Option<&Record>,
+    session: Option<&Session>,
 ) -> Snapshot {
     let insight = &sample.correlation;
+    let decode = session.map(|session| &session.decode);
     Snapshot {
         schema_version: SCHEMA_VERSION,
         mlxtop_version: crate::cli::VERSION.into(),
@@ -132,6 +139,7 @@ fn build(
         efficiency: Efficiency::of(sample, decode),
         context_left: ContextLeft::of(sample, platform),
         usual_speed: UsualSpeed::of(sample),
+        earlier_sessions: EarlierSessions::of(sample),
         unusual: insight
             .unusual
             .iter()
@@ -142,6 +150,8 @@ fn build(
             .collect(),
         slowdown: Slowdown::of(sample),
         slowdown_ended: insight.ended.map(|end| SlowdownEnd::of(end, insight.phase)),
+        lost_before_first_tokens: session
+            .and_then(|session| LostBeforeFirstTokens::of(sample, &session.request_findings)),
     }
 }
 
@@ -660,11 +670,15 @@ pub(crate) struct Runtime {
     pub(crate) draft: Draft,
 }
 
+/// The sample names a runtime it found.
+fn runtime_found(sample: &Sample) -> bool {
+    !matches!(sample.llm_provider.as_str(), "none" | "not detected" | "")
+}
+
 impl Runtime {
     fn of(sample: &Sample) -> Self {
-        let provider = Some(sample.llm_provider.clone())
-            .filter(|provider| !matches!(provider.as_str(), "none" | "not detected" | ""));
-        let found = provider.is_some();
+        let found = runtime_found(sample);
+        let provider = found.then(|| sample.llm_provider.clone());
         Self {
             source: Source::Runtime,
             provider,
@@ -1112,6 +1126,36 @@ impl UsualSpeed {
     }
 }
 
+/// Generation that runs clearly below its usual from earlier sessions at
+/// this depth, judged against those sessions alone because this one has no
+/// usual of its own for the work yet: the finding Diagnostics words as
+/// `This model now generates 31% below its usual from earlier sessions at
+/// this depth, since oMLX 0.7.3 became 0.8.0`.
+#[derive(Serialize)]
+pub(crate) struct EarlierSessions {
+    pub(crate) source: Source,
+    /// How far below that usual, as a share of it: 0.31 is 31% below.
+    pub(crate) below_ratio: Option<f64>,
+    /// The update the finding names: the runtime's version earlier
+    /// sessions' usual was measured on, and the one now. Unknown unless
+    /// both versions are known and differ.
+    pub(crate) runtime_from: Option<String>,
+    pub(crate) runtime_to: Option<String>,
+}
+
+impl EarlierSessions {
+    fn of(sample: &Sample) -> Option<Self> {
+        let below = sample.correlation.earlier.as_ref()?;
+        let update = below.update();
+        Some(Self {
+            source: Source::Estimate,
+            below_ratio: ratio(below.percent / 100.0),
+            runtime_from: update.map(|(from, _)| from.to_owned()),
+            runtime_to: update.map(|(_, to)| to.to_owned()),
+        })
+    }
+}
+
 /// A signal that is unusual in this sample.
 #[derive(Serialize)]
 pub(crate) struct Unusual {
@@ -1197,6 +1241,44 @@ impl SlowdownEnd {
             tok_per_s: tok_per_s(end.rate),
             usual_tok_per_s: tok_per_s(end.reference),
         }
+    }
+}
+
+/// What first tokens lost this session, as the session summary counts it.
+/// None of it changes the verdict or colours anything: it is time spent
+/// before generation, not generation's speed.
+#[derive(Serialize)]
+pub(crate) struct LostBeforeFirstTokens {
+    pub(crate) source: Source,
+    /// The reading time of long prompts read in full right after cached
+    /// ones, at this machine's usual prefill speed.
+    pub(crate) cache_misses_s: f64,
+    /// The model loads the runtime reported first tokens waiting for.
+    pub(crate) model_loads_s: f64,
+    /// How much longer requests that started beside another writing waited
+    /// for their first token than the median request that started alone;
+    /// counted once the overlap is told, 0 until then.
+    pub(crate) overlap_s: f64,
+    /// The overlap has been told this session: two requests at once gained
+    /// no throughput and made first tokens wait longer.
+    pub(crate) overlap_told: bool,
+}
+
+impl LostBeforeFirstTokens {
+    fn of(sample: &Sample, findings: &crate::request_findings::Findings) -> Option<Self> {
+        // With no runtime found, nothing is said about one.
+        if !runtime_found(sample) {
+            return None;
+        }
+        let [cache_misses, model_loads, overlap] =
+            findings.lost().map(|(_, seconds)| round(seconds, 3));
+        Some(Self {
+            source: Source::Estimate,
+            cache_misses_s: cache_misses,
+            model_loads_s: model_loads,
+            overlap_s: overlap,
+            overlap_told: findings.overlap_told(),
+        })
     }
 }
 

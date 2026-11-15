@@ -111,9 +111,12 @@ def usage_record(provider, response, *, request_id=None, model=None,
     if speed is not None:
         timings["output_tokens_per_second"] = _rate(speed, "Invalid output throughput")
     # How fast the prompt was read, over the tokens the runtime computed:
-    # llama-server's prompt speed, or Ollama's prompt time (nanoseconds) over
-    # its uncached tokens. Zero is a time the runtime did not have.
+    # llama-server's prompt speed, oMLX's usage extension (which counts only
+    # the tokens it computed), or Ollama's prompt time (nanoseconds) over its
+    # uncached tokens. Zero is a time the runtime did not have.
     prefill = supplied.get("prompt_tokens_per_second", supplied.get("prompt_per_second"))
+    if prefill is None and provider == "oMLX":
+        prefill = usage.get("prompt_tokens_per_second")
     if prefill is None and provider == "Ollama":
         duration = usage.get("prompt_eval_duration")
         if duration is not None and not _count(duration):
@@ -124,8 +127,9 @@ def usage_record(provider, response, *, request_id=None, model=None,
     if prefill is not None and _rate(prefill, "Invalid prompt throughput") > 0:
         timings["prompt_tokens_per_second"] = prefill
     # How long the request waited for the model to load: Ollama's
-    # `load_duration` (nanoseconds), or LM Studio's `model_load_time_seconds`,
-    # which it sends only after a load.
+    # `load_duration` (nanoseconds), LM Studio's `model_load_time_seconds`,
+    # which it sends only after a load, or oMLX's `model_load_duration`
+    # (seconds), which it sends only for a load that took over a second.
     load_ms = supplied.get("model_load_ms")
     if load_ms is None and provider == "Ollama":
         duration = usage.get("load_duration")
@@ -133,8 +137,9 @@ def usage_record(provider, response, *, request_id=None, model=None,
             raise ValueError("Invalid load duration")
         if duration:
             load_ms = duration // 1_000_000
-    if load_ms is None and provider == "LM Studio":
-        seconds = usage.get("model_load_time_seconds")
+    if load_ms is None and provider in ("LM Studio", "oMLX"):
+        seconds = usage.get("model_load_time_seconds" if provider == "LM Studio"
+                            else "model_load_duration")
         if seconds is not None:
             if _rate(seconds, "Invalid model load time") * 1000 >= 2**64:
                 raise ValueError("Invalid model load time")

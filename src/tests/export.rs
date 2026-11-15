@@ -208,7 +208,7 @@ pub(crate) fn mac_studio_slowdown() -> Sample {
             notes: vec!["paging 8.0 MiB/s (usual none)".into()],
             usual_speed: Some((123.0, 98.4)),
             usual_for: "1 request · 41.0k context".into(),
-            earlier: String::new(),
+            earlier: None,
         },
         llm_top: "omlx-worker".into(),
         llm_pid: 4242,
@@ -413,7 +413,9 @@ pub(crate) fn watched() -> crate::efficiency::Record {
 }
 
 /// A collector on a recorded Mac whose session's decode record is
-/// `decode`: what `stream` and `serve` judge each sample beside.
+/// `decode`, and whose requests' first tokens lost time every way the
+/// session summary counts: what `stream` and `serve` judge each sample
+/// beside.
 pub(crate) fn watching(decode: crate::efficiency::Record) -> crate::collector::Collector {
     let mut collector = crate::collector::Collector::with_host(
         60,
@@ -423,7 +425,49 @@ pub(crate) fn watching(decode: crate::efficiency::Record) -> crate::collector::C
         None,
     );
     collector.session.decode = decode;
+    collector.session.request_findings = crate::request_findings::tests::every_finding();
     collector
+}
+
+/// The owner's server a day after oMLX 0.7.3 became 0.8.0, at 40 tok/s
+/// where earlier sessions ran this work at 58: judged against them alone,
+/// with nothing else unusual, six samples into the slowdown that is.
+pub(crate) fn below_earlier_sessions() -> Sample {
+    let mut sample = mac_studio_idle();
+    sample.llm_status = "generating".into();
+    sample.llm_generation_tps = Some(40.0);
+    sample.llm_generation_tps_live = true;
+    sample.llm_requests = mac_studio_slowdown().llm_requests;
+    sample.llm_requests[0].output_tps = Some(40.0);
+    sample.llm_active_requests = Some(1);
+    sample.correlation = CorrelationInsight {
+        phase: Phase::Generation,
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::EarlierSessions,
+        summary: "GEN ↓31.0% (58.0→40.0 tok/s) · below earlier sessions".into(),
+        lead: "below earlier sessions".into(),
+        event_key: Some(CorrelationKey {
+            direction: ThroughputDirection::Down,
+            cause: CorrelationCause::EarlierSessions,
+        }),
+        delta_percent: Some(-31.03),
+        episode: Some(DropEpisode {
+            reference: 58.0,
+            low: 39.5,
+            seconds: 6.0,
+            samples: 6,
+        }),
+        slow: true,
+        usual_speed: Some((58.0, 46.4)),
+        usual_for: "1 request · 41.0k context".into(),
+        earlier: Some(crate::baseline_store::BelowEarlier {
+            percent: 31.03,
+            then: Some("oMLX 0.7.3".into()),
+            now: Some("oMLX 0.8.0".into()),
+        }),
+        ..CorrelationInsight::default()
+    };
+    sample
 }
 
 /// Where the golden files live, for reading and for `MLXTOP_BLESS=1`.
@@ -586,9 +630,10 @@ fn every_line_is_one_json_object_of_about_three_kilobytes() {
         (2_500..=3_500).contains(&idle) && busy <= 4_000 && quiet < idle && idle < busy,
         "busy {busy}, idle {idle}, quiet {quiet} bytes"
     );
-    // The fullest line has its own bound, about 4.2 KB: on top of the busy
+    // The fullest line has its own bound, about 4.3 KB: on top of the busy
     // one, the runtime counts its own KV room and draft, so decode
-    // efficiency, the context left and the session's best are known too.
+    // efficiency, the context left and the session's best are known too,
+    // and the session says what first tokens lost.
     let mut full = Vec::new();
     write_line(
         &mut full,
@@ -685,8 +730,10 @@ fn unknown_readings_are_null_never_zero() {
         "/efficiency",
         "/context_left",
         "/usual_speed",
+        "/earlier_sessions",
         "/slowdown",
         "/slowdown_ended",
+        "/lost_before_first_tokens",
     ] {
         assert_eq!(value.pointer(pointer), Some(&Value::Null), "{pointer}");
     }
@@ -1124,7 +1171,7 @@ fn a_slowdown_names_its_cause_until_it_ends() {
     assert_eq!(names.len(), CAUSES.len());
 }
 
-const CAUSES: [CorrelationCause; 14] = [
+const CAUSES: [CorrelationCause; 16] = [
     CorrelationCause::None,
     CorrelationCause::Stall,
     CorrelationCause::Paging,
@@ -1139,6 +1186,8 @@ const CAUSES: [CorrelationCause; 14] = [
     CorrelationCause::Cpu,
     CorrelationCause::GpuIdle,
     CorrelationCause::DraftAcceptance,
+    CorrelationCause::KvPreemption,
+    CorrelationCause::EarlierSessions,
 ];
 
 const VERDICTS: [crate::diagnosis::Verdict; 20] = {
@@ -1448,6 +1497,105 @@ fn without_the_runtimes_own_counts_the_estimates_are_null() {
     );
 }
 
+#[test]
+fn only_a_session_with_a_runtime_says_what_first_tokens_lost() {
+    // A session whose requests lost time every way the summary counts it.
+    let streamed = serde_json::to_value(super::session_snapshot(
+        &watching(watched()),
+        &splash_slowdown(),
+        1,
+    ))
+    .unwrap();
+    assert_eq!(
+        streamed["lost_before_first_tokens"],
+        serde_json::json!({
+            "source": "estimate",
+            "cache_misses_s": 124.0,
+            "model_loads_s": 6.5,
+            "overlap_s": 40.0,
+            "overlap_told": true
+        })
+    );
+    // A session that lost nothing says so: none of it is unknown. An
+    // overlap not told costs nothing yet.
+    let mut quiet = watching(watched());
+    quiet.session.request_findings = Default::default();
+    let lost = &serde_json::to_value(super::session_snapshot(&quiet, &splash_slowdown(), 1))
+        .unwrap()["lost_before_first_tokens"];
+    for field in ["cache_misses_s", "model_loads_s", "overlap_s"] {
+        assert_eq!(lost[field], 0.0, "{field}");
+    }
+    assert_eq!(lost["overlap_told"], false);
+    // `--once` watches no session; with no runtime found, nothing is said
+    // about one.
+    assert_eq!(
+        json(&splash_slowdown(), Platform::MacOs)["lost_before_first_tokens"],
+        Value::Null
+    );
+    let none = serde_json::to_value(super::session_snapshot(
+        &watching(watched()),
+        &mac_no_runtime(),
+        1,
+    ))
+    .unwrap();
+    assert_eq!(none["lost_before_first_tokens"], Value::Null);
+}
+
+#[test]
+fn the_finding_below_earlier_sessions_gives_its_share_and_the_update() {
+    let value = json(&below_earlier_sessions(), Platform::MacOs);
+    assert_eq!(
+        value["earlier_sessions"],
+        serde_json::json!({
+            "source": "estimate",
+            "below_ratio": 0.3103,
+            "runtime_from": "oMLX 0.7.3",
+            "runtime_to": "oMLX 0.8.0"
+        })
+    );
+    assert_eq!(value["slowdown"]["cause"], "earlier_sessions");
+    // The same version slowed, or a version not known then or now: there
+    // is no update to name.
+    for (then, now) in [
+        (Some("oMLX 0.8.0"), Some("oMLX 0.8.0")),
+        (None, Some("oMLX 0.8.0")),
+        (Some("oMLX 0.7.3"), None),
+    ] {
+        let mut sample = below_earlier_sessions();
+        let below = sample.correlation.earlier.as_mut().unwrap();
+        below.then = then.map(str::to_owned);
+        below.now = now.map(str::to_owned);
+        let earlier = &json(&sample, Platform::MacOs)["earlier_sessions"];
+        assert_eq!(earlier["below_ratio"], 0.3103);
+        assert_eq!(earlier["runtime_from"], Value::Null, "{then:?} {now:?}");
+        assert_eq!(earlier["runtime_to"], Value::Null, "{then:?} {now:?}");
+    }
+    // The first judged sample below them says so before it is a slowdown.
+    let mut first = below_earlier_sessions();
+    let below = first.correlation.earlier.clone();
+    first.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        slow: true,
+        delta_percent: Some(-31.03),
+        unusual: vec![CorrelationCause::EarlierSessions],
+        notes: vec![below.as_ref().unwrap().sentence()],
+        usual_speed: Some((58.0, 46.4)),
+        usual_for: "1 request · 41.0k context".into(),
+        earlier: below,
+        ..CorrelationInsight::default()
+    };
+    let value = json(&first, Platform::MacOs);
+    assert_eq!(value["earlier_sessions"]["below_ratio"], 0.3103);
+    assert_eq!(value["slowdown"], Value::Null);
+    assert_eq!(value["unusual"][0]["cause"], "earlier_sessions");
+    // Judged against this session's own usual, or slowed for a reason of
+    // its own: no finding.
+    assert_eq!(
+        json(&mac_studio_slowdown(), Platform::MacOs)["earlier_sessions"],
+        Value::Null
+    );
+}
+
 /// Every field path in `value`: `memory.ram.left_bytes`, `gpus[].name`.
 fn field_paths(prefix: &str, value: &Value, paths: &mut BTreeSet<String>) {
     match value {
@@ -1491,9 +1639,13 @@ fn the_user_guide_lists_every_field() {
         (splash_slowdown(), Platform::MacOs),
         (ended, Platform::MacOs),
         (linux_workstation(), Platform::Linux),
+        (below_earlier_sessions(), Platform::MacOs),
     ] {
         field_paths("", &json(&sample, platform), &mut paths);
     }
+    // What only a session knows.
+    let streamed = super::session_snapshot(&watching(watched()), &splash_slowdown(), 1);
+    field_paths("", &serde_json::to_value(streamed).unwrap(), &mut paths);
     let guide = include_str!("../../docs/USER_GUIDE.md");
     // And every name a verdict or a reason can take.
     for verdict in VERDICTS {

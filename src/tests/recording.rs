@@ -612,3 +612,320 @@ fn the_tally_puts_the_most_told_reason_first_and_counts_it_per_hour() {
         "{report}"
     );
 }
+
+const MODEL: &str = "Qwen3.8-27B-oQ4e-mtp";
+
+/// A request oMLX lists: reading its prompt, or writing at `tps`.
+fn listed(id: &str, prompt: u64, tps: Option<f64>) -> RequestUsage {
+    RequestUsage {
+        provider: "oMLX".into(),
+        model: MODEL.into(),
+        id: id.into(),
+        prompt,
+        output: tps.map(|_| 400),
+        output_tps: tps,
+        prefilled: tps.is_none().then_some(prompt / 2),
+        ..RequestUsage::default()
+    }
+}
+
+/// A session in which first tokens lose time four ways, a poll a second,
+/// with oMLX set to run one request at a time: ten pairs of requests at
+/// once at 58 tok/s each against 120 alone, the second of each waiting 6 s
+/// for its first token against 2 s alone; a 45k-token prompt read in full
+/// at 255 tok/s right after a 44k one 98% cached; a 6.5 s model load the
+/// usage recorder reported; three requests recomputed.
+fn first_tokens_lost() -> Vec<Sample> {
+    let mut samples = Vec::new();
+    let mut poll = |requests: Vec<RequestUsage>, change: &dyn Fn(&mut Sample)| {
+        let second = samples.len() as u64;
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 + second);
+        let mut sample = Sample {
+            llm_provider: "oMLX".into(),
+            llm_model: MODEL.into(),
+            llm_source: TelemetrySource::Live,
+            llm_status: "generating".into(),
+            llm_observed_at: Some(at),
+            updated: format!("14:{:02}:{:02}", second / 60 % 60, second % 60),
+            llm_requests: requests
+                .into_iter()
+                .map(|request| RequestUsage {
+                    observed_at: Some(at),
+                    ..request
+                })
+                .collect(),
+            llm_max_concurrent: Some(1),
+            llm_preemptions_total: Some(0),
+            ..Sample::default()
+        };
+        change(&mut sample);
+        sample.ts = crate::collector::epoch_millis(at);
+        samples.push(sample);
+    };
+    let same = |_: &mut Sample| {};
+    for n in 0..12 {
+        let id = format!("alone-{n}");
+        for _ in 0..2 {
+            poll(vec![listed(&id, 900, None)], &same);
+        }
+        for _ in 0..4 {
+            poll(vec![listed(&id, 900, Some(120.0))], &same);
+        }
+    }
+    for n in 0..10 {
+        let (a, b) = (format!("a-{n}"), format!("b-{n}"));
+        for _ in 0..2 {
+            poll(vec![listed(&a, 900, None)], &same);
+        }
+        for _ in 0..3 {
+            poll(vec![listed(&a, 900, Some(120.0))], &same);
+        }
+        for _ in 0..6 {
+            poll(
+                vec![listed(&a, 900, Some(120.0)), listed(&b, 900, None)],
+                &same,
+            );
+        }
+        for _ in 0..20 {
+            poll(
+                vec![listed(&a, 900, Some(58.0)), listed(&b, 900, Some(58.0))],
+                &same,
+            );
+        }
+        for _ in 0..3 {
+            poll(vec![listed(&b, 900, Some(120.0))], &same);
+        }
+    }
+    // oMLX adds each request's prompt and cached tokens to its totals as it
+    // ends; prompts are read at 255 tok/s.
+    for (requests, prompt, cached) in [
+        (vec![listed("a", 44_000, Some(60.0))], 0, 0),
+        (vec![listed("a", 44_000, Some(60.0))], 0, 0),
+        (Vec::new(), 44_000, 43_200),
+        (vec![listed("b", 45_000, None)], 44_000, 43_200),
+        (vec![listed("b", 45_000, Some(60.0))], 44_000, 43_200),
+        (Vec::new(), 89_000, 43_200),
+    ] {
+        poll(requests, &|sample: &mut Sample| {
+            sample.llm_total_prompt_tokens = Some(prompt);
+            sample.llm_total_cached_tokens = Some(cached);
+            sample.llm_prefill_tps = Some(255.0);
+            sample.llm_prefill_tps_live = true;
+        });
+    }
+    // A usage recorder's record of a request that waited for its model.
+    let cold = RequestUsage {
+        completed: true,
+        ..listed("cold", 1_200, Some(40.0))
+    };
+    for _ in 0..2 {
+        poll(vec![cold.clone()], &|sample: &mut Sample| {
+            sample.llm_request_timings = vec![crate::domain::RequestTiming {
+                provider: "oMLX".into(),
+                model: MODEL.into(),
+                id: "cold".into(),
+                prefill_tps: None,
+                load_ms: Some(6_500),
+            }];
+        });
+    }
+    poll(Vec::new(), &|sample: &mut Sample| {
+        sample.llm_preemptions_total = Some(3);
+    });
+    samples
+}
+
+#[test]
+fn replay_counts_what_first_tokens_lost_as_the_live_journal_tells_it() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    // The live path: each sample as the collector concludes one it read.
+    let mut live = Collector::with_host(
+        3600,
+        Config::default(),
+        Box::new(Nothing),
+        Platform::MacOs,
+        None,
+    );
+    let mut rows = Vec::new();
+    let mut recording = Vec::new();
+    for sample in first_tokens_lost() {
+        let taken = live.conclude(sample, std::time::Instant::now());
+        for row in live.signals.drain(..) {
+            if before_first_token(&row.state).is_some() {
+                rows.push((row.time, row.state, row.summary));
+            }
+        }
+        writeln!(recording, "{}", serde_json::to_string(&taken).unwrap()).unwrap();
+    }
+    let states: Vec<&str> = rows.iter().map(|(_, state, _)| state.as_str()).collect();
+    assert_eq!(
+        states,
+        ["OVERLAP", "CACHE MISS", "MODEL LOAD", "KV CACHE FULL"]
+    );
+
+    // The same session read back from its recording: the same rows, at
+    // the same times, among the findings.
+    let (mut samples, skipped) = read_counted(recording.as_slice()).unwrap();
+    assert_eq!(skipped, 0);
+    let result = replay(&mut samples, thresholds);
+    let told: Vec<(String, String, String)> = result
+        .findings
+        .iter()
+        .filter(|(_, state, _)| before_first_token(state).is_some())
+        .cloned()
+        .collect();
+    assert_eq!(told, rows);
+    // Each counted, with what it cost first tokens as the session summary
+    // counts it: 45,000 tokens at 255 tok/s, the load, and 4 s beyond the
+    // usual 2 s wait for each of the ten that started beside another.
+    let tally = |state, name, rows, lost| Told {
+        state,
+        name,
+        rows,
+        lost,
+    };
+    assert_eq!(
+        result.before_first_token,
+        [
+            tally("OVERLAP", "overlap", 1, Some(40.0)),
+            tally("CACHE MISS", "cache miss", 1, Some(45_000.0 / 255.0)),
+            tally("MODEL LOAD", "model load", 1, Some(6.5)),
+            tally("KV CACHE FULL", "KV cache full", 1, None),
+        ]
+    );
+    let summary: Vec<f64> = live
+        .session
+        .request_findings
+        .lost()
+        .iter()
+        .map(|(_, seconds)| *seconds)
+        .collect();
+    assert_eq!(summary, [45_000.0 / 255.0, 6.5, 40.0]);
+    assert!(result.tally.is_empty(), "{:?}", result.tally);
+
+    let mut out = Vec::new();
+    write_report(&mut out, &result).unwrap();
+    let report = String::from_utf8(out).unwrap();
+    for line in [
+        "BEFORE FIRST TOKEN          ROWS  PER HOUR      LOST",
+        "overlap                        1         —       40s",
+        "cache miss                     1         —    2m 56s",
+        "model load                     1         —        7s",
+        "KV cache full                  1         —         —",
+        "FINDINGS    4",
+        "14:06:29  OVERLAP       two requests at once gained no throughput (0.97× one at a time) and made first tokens wait 3.0× as long · oMLX is set to run 1 at a time",
+        "14:06:57  CACHE MISS    b · 45.0k prompt read in full right after one of 44.0k was 98% cached · ≈2m 56s of prompt reading",
+        "14:06:58  MODEL LOAD    cold · first token waited 6.5s for the model to load",
+        "14:07:00  KV CACHE FULL 3 requests were recomputed",
+    ] {
+        assert!(report.contains(line), "missing {line}\n{report}");
+    }
+    assert!(!report.contains("REASON"), "{report}");
+}
+
+#[test]
+fn findings_before_first_tokens_are_tallied_the_most_told_first() {
+    let told = |state, name, rows, lost| Told {
+        state,
+        name,
+        rows,
+        lost,
+    };
+    let result = Replay {
+        samples: 9_000,
+        generating: 7_000,
+        generating_seconds: 2.0 * 3600.0,
+        before_first_token: vec![
+            told("MODEL LOAD", "model load", 2, Some(13.0)),
+            told("KV CACHE FULL", "KV cache full", 4, None),
+            told("CACHE MISS", "cache miss", 5, Some(564.0)),
+            told("OVERLAP", "overlap", 2, Some(0.4)),
+        ],
+        findings: vec![
+            ("09:00:00".into(), "SLOWDOWN".into(), "GEN ↓31.0%".into()),
+            ("09:00:30".into(), "RECOVERED".into(), "GEN back".into()),
+        ],
+        ..Replay::default()
+    };
+    let mut out = Vec::new();
+    write_report(&mut out, &result).unwrap();
+    let report = String::from_utf8(out).unwrap();
+    let tally: Vec<&str> = report
+        .lines()
+        .skip_while(|line| !line.starts_with("BEFORE FIRST TOKEN"))
+        .take_while(|line| !line.starts_with("FINDINGS"))
+        .collect();
+    // Equal counts keep the order first told; a cost under a second is
+    // still a cost; a full KV cache's is not counted.
+    assert_eq!(
+        tally,
+        [
+            "BEFORE FIRST TOKEN          ROWS  PER HOUR      LOST",
+            "cache miss                     5      2.50    9m 24s",
+            "KV cache full                  4      2.00         —",
+            "model load                     2      1.00       13s",
+            "overlap                        2      1.00        0s",
+        ],
+        "{report}"
+    );
+    // The findings told are the slowdown alone here; with no finding before
+    // first tokens among them, the rows read as they always have.
+    assert!(report.contains("FINDINGS    1\n"), "{report}");
+    assert!(
+        report.ends_with("09:00:00  SLOWDOWN  GEN ↓31.0%\n09:00:30  RECOVERED GEN back\n"),
+        "{report}"
+    );
+}
+
+#[test]
+fn every_row_a_finding_writes_is_counted_once() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    // A runtime recomputing requests for want of KV cache: 3, then 1 more
+    // within a minute (the same story, no row), then 3 more two minutes on.
+    let mut samples: Vec<Sample> = (0..130u64)
+        .map(|second| Sample {
+            llm_provider: "vLLM".into(),
+            llm_model: "m".into(),
+            llm_source: TelemetrySource::Live,
+            llm_status: "idle".into(),
+            llm_observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(second)),
+            updated: format!("t{second}"),
+            llm_preemptions_total: Some(match second {
+                0..10 => 5,
+                10..20 => 8,
+                20..120 => 9,
+                _ => 12,
+            }),
+            ..Sample::default()
+        })
+        .collect();
+    let result = replay(&mut samples, thresholds);
+    assert_eq!(
+        result.before_first_token,
+        [Told {
+            state: "KV CACHE FULL",
+            name: "KV cache full",
+            rows: 2,
+            lost: None,
+        }]
+    );
+    let rows: Vec<(&str, &str)> = result
+        .findings
+        .iter()
+        .map(|(time, _, summary)| (time.as_str(), summary.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("t10", "3 requests were recomputed"),
+            ("t120", "3 requests were recomputed"),
+        ]
+    );
+    let mut out = Vec::new();
+    write_report(&mut out, &result).unwrap();
+    let report = String::from_utf8(out).unwrap();
+    assert!(
+        report.contains("KV cache full                  2         —         —\nFINDINGS    2\n"),
+        "{report}"
+    );
+}

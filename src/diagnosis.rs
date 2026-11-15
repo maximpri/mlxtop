@@ -138,12 +138,13 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
         }
         // The finding is the sentence itself: below earlier sessions, and
         // the update between them where there was one.
-        CorrelationCause::EarlierSessions if !sample.correlation.earlier.is_empty() => {
-            format!("{}.", sample.correlation.earlier)
-        }
-        CorrelationCause::EarlierSessions => {
-            "This model now generates below its usual from earlier sessions at this depth.".into()
-        }
+        CorrelationCause::EarlierSessions => match &sample.correlation.earlier {
+            Some(below) => format!("{}.", below.sentence()),
+            None => {
+                "This model now generates below its usual from earlier sessions at this depth."
+                    .into()
+            }
+        },
         // Judged per verify pass, how well the draft guesses is already
         // allowed for: the passes themselves ran slower.
         CorrelationCause::None if judged_per_pass(sample) => {

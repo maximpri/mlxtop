@@ -114,6 +114,40 @@ class UsageWriterTests(unittest.TestCase):
         self.assertEqual(again["timings"], {"prompt_tokens_per_second": 99.5,
                                             "model_load_ms": 1800})
 
+    def test_omlx_usage_gives_prompt_speed_over_computed_tokens_and_its_load(self):
+        # A streamed chat's final usage chunk, as oMLX v0.8.0rc1 server.py
+        # writes it: `Usage` (api/openai_models.py) extended with timings in
+        # seconds, its None fields left out. The prompt speed counts only the
+        # tokens oMLX computed; a load is sent only when it took over a second.
+        response = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "choices": [],
+                    "model": "Qwen3.8-27B-oQ4e-mtp",
+                    "usage": {"prompt_tokens": 14479, "completion_tokens": 812,
+                              "total_tokens": 15291,
+                              "prompt_tokens_details": {"cached_tokens": 0},
+                              "completion_tokens_details": {"reasoning_tokens": 0},
+                              "model_load_duration": 6.48, "time_to_first_token": 55.31,
+                              "total_time": 61.91, "prompt_eval_duration": 48.62,
+                              "generation_duration": 6.6, "prompt_tokens_per_second": 297.8,
+                              "generation_tokens_per_second": 123.03}}
+        record = usage_record("omlx", response)
+        self.assertEqual(record["timings"], {"prompt_tokens_per_second": 297.8,
+                                             "model_load_ms": 6480})
+        self.assertEqual(record["usage"]["prompt_tokens_details"], {"cached_tokens": 0})
+        self.assertEqual(record["model"], "Qwen3.8-27B-oQ4e-mtp")
+        warm = {**response, "usage": {key: value for key, value in response["usage"].items()
+                                      if key != "model_load_duration"}}
+        self.assertEqual(usage_record("omlx", warm)["timings"],
+                         {"prompt_tokens_per_second": 297.8})
+        # A prompt served whole from the cache was not timed.
+        cached = {**warm, "usage": {**warm["usage"], "prompt_tokens_per_second": 0.0}}
+        self.assertNotIn("timings", usage_record("omlx", cached))
+        # oMLX's names mean nothing from another runtime.
+        self.assertNotIn("timings", usage_record("mlx-lm", response))
+        for value in (-1, True, float("nan"), "6.5s"):
+            for key in ("prompt_tokens_per_second", "model_load_duration"):
+                with self.assertRaises(ValueError):
+                    usage_record("omlx", {**response, "usage": {**response["usage"], key: value}})
+
     def test_invalid_prompt_and_load_timings_are_rejected(self):
         for value in (-1, True, float("nan"), float("inf"), "bad"):
             for timings in ({"prompt_per_second": value}, {"prompt_tokens_per_second": value},

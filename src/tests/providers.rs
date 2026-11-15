@@ -1602,6 +1602,71 @@ fn lm_studio_reports_a_model_load_only_after_one() {
     );
 }
 
+/// A streamed chat's final usage, as oMLX v0.8.0rc1 server.py writes it:
+/// `Usage` (api/openai_models.py) extended with timings in seconds, its
+/// `None` fields left out. A 14,479-token prompt read in full after the
+/// model took 6.48 s to load.
+fn omlx_usage() -> Value {
+    record(
+        "omlx",
+        json!({"prompt_tokens": 14479, "completion_tokens": 812, "total_tokens": 15291,
+               "prompt_tokens_details": {"cached_tokens": 0},
+               "completion_tokens_details": {"reasoning_tokens": 0},
+               "model_load_duration": 6.48, "time_to_first_token": 55.31,
+               "total_time": 61.91, "prompt_eval_duration": 48.62,
+               "generation_duration": 6.6, "prompt_tokens_per_second": 297.8,
+               "generation_tokens_per_second": 123.03}),
+    )
+}
+
+#[test]
+fn omlx_reports_prefill_speed_over_computed_tokens_and_a_load_over_a_second() {
+    let usage = parse_usage(&omlx_usage()).unwrap();
+    assert_eq!(
+        usage.request_timings,
+        [RequestTiming {
+            provider: "oMLX".into(),
+            model: "test-model".into(),
+            id: "req-1".into(),
+            // oMLX divides only the tokens it computed by the prefill time.
+            prefill_tps: Some(297.8),
+            load_ms: Some(6480),
+        }]
+    );
+    assert!(usage.request_timings[0].belongs_to(&usage.requests[0]));
+    assert_eq!(usage.requests[0].cached, Some(0));
+    // A model already loaded: oMLX leaves out a load under a second.
+    let mut warm = omlx_usage();
+    warm["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("model_load_duration");
+    let timing = &parse_usage(&warm).unwrap().request_timings[0];
+    assert_eq!((timing.prefill_tps, timing.load_ms), (Some(297.8), None));
+    // A prompt served whole from the cache was not timed.
+    warm["usage"]["prompt_tokens_per_second"] = json!(0.0);
+    assert!(parse_usage(&warm).unwrap().request_timings.is_empty());
+    // A bad figure is no figure.
+    for bad in [json!(-1.0), json!("6.5s"), json!(null)] {
+        let mut value = omlx_usage();
+        value["usage"]["model_load_duration"] = bad.clone();
+        value["usage"]["prompt_tokens_per_second"] = bad;
+        assert!(parse_usage(&value).unwrap().request_timings.is_empty());
+    }
+    // oMLX's names mean nothing from another runtime.
+    let mut other = omlx_usage();
+    other["provider"] = json!("mlx-lm");
+    assert!(parse_usage(&other).unwrap().request_timings.is_empty());
+    // The usage recorder's own fields win.
+    let mut recorded = omlx_usage();
+    recorded["timings"] = json!({"prompt_tokens_per_second": 310.5, "model_load_ms": 7000});
+    let timing = &parse_usage(&recorded).unwrap().request_timings[0];
+    assert_eq!(
+        (timing.prefill_tps, timing.load_ms),
+        (Some(310.5), Some(7000))
+    );
+}
+
 #[test]
 fn usage_files_keep_each_request_s_timing_with_its_last_record() {
     let dir = TempDir::new("usage-timings");

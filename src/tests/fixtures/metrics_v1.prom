@@ -257,6 +257,18 @@ mlxtop_llm_generation_slow_below_tokens_per_second 98.4
 # HELP mlxtop_llm_slowdown_seconds Estimate: how long the slowdown under way has lasted
 # TYPE mlxtop_llm_slowdown_seconds gauge
 mlxtop_llm_slowdown_seconds 12
+# HELP mlxtop_llm_first_tokens_lost_to_cache_misses_seconds Estimate: seconds first tokens lost this session to long prompts read in full right after cached ones, at the usual prefill speed
+# TYPE mlxtop_llm_first_tokens_lost_to_cache_misses_seconds gauge
+mlxtop_llm_first_tokens_lost_to_cache_misses_seconds 124
+# HELP mlxtop_llm_first_tokens_lost_to_model_loads_seconds Estimate: seconds first tokens waited this session for model loads the runtime reported
+# TYPE mlxtop_llm_first_tokens_lost_to_model_loads_seconds gauge
+mlxtop_llm_first_tokens_lost_to_model_loads_seconds 6.5
+# HELP mlxtop_llm_first_tokens_lost_to_overlap_seconds Estimate: seconds requests that started beside another writing waited for their first token beyond the median of those that started alone, once the overlap is told; 0 until then
+# TYPE mlxtop_llm_first_tokens_lost_to_overlap_seconds gauge
+mlxtop_llm_first_tokens_lost_to_overlap_seconds 40
+# HELP mlxtop_llm_overlap_told Estimate: 1 once this session found that two requests at once gained no throughput and made first tokens wait longer; 0 until then
+# TYPE mlxtop_llm_overlap_told gauge
+mlxtop_llm_overlap_told 1
 # HELP mlxtop_gpu_busy_ratio How busy the GPU is
 # TYPE mlxtop_gpu_busy_ratio gauge
 mlxtop_gpu_busy_ratio{gpu="0"} 0.96

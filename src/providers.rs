@@ -797,7 +797,7 @@ fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
 /// One finished request's usage record: its counts, and the timings its
 /// runtime sent with them. llama-server's own `timings` are read whatever
 /// runtime the record names, since Splash and proxies send the same shape;
-/// Ollama's and LM Studio's native fields only from those runtimes.
+/// Ollama's, LM Studio's and oMLX's native fields only from those runtimes.
 fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
     if record.get("done").and_then(Value::as_bool) == Some(false) {
         return None;
@@ -854,12 +854,18 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             Some(count as f64 / duration as f64 * 1_000_000_000.0)
         });
     // How fast the prompt was read, over the tokens the runtime computed:
-    // mlxtop's own field, llama-server's, or Ollama's prompt time
+    // mlxtop's own field, llama-server's, oMLX's usage extension (which
+    // counts only the tokens it computed), or Ollama's prompt time
     // (nanoseconds) over its uncached tokens. A speed of zero is a divisor
     // the runtime did not have, not a measurement.
     let prefill_tps = timings
         .and_then(|timings| {
             request_rate(timings, &["prompt_tokens_per_second", "prompt_per_second"])
+        })
+        .or_else(|| {
+            (provider == "oMLX")
+                .then(|| request_rate(usage, &["prompt_tokens_per_second"]))
+                .flatten()
         })
         .or_else(|| {
             if provider != "Ollama" {
@@ -872,8 +878,10 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         })
         .filter(|speed| *speed > 0.0);
     // How long the request waited for the model to load: mlxtop's own field,
-    // Ollama's `load_duration` (nanoseconds), or LM Studio's
-    // `model_load_time_seconds`, which it sends only after a load.
+    // Ollama's `load_duration` (nanoseconds), LM Studio's
+    // `model_load_time_seconds`, which it sends only after a load, or oMLX's
+    // `model_load_duration` (seconds), which it sends only for a load that
+    // took over a second.
     let load_ms = timings
         .and_then(|timings| counter(timings, &["model_load_ms"]))
         .or_else(|| {
@@ -887,12 +895,12 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
                 .flatten()
         })
         .or_else(|| {
-            (provider == "LM Studio")
-                .then(|| {
-                    request_rate(usage, &["model_load_time_seconds"])
-                        .and_then(native::seconds_to_ms)
-                })
-                .flatten()
+            let seconds = match provider {
+                "LM Studio" => "model_load_time_seconds",
+                "oMLX" => "model_load_duration",
+                _ => return None,
+            };
+            request_rate(usage, &[seconds]).and_then(native::seconds_to_ms)
         });
     let request_timings = (prefill_tps.is_some() || load_ms.is_some())
         .then(|| RequestTiming {

@@ -16,7 +16,9 @@
 //! base unit in the name (`_bytes`, `_seconds`, `_ratio` from 0 to 1,
 //! `_celsius`, `_watts`), `_total` on counters, and a label only where a
 //! value needs one: the runtime and model in `mlxtop_llm_model_info`, the
-//! verdict's state in `mlxtop_bottleneck`, a GPU's index. Request ids and
+//! runtime versions an update went between in
+//! `mlxtop_llm_runtime_update_info`, the verdict's state in
+//! `mlxtop_bottleneck`, a GPU's index. Request ids and
 //! process names never appear. A reading that is unknown is left out, never
 //! written as 0. Each value comes from the `Snapshot` the JSON is written
 //! from; names, like the JSON schema, are experimental through 3.4.
@@ -1056,6 +1058,11 @@ pub(crate) const READINGS: &[Metric<Snapshot>] = &[
         |s| usual(s, "prefill", |usual| usual.slow_below_tok_per_s),
     ),
     gauge(
+        "mlxtop_llm_below_earlier_sessions_ratio",
+        "Estimate: how far generation runs below its usual from earlier sessions at this depth, as a share of it, while this session has no usual of its own for the work",
+        |s| s.earlier_sessions.as_ref()?.below_ratio,
+    ),
+    gauge(
         "mlxtop_llm_slowdown_seconds",
         "Estimate: how long the slowdown under way has lasted",
         |s| s.slowdown.as_ref()?.duration_s,
@@ -1064,6 +1071,34 @@ pub(crate) const READINGS: &[Metric<Snapshot>] = &[
         "mlxtop_llm_stall_seconds",
         "Estimate: how long a stalled answer has gone without a token",
         |s| s.slowdown.as_ref()?.stalled_s,
+    ),
+    gauge(
+        "mlxtop_llm_first_tokens_lost_to_cache_misses_seconds",
+        "Estimate: seconds first tokens lost this session to long prompts read in full right after cached ones, at the usual prefill speed",
+        |s| {
+            s.lost_before_first_tokens
+                .as_ref()
+                .map(|lost| lost.cache_misses_s)
+        },
+    ),
+    gauge(
+        "mlxtop_llm_first_tokens_lost_to_model_loads_seconds",
+        "Estimate: seconds first tokens waited this session for model loads the runtime reported",
+        |s| {
+            s.lost_before_first_tokens
+                .as_ref()
+                .map(|lost| lost.model_loads_s)
+        },
+    ),
+    gauge(
+        "mlxtop_llm_first_tokens_lost_to_overlap_seconds",
+        "Estimate: seconds requests that started beside another writing waited for their first token beyond the median of those that started alone, once the overlap is told; 0 until then",
+        |s| s.lost_before_first_tokens.as_ref().map(|lost| lost.overlap_s),
+    ),
+    gauge(
+        "mlxtop_llm_overlap_told",
+        "Estimate: 1 once this session found that two requests at once gained no throughput and made first tokens wait longer; 0 until then",
+        |s| flag(s.lost_before_first_tokens.as_ref().map(|lost| lost.overlap_told)),
     ),
 ];
 
@@ -1225,6 +1260,23 @@ fn readings(text: &mut Text, snapshot: &Snapshot) {
             GAUGE,
             "The runtime found and the model it serves",
             &[(labels, 1.0)],
+        );
+    }
+    // The update the finding below earlier sessions names, where it names one.
+    if let Some((from, to)) = snapshot.earlier_sessions.as_ref().and_then(|earlier| {
+        earlier
+            .runtime_from
+            .as_deref()
+            .zip(earlier.runtime_to.as_deref())
+    }) {
+        text.family(
+            "mlxtop_llm_runtime_update_info",
+            GAUGE,
+            "Estimate: the runtime update the finding below earlier sessions names: the version their usual was measured on (from) and the one now (to)",
+            &[(
+                format!("{{from=\"{}\",to=\"{}\"}}", label(from), label(to)),
+                1.0,
+            )],
         );
     }
     for metric in READINGS {

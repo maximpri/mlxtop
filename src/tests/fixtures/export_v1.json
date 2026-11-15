@@ -192,6 +192,7 @@
     "work": "1 request · 41.0k context",
     "relative_change": -0.4976
   },
+  "earlier_sessions": null,
   "unusual": [
     {
       "cause": "paging",
@@ -210,5 +211,12 @@
     "samples": 12,
     "stalled_s": null
   },
-  "slowdown_ended": null
+  "slowdown_ended": null,
+  "lost_before_first_tokens": {
+    "source": "estimate",
+    "cache_misses_s": 124.0,
+    "model_loads_s": 6.5,
+    "overlap_s": 40.0,
+    "overlap_told": true
+  }
 }

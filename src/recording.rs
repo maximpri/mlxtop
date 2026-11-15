@@ -2,13 +2,16 @@
 //! Recordings: every sample written as one JSON line while mlxtop runs, and
 //! read back through the same detection engine and Journal. A rule can then
 //! be checked against a real incident instead of a reconstruction, and a
-//! recording can go with a bug report.
+//! recording can go with a bug report. A replay counts what fired: the
+//! slowdowns and stalls by the reason given, and what requests lost before
+//! their first tokens by finding.
 use crate::analysis::CorrelationEngine;
 use crate::collector::Collector;
 use crate::config::{Config, Thresholds};
 use crate::domain::{CorrelationCause, Phase, Sample};
 use crate::formatting::duration_label;
 use crate::host::{Host, Platform};
+use crate::request_findings::STATES;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -92,6 +95,27 @@ pub(crate) struct Tally {
     pub(crate) episodes: usize,
 }
 
+/// How often one finding about what requests lost before their first
+/// tokens was told (a long prompt read in full after a cached one, a model
+/// load, a full KV cache, two at once that bought nothing), and its cost.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Told {
+    /// Its Journal state, and its name in the tally.
+    pub(crate) state: &'static str,
+    pub(crate) name: &'static str,
+    /// The rows the Journal wrote of it.
+    pub(crate) rows: usize,
+    /// Seconds first tokens lost to it, as the session summary counts them;
+    /// none for a full KV cache, whose cost is not counted.
+    pub(crate) lost: Option<f64>,
+}
+
+/// The Journal state and tally name of a finding about what requests lost
+/// before their first tokens, if `state` is one.
+fn before_first_token(state: &str) -> Option<(&'static str, &'static str)> {
+    STATES.into_iter().find(|(known, _)| *known == state)
+}
+
 /// What a recording's samples amount to under today's rules.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Replay {
@@ -106,7 +130,11 @@ pub(crate) struct Replay {
     pub(crate) generating_seconds: f64,
     /// Each reason given for a slowdown or stall, in the order first given.
     pub(crate) tally: Vec<(CorrelationCause, Tally)>,
-    /// Journal rows about the model's speed, with their time.
+    /// Each finding about what requests lost before their first tokens, in
+    /// the order first told.
+    pub(crate) before_first_token: Vec<Told>,
+    /// Journal rows about the model's speed and about what requests lost
+    /// before their first tokens, with their time.
     pub(crate) findings: Vec<(String, String, String)>,
     /// Lines of the file this version could not read as a sample.
     pub(crate) skipped: usize,
@@ -123,6 +151,27 @@ impl Replay {
             }
         };
         &mut self.tally[index].1
+    }
+
+    /// The count of the finding told as `state`, empty until first told.
+    fn told(&mut self, (state, name): (&'static str, &'static str)) -> &mut Told {
+        let index = match self
+            .before_first_token
+            .iter()
+            .position(|told| told.state == state)
+        {
+            Some(index) => index,
+            None => {
+                self.before_first_token.push(Told {
+                    state,
+                    name,
+                    rows: 0,
+                    lost: None,
+                });
+                self.before_first_token.len() - 1
+            }
+        };
+        &mut self.before_first_token[index]
     }
 }
 
@@ -177,10 +226,17 @@ pub(crate) fn replay_with(
             if matches!(event.state.as_str(), "SLOWDOWN" | "STALL") {
                 replay.reason(sample.correlation.cause).episodes += 1;
             }
-            if matches!(
-                event.state.as_str(),
-                "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED" | "SETTLED" | "ENDED"
-            ) {
+            // What requests lost before their first tokens: a row each.
+            let told = before_first_token(&event.state);
+            if let Some(finding) = told {
+                replay.told(finding).rows += 1;
+            }
+            if told.is_some()
+                || matches!(
+                    event.state.as_str(),
+                    "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED" | "SETTLED" | "ENDED"
+                )
+            {
                 replay.findings.push((
                     event.time.clone(),
                     event.state.clone(),
@@ -192,6 +248,9 @@ pub(crate) fn replay_with(
         previous = Some(sample.clone());
     }
     replay.generating_seconds = journal.session.generating;
+    for told in &mut replay.before_first_token {
+        told.lost = journal.session.request_findings.lost_to(told.state);
+    }
     replay
 }
 
@@ -225,6 +284,13 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
         replay.slow_prefill,
         share(replay.slow_prefill, replay.prefilling)
     )?;
+    let per_hour = |count: usize| {
+        if hours > 0.0 {
+            format!("{:.2}", count as f64 / hours)
+        } else {
+            "—".to_owned()
+        }
+    };
     // How often each reason fires: the count a new rule is checked by. The
     // most frequent first.
     if !replay.tally.is_empty() {
@@ -241,25 +307,46 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
             "REASON", "SLOW", "EPISODES", "PER HOUR"
         )?;
         for (cause, tally) in reasons {
-            let per_hour = if hours > 0.0 {
-                format!("{:.2}", tally.episodes as f64 / hours)
-            } else {
-                "—".to_owned()
-            };
             writeln!(
                 out,
                 "{:<26}{:>6}{:>10}{:>10}",
                 cause.label(),
                 tally.samples,
                 tally.episodes,
-                per_hour
+                per_hour(tally.episodes)
             )?;
         }
     }
+    // What requests lost before their first tokens, counted the same way:
+    // the rows the Journal wrote of each finding, those rows per hour of
+    // generation, and the time first tokens lost to it. The most told
+    // first; a stable sort keeps equal counts in the order first told.
+    if !replay.before_first_token.is_empty() {
+        let mut told: Vec<&Told> = replay.before_first_token.iter().collect();
+        told.sort_by_key(|told| std::cmp::Reverse(told.rows));
+        writeln!(
+            out,
+            "{:<26}{:>6}{:>10}{:>10}",
+            "BEFORE FIRST TOKEN", "ROWS", "PER HOUR", "LOST"
+        )?;
+        for told in told {
+            writeln!(
+                out,
+                "{:<26}{:>6}{:>10}{:>10}",
+                told.name,
+                told.rows,
+                per_hour(told.rows),
+                told.lost.map_or_else(|| "—".to_owned(), duration_label)
+            )?;
+        }
+    }
+    // The slowdowns and stalls begun, and the findings before first tokens.
     let started = replay
         .findings
         .iter()
-        .filter(|(_, state, _)| matches!(state.as_str(), "SLOWDOWN" | "STALL"))
+        .filter(|(_, state, _)| {
+            matches!(state.as_str(), "SLOWDOWN" | "STALL") || before_first_token(state).is_some()
+        })
         .count();
     if replay.skipped > 0 {
         writeln!(
@@ -270,8 +357,15 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
         )?;
     }
     writeln!(out, "FINDINGS    {started}")?;
+    // The state column fits the longest state told (`KV CACHE FULL`), and
+    // `RECOVERED` at least.
+    let width = replay
+        .findings
+        .iter()
+        .map(|(_, state, _)| state.chars().count())
+        .fold(9, usize::max);
     for (time, state, summary) in &replay.findings {
-        writeln!(out, "{time}  {state:<9} {summary}")?;
+        writeln!(out, "{time}  {state:<width$} {summary}")?;
     }
     Ok(())
 }
