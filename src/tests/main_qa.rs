@@ -620,3 +620,7 @@ fn the_gpu_panel_edge_adds_power_and_memory_activity_while_it_has_room() {
 // Model facts in Diagnostics, judged as every screen is.
 #[path = "main_qa_model_facts.rs"]
 mod model_facts;
+
+// llama-server's readings in prompt load and Diagnostics, judged as every screen is.
+#[path = "main_qa_llama.rs"]
+mod llama;

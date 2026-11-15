@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
 
+#[path = "provider_llama.rs"]
+pub(crate) mod llama;
 #[path = "provider_native.rs"]
 mod native;
 #[path = "provider_splash.rs"]
 mod splash;
+use llama::LlamaRate;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
 
@@ -714,165 +717,15 @@ impl Adapter {
 
     fn poll_llama(&mut self, now: Instant) -> Option<LlmTelemetry> {
         // Builds from 2026-10 listen on 9931 by default, older ones on 8080.
-        // /health answers whichever monitoring endpoints are disabled.
+        // /health answers whichever monitoring endpoints are disabled, and
+        // never wakes a sleeping server.
         let port = self.answering_port("llama.cpp", "/health");
-        // Either monitoring endpoint may be disabled independently.
-        let slots = self
-            .get(port, "/slots")
-            .and_then(|body| serde_json::from_str::<Value>(&body).ok());
-        let live = self
-            .llama
-            .observe(slots.as_ref().and_then(llama_progress), now);
-        let slots = slots.and_then(|slots| parse_llama_slots(&slots));
-        let metrics = self.get(port, "/metrics");
-        let averages = metrics
-            .as_deref()
-            .and_then(|text| self.llama.averages(text));
-        let mut result = merge_llama_metrics(slots, metrics.as_deref());
-        // The `*_tokens_seconds` gauges average the window since the last
-        // scrape, and each scrape empties it: polled every second they read 0.
-        // The cumulative counters' growth is the average instead.
-        if let (Some(result), Some((generation, prefill))) = (result.as_mut(), averages) {
-            result.generation_tps = generation;
-            result.prefill_tps = prefill;
-        }
-        // The server's own rates average finished requests and stay at zero
-        // through a long first answer; a live rate replaces them while requests run.
-        if let (Some(result), Some(rate)) = (result.as_mut(), live) {
-            result.generation_tps = Some(rate);
-            result.generation_tps_live = true;
-        }
-        result
-    }
-}
-
-/// A slot's output tokens. Newer llama-server builds report `next_token` as a
-/// list with one entry per sequence; older ones as a single object.
-fn slot_decoded(slot: &Value) -> Option<u64> {
-    match slot.get("next_token")? {
-        Value::Array(entries) => entries.iter().try_fold(0_u64, |sum, entry| {
-            sum.checked_add(counter(entry, &["n_decoded"])?)
-        }),
-        _ => counter(slot, &["next_token", "n_decoded"]),
-    }
-}
-
-/// One running request: its slot, its task and its output tokens so far.
-type SlotProgress = (u64, u64, u64);
-
-/// Output tokens of every running request by slot and task, from `/slots`.
-/// `None` when the reply does not have that shape.
-fn llama_progress(slots: &Value) -> Option<Vec<SlotProgress>> {
-    slots
-        .as_array()?
-        .iter()
-        .filter(|slot| slot["is_processing"] == true)
-        .map(|slot| {
-            Some((
-                counter(slot, &["id"])?,
-                counter(slot, &["id_task"])?,
-                slot_decoded(slot)?,
-            ))
-        })
-        .collect()
-}
-
-/// llama-server publishes generation speed only as an average over finished
-/// requests. The live rate is the growth of each running request's output
-/// between two samples; a request counts only when the same slot runs the same
-/// task in both, so a finished or newly started request never reads as speed.
-/// It must also have decoded tokens already in the earlier sample: a slot
-/// still prefilling stays at zero output and is not stalled, and the first
-/// sample after prefill spans prompt time as well.
-#[derive(Default)]
-pub(super) struct LlamaRate {
-    previous: Option<(Vec<SlotProgress>, Instant)>,
-    /// The server's cumulative token and time counters at the last scrape,
-    /// and the averages last computed from them.
-    totals: Option<LlamaTotals>,
-    averages: (Option<f64>, Option<f64>),
-}
-
-/// llama-server's cumulative counters: `*_tokens_total` and the seconds
-/// spent on them. Their growth between two scrapes is the average speed.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct LlamaTotals {
-    predicted: f64,
-    predicted_seconds: f64,
-    prompt: f64,
-    prompt_seconds: f64,
-}
-
-impl LlamaRate {
-    /// The average generation and prefill speeds from the counters' growth,
-    /// held while nothing grows. `None` when the server has no counters.
-    pub(super) fn averages(&mut self, metrics: &str) -> Option<(Option<f64>, Option<f64>)> {
-        let totals = LlamaTotals {
-            predicted: metric(metrics, "llamacpp:tokens_predicted_total")?,
-            predicted_seconds: metric(metrics, "llamacpp:tokens_predicted_seconds_total")?,
-            prompt: metric(metrics, "llamacpp:prompt_tokens_total")?,
-            prompt_seconds: metric(metrics, "llamacpp:prompt_seconds_total")?,
-        };
-        let rate =
-            |tokens: f64, seconds: f64| (tokens > 0.0 && seconds > 0.0).then(|| tokens / seconds);
-        if let Some(old) = self.totals {
-            if totals.predicted < old.predicted || totals.prompt < old.prompt {
-                // A restarted server counts from zero again.
-                self.averages = (None, None);
-            } else {
-                if let Some(speed) = rate(
-                    totals.predicted - old.predicted,
-                    totals.predicted_seconds - old.predicted_seconds,
-                ) {
-                    self.averages.0 = Some(speed);
-                }
-                if let Some(speed) = rate(
-                    totals.prompt - old.prompt,
-                    totals.prompt_seconds - old.prompt_seconds,
-                ) {
-                    self.averages.1 = Some(speed);
-                }
-            }
-        }
-        self.totals = Some(totals);
-        Some(self.averages)
-    }
-}
-
-/// Samples further apart than this measure an average, not the current speed.
-const LLAMA_RATE_SPAN: Duration = Duration::from_secs(30);
-
-impl LlamaRate {
-    pub(super) fn observe(
-        &mut self,
-        current: Option<Vec<SlotProgress>>,
-        now: Instant,
-    ) -> Option<f64> {
-        let Some(current) = current else {
-            self.previous = None;
-            return None;
-        };
-        let rate = self.previous.as_ref().and_then(|(old, at)| {
-            let span = now.checked_duration_since(*at)?;
-            if span.is_zero() || span > rate_span(LLAMA_RATE_SPAN) {
-                return None;
-            }
-            let mut grown = 0_u64;
-            let mut matched = false;
-            for (slot, task, decoded) in &current {
-                let before = old
-                    .iter()
-                    .find(|(s, t, _)| s == slot && t == task)
-                    .map(|(_, _, n)| *n);
-                if let Some(before) = before.filter(|before| *before > 0 && before <= decoded) {
-                    grown = grown.saturating_add(decoded - before);
-                    matched = true;
-                }
-            }
-            matched.then(|| grown as f64 / span.as_secs_f64())
+        let mut llama = std::mem::take(&mut self.llama);
+        let result = llama.poll(now, &|path| self.get(port, path), &|path| {
+            self.get_json(port, path)
         });
-        self.previous = Some((current, now));
-        rate
+        self.llama = llama;
+        result
     }
 }
 
@@ -886,87 +739,6 @@ pub(super) fn first_answering_port(
         .iter()
         .copied()
         .find(|port| matches!(probe(*port), Ok(_) | Err(ProbeIssue::Http(_))))
-}
-
-fn merge_llama_metrics(slots: Option<LlmTelemetry>, metrics: Option<&str>) -> Option<LlmTelemetry> {
-    let Some(metrics) = metrics else {
-        return slots;
-    };
-    let generation = metric(metrics, "llamacpp:predicted_tokens_seconds");
-    let prefill = metric(metrics, "llamacpp:prompt_tokens_seconds");
-    let active = metric_count(metrics, "llamacpp:requests_processing");
-    let waiting = metric_count(metrics, "llamacpp:requests_deferred");
-    if generation.is_none() && prefill.is_none() && active.is_none() && waiting.is_none() {
-        return slots;
-    }
-    let mut result = slots.unwrap_or_else(|| LlmTelemetry {
-        source: TelemetrySource::Live,
-        observed_at: Some(SystemTime::now()),
-        provider: Some("llama.cpp".into()),
-        ..LlmTelemetry::default()
-    });
-    result.generation_tps = generation;
-    result.prefill_tps = prefill;
-    result.active_requests = result.active_requests.or(active);
-    result.waiting_requests = waiting;
-    result.status = Some(
-        match result.active_requests {
-            Some(0) if waiting.unwrap_or(0) == 0 => "idle",
-            Some(_) => "processing",
-            None => "running",
-        }
-        .into(),
-    );
-    Some(result)
-}
-
-fn metric_count(text: &str, name: &str) -> Option<u64> {
-    metric(text, name)
-        .filter(|n| n.fract() == 0.0 && *n < u64::MAX as f64)
-        .map(|n| n as u64)
-}
-
-fn metric(text: &str, name: &str) -> Option<f64> {
-    native::metric_sum(text, name)
-}
-
-fn parse_llama_slots(slots: &Value) -> Option<LlmTelemetry> {
-    let slots = slots.as_array()?;
-    if slots
-        .iter()
-        .any(|slot| slot.get("is_processing").and_then(Value::as_bool).is_none())
-    {
-        return None;
-    }
-    let active: Vec<_> = slots
-        .iter()
-        .filter(|s| s["is_processing"] == true)
-        .collect();
-    Some(LlmTelemetry {
-        source: TelemetrySource::Live,
-        observed_at: Some(SystemTime::now()),
-        provider: Some("llama.cpp".into()),
-        status: Some(
-            if active.is_empty() {
-                "idle"
-            } else {
-                "processing"
-            }
-            .into(),
-        ),
-        active_requests: Some(active.len() as u64),
-        // Sum every active slot, but never present a partial sum as complete.
-        output_tokens: (!active.is_empty())
-            .then(|| {
-                active
-                    .iter()
-                    .try_fold(0_u64, |sum, slot| sum.checked_add(slot_decoded(slot)?))
-            })
-            .flatten(),
-        // n_ctx is capacity, n_decoded is output, and prompt_n is fresh prefill
-        // work. None is a substitute for a full per-request prompt count.
-        ..LlmTelemetry::default()
-    })
 }
 
 fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {

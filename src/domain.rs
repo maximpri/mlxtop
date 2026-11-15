@@ -682,6 +682,8 @@ pub(crate) struct LlmTelemetry {
     pub(crate) mlx: MlxTelemetry,
     /// What the model reads per pass and holds per token and sequence.
     pub(crate) model_facts: crate::model_facts::ModelFacts,
+    /// What llama-server says of its slots, sleep and speculative decoding.
+    pub(crate) llama: crate::providers::llama::LlamaReadings,
 }
 
 /// The recording format samples are written in. 1: each sample carries `ts`
@@ -814,6 +816,9 @@ pub(crate) struct Sample {
     /// counted since it started.
     #[serde(default)]
     pub(crate) llm_preemptions_total: Option<u64>,
+    /// What llama-server says of its slots, sleep and speculative decoding.
+    #[serde(default)]
+    pub(crate) llama: crate::providers::llama::LlamaReadings,
     pub(crate) llm_active_requests: Option<u64>,
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
@@ -1045,6 +1050,7 @@ impl Default for Sample {
             llm_kv_free_tokens: None,
             llm_kv_free_bytes: None,
             llm_preemptions_total: None,
+            llama: Default::default(),
             llm_active_requests: None,
             llm_waiting_requests: None,
             llm_model_memory: None,

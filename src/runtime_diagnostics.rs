@@ -232,6 +232,7 @@ impl RuntimeReport {
             ));
         }
         lines.extend(crate::model_facts::lines(&sample.model));
+        lines.extend(crate::providers::llama::lines(sample));
         for probe in &self.probes {
             lines.push(format!(
                 "{}: {}",
@@ -378,12 +379,12 @@ fn capabilities(provider: &str) -> Vec<Capability> {
             "native / request counters",
         ),
         "llama.cpp" => (
-            "not provided",
-            "native server average",
+            "native /v1/models",
+            "native live slots / server average",
             "native server average",
             "native slots / metrics",
-            "client recorder",
-            "client recorder",
+            "native answering slots / client recorder",
+            "native metrics and slots / client recorder",
         ),
         "KoboldCpp" => (
             "not provided",
@@ -476,7 +477,7 @@ fn capabilities(provider: &str) -> Vec<Capability> {
 fn setup(provider: &str) -> &'static [&'static str] {
     match provider {
         "oMLX" => &["Endpoint: ~/.config/mlxtop/config.json → omx.host / omx.port, or discovered from server.env, OMLX_PORT or ~/.omlx/settings.json (default port 8000).", "Admin statistics need oMLX's API key: read from MLXTOP_PROVIDER_API_KEY, the API key in Settings (4), OMLX_API_KEY, ~/.config/omlx-coding/server.env (API_KEY=) or auth.api_key in ~/.omlx/settings.json. Health alone gives partial monitoring.", "Credentials: https://github.com/maximpri/mlxtop/blob/main/docs/USER_GUIDE.md#omlx-telemetry"],
-        "llama.cpp" => &["Enable the server's --metrics endpoint; /slots and /metrics can work independently.", "Select with MLXTOP_PROVIDER=llama.cpp; mlxtop tries port 9931, then 8080. Set MLXTOP_PROVIDER_PORT for a custom port.", "For full request history, integrate the client usage recorder and set MLXTOP_USAGE_FILE to its JSONL file."],
+        "llama.cpp" => &["Enable the server's --metrics endpoint: mlxtop then reads /slots only while a request runs, so it never wakes a sleeping server or keeps an idle one awake. Without it, each /slots read counts as activity.", "Select with MLXTOP_PROVIDER=llama.cpp; mlxtop tries port 9931, then 8080. Set MLXTOP_PROVIDER_PORT for a custom port.", "For full request history, integrate the client usage recorder and set MLXTOP_USAGE_FILE to its JSONL file."],
         "vLLM" | "SGLang" => &["Expose /metrics (SGLang requires --enable-metrics); rates need two matching counter samples.", "Set MLXTOP_PROVIDER=vllm or MLXTOP_PROVIDER=sglang and MLXTOP_PROVIDER_URL for a custom server root.", "Aggregate first-token timing is not individual request latency; request history requires client recording."],
         "mlx-serve" => &["Start mlx-serve with --metrics; mlxtop reads /metrics for rates and queues and /metrics.json for running requests. Sushi serves the same endpoints under `sushi:` gauge names and needs no flag.", "Select with MLXTOP_PROVIDER=mlx-serve (default port 11234); set MLXTOP_PROVIDER_PORT for a custom port.", "Bearer keys use MLXTOP_PROVIDER_API_KEY. Sessions that only hold a prefix cache are not listed as requests."],
         "Splash" => &["mlxtop reads Splash's /status: running requests, decode and prefill counters, Metal memory and prefix-cache reuse.", "Select with MLXTOP_PROVIDER=splash (default port 8000); set MLXTOP_PROVIDER_PORT to match splash serve --port.", "With splash serve --api-key or SPLASH_API_KEY, set the same key in MLXTOP_PROVIDER_API_KEY."],

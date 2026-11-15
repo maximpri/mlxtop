@@ -326,6 +326,18 @@ model and again only when a file changes, which it checks once a minute. A
 file it cannot read leaves its facts unknown, and a remote oMLX's files are not
 read at all.
 
+For llama.cpp, the facts come from what llama-server says of itself, asked
+every ten seconds through `/v1/models` and `/props`, which never wake a
+sleeping server: the parameters and the size of the weights (so bits per
+weight), the quantization (`Q4_K - Medium`), the context a slot allows and the
+one the model was trained for, whether its slots draft speculatively, and the
+build (`llama.cpp b8240-4f1e2a7`). llama.cpp reports the size of all the
+weights, not what one pass reads (a mixture-of-experts model reads only a few
+experts, and nothing in its API says whether a model is one), and no API gives
+the KV cache's layout or format, so the bytes per pass and KV per token stay
+unknown. The model's name is its alias, or the file name of the path it was
+loaded from.
+
 ## MLX and Metal telemetry
 
 MLX allocator state belongs to the serving process. When an oMLX-compatible
@@ -521,6 +533,19 @@ Qwen3.8-27B through Splash:
 Model: 14.0 GiB read per pass · 4.69 bits per weight, 4/5-bit g64 · 26.9B parameters · draft 3.6 GiB
 Context: KV 32.5 KiB per token, int8 · 152.6 MiB state per sequence · 131.1k tokens allowed of 262.1k trained
 Version: oMLX 0.7.3 · Splash 1.5.0
+```
+
+For llama.cpp it adds what [llama-server](#provider-endpoints) says of its
+slots, each line only while it says something: the context left for the
+running request nearest its limit, a prompt being read, the slots and how
+many shared a decode step, speculative decoding since the server started,
+and whether the server is asleep:
+
+```text
+Context left: 1.8k tokens, for the running request nearest its limit
+Reading a prompt: 12.3k tokens so far, 8.2k of them from the cache
+Slots: 4 · 1.6 busy per decode step since the server started
+Speculative decoding: 3.4 tokens per verify pass, 60% of drafted tokens accepted, since the server started
 ```
 
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
@@ -959,6 +984,8 @@ request disappears between polls, the retained sample is not a final average.
 KoboldCpp supplies `last_eval_speed`. A completed Ollama usage record can supply
 `eval_count` and `eval_duration` (nanoseconds); their ratio yields output tok/s.
 Total request duration and prompt-evaluation duration are not decode timing.
+llama.cpp's live requests come from `/slots` (see Provider endpoints): each
+answering request's own speed is its output's growth between samples.
 
 
 The colored bar chart reads older to newer, with the selected request marked
@@ -1104,7 +1131,7 @@ sessions to monitor independent endpoints concurrently.
 | `lmstudio` or `llmster` | 1234 | `/api/v1/models`, fallback `/api/v0/models`, then `/v1/models` |
 | `vllm` | 8000 | `/metrics` |
 | `sglang` | 30000 | `/metrics` (requires `--enable-metrics`) |
-| `llama.cpp` | 9931, then 8080 | `/slots`, `/metrics` (requires `--metrics`); builds from October 2026 listen on 9931 |
+| `llama.cpp` | 9931, then 8080 | `/metrics` (requires `--metrics`), `/props`, `/v1/models`, and `/slots` only while a request runs; builds from October 2026 listen on 9931 |
 | `koboldcpp` | 5001 | `/api/extra/perf` |
 | `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
 | `splash` | 8000 | `/status` |
@@ -1154,21 +1181,52 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 - **KoboldCpp:** reads `/api/extra/perf` last-result counts and rates. This is not
   a complete request history, and a new active request does not make the previous
   completion's rates live.
-- **llama-server:** reads `/slots`; optional `/metrics` supplies aggregate average
-  rates and active/deferred queue counts when the server starts with `--metrics`.
-  Either endpoint can work independently. Output counts sum all active slots;
+- **llama-server:** reads `/metrics` first, when the server starts with
+  `--metrics`: aggregate average rates, active/deferred queue counts, prompt
+  tokens served from its cache (the KV cache panel's hit rate), how many slots
+  each decode step served on average, and its speculative-decoding counters.
+  It reads `/slots` only while `/metrics` counts a request in flight. A server
+  started with `--sleep-idle-seconds` unloads its model when idle and loads it
+  again for the next request; `/health`, `/props`, `/models` and `/metrics`
+  neither wake it nor count as activity, while every `/slots` read does both. So
+  mlxtop never wakes it, and an idle server it watches can fall asleep.
+  Without `/metrics`, `/slots` is the only window on requests: mlxtop reads it
+  every sample while `/props` says the server is awake, asks `/props` first
+  after any pause, and stops while the server sleeps, rechecking every five
+  seconds; those reads count as activity, so the server sleeps only if it was
+  asleep before mlxtop looked. A sleeping server reads as idle, with
+  `Asleep` in Diagnostics, never as an error; a server whose `/props` says
+  `/slots` is off (`--no-slots`) is never asked for it, since asking would wake
+  it.
+  Output counts sum all active slots;
   if any active slot omits its output count, the total stays unavailable.
   `next_token` is read both as an object and as the per-sequence list newer
   builds return. While requests run, the generation rate is live: the growth of
   each running request's output between samples, counted only when the same
   slot runs the same task in both, so a finished or newly started request never
   reads as speed. A request also counts only once it has started decoding, so a
-  prompt still being processed never reads as 0 tok/s. It needs only `/slots`. The server's `/metrics` rates average
+  prompt still being processed never reads as 0 tok/s. The server's `/metrics` rates average
   finished requests, read zero through a long first answer, and return when the
   server is idle.
-  Slot capacity, processed prefill
-  work and retained context are not treated as full request prompt counts. Use
-  the usage-file integration below for exact completion usage.
+  Each request that has read its prompt and started answering gets its own row
+  in prompt load and Queue, named by its task number as the server's log names
+  it (with `-1`, `-2` after a restart seen while watching): its whole prompt
+  (the tokens taken from the cache plus those computed), its cached share,
+  its output and its own speed. A prompt still being read has no row, since
+  `/slots` does not say how long it is; Diagnostics says how many of its
+  tokens are in so far and how many came from the cache. Diagnostics also
+  gives the context left for the running request nearest its slot's limit
+  (with a unified KV cache, llama-server's default with automatic slots,
+  requests share one pool, so two at once each have less), the slots and how
+  many shared a decode step since the server started, and speculative
+  decoding's tokens per verify pass and accepted share since it started.
+  Tokens per verify pass for the requests that finished since the last
+  sample come from the growth of `spec_decode_num_accepted_tokens_total`
+  over `spec_decode_num_drafts_total`; llama-server adds a request's drafts
+  when it finishes and prints six significant digits, so on a server that
+  has counted millions the figure waits until enough passes are counted to
+  read it to within a hundredth. Use the usage-file integration below for
+  exact completion usage.
 - **Ollama:** `/api/ps` supplies loaded models, summed resident VRAM and a single
   model's configured context capacity. Residency does not establish request
   activity. The native completion recorder preserves decode speed and cached

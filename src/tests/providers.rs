@@ -14,7 +14,7 @@ fn llama_sums_active_slots_without_inventing_missing_output() {
         {"is_processing":true,"next_token":{"n_decoded":8}},
         {"is_processing":false,"next_token":{"n_decoded":999}}
     ]);
-    let result = parse_llama_slots(&slots).unwrap();
+    let result = llama::parse_llama_slots(&slots).unwrap();
     assert_eq!(result.active_requests, Some(2));
     assert_eq!(result.output_tokens, Some(20));
     let sample = Sample {
@@ -23,13 +23,16 @@ fn llama_sums_active_slots_without_inventing_missing_output() {
     };
     assert_eq!(llm_context_tokens(&sample), None);
     slots[1]["next_token"] = json!({});
-    assert_eq!(parse_llama_slots(&slots).unwrap().output_tokens, None);
+    assert_eq!(
+        llama::parse_llama_slots(&slots).unwrap().output_tokens,
+        None
+    );
 }
 
 #[test]
 fn llama_metrics_work_without_slots_and_keep_average_rates() {
     let metrics = "# TYPE llamacpp:requests_processing gauge\nllamacpp:requests_processing 2\nllamacpp:requests_deferred 3\nllamacpp:predicted_tokens_seconds 24.5\nllamacpp:prompt_tokens_seconds 100\n";
-    let result = merge_llama_metrics(None, Some(metrics)).unwrap();
+    let result = llama::merge_llama_metrics(None, Some(metrics)).unwrap();
     assert_eq!(result.active_requests, Some(2));
     assert_eq!(result.waiting_requests, Some(3));
     assert_eq!(result.generation_tps, Some(24.5));
@@ -37,13 +40,15 @@ fn llama_metrics_work_without_slots_and_keep_average_rates() {
     assert!(!result.generation_tps_live);
     assert!(!result.prefill_tps_live);
     assert_eq!(result.prompt_tokens, None);
-    assert!(merge_llama_metrics(None, Some("<html>disabled</html>")).is_none());
-    assert_eq!(metric_count("count 1.5", "count"), None);
-    assert_eq!(metric_count("count -1", "count"), None);
-    assert_eq!(metric_count("count +Inf", "count"), None);
-    let idle = parse_llama_slots(&json!([]));
+    assert!(llama::merge_llama_metrics(None, Some("<html>disabled</html>")).is_none());
+    assert_eq!(llama::metric_count("count 1.5", "count"), None);
+    assert_eq!(llama::metric_count("count -1", "count"), None);
+    assert_eq!(llama::metric_count("count +Inf", "count"), None);
+    let idle = llama::parse_llama_slots(&json!([]));
     assert_eq!(
-        merge_llama_metrics(idle, None).unwrap().active_requests,
+        llama::merge_llama_metrics(idle, None)
+            .unwrap()
+            .active_requests,
         Some(0)
     );
 }
@@ -78,7 +83,9 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         usage_file: Some(path.clone()),
         selected: Some("llama.cpp".into()),
         port: None,
-        cached: parse_llama_slots(&json!([{"is_processing":true,"next_token":{"n_decoded":5}}])),
+        cached: llama::parse_llama_slots(
+            &json!([{"is_processing":true,"next_token":{"n_decoded":5}}]),
+        ),
         next_poll: Instant::now(),
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
@@ -107,36 +114,18 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
 
 #[test]
 fn llama_http_polls_metrics_even_when_slots_are_disabled() {
-    use std::net::TcpListener;
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = thread::spawn(move || {
-        for path in ["/slots", "/metrics"] {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut bytes = [0; 2048];
-            let n = stream.read(&mut bytes).unwrap();
-            assert!(
-                String::from_utf8_lossy(&bytes[..n]).starts_with(&format!("GET {path} HTTP/1.1"))
-            );
-            let (status, body) = if path == "/slots" {
-                (403, "{}")
-            } else {
-                (
-                    200,
-                    "llamacpp:requests_processing 1\nllamacpp:requests_deferred 2\n",
-                )
-            };
-            write!(
-                stream,
-                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        }
-    });
+    // `/metrics` first, then what the server says of itself, then the slots
+    // a request in flight makes worth reading.
+    let (port, server) = serve(vec![
+        reply(
+            "GET /metrics HTTP/1.1",
+            200,
+            "llamacpp:requests_processing 1\nllamacpp:requests_deferred 2\n",
+        ),
+        reply("GET /props HTTP/1.1", 404, "{}"),
+        reply("GET /v1/models HTTP/1.1", 404, "{}"),
+        reply("GET /slots HTTP/1.1", 403, "{}"),
+    ]);
     let mut adapter = Adapter {
         configured: None,
         usage_file: None,
@@ -543,22 +532,22 @@ fn llama_capacity_and_processed_work_are_not_prompt_length() {
     let slots = json!([{"id":0,"id_task":10,"is_processing":true,"n_ctx":65536,
         "timings":{"prompt_n":50},"next_token":{"n_decoded":12}},
         {"id":1,"is_processing":false,"next_token":{"n_decoded":999}}]);
-    let result = parse_llama_slots(&slots).unwrap();
+    let result = llama::parse_llama_slots(&slots).unwrap();
     assert_eq!(result.active_requests, Some(1));
     assert_eq!(result.output_tokens, Some(12));
     assert_eq!(result.prompt_tokens, None);
-    assert!(parse_llama_slots(&json!([{}])).is_none());
-    let idle = parse_llama_slots(&json!([])).unwrap();
+    assert!(llama::parse_llama_slots(&json!([{}])).is_none());
+    let idle = llama::parse_llama_slots(&json!([])).unwrap();
     assert_eq!(idle.active_requests, Some(0));
     assert_eq!(idle.output_tokens, None);
     assert_eq!(
-        metric(
+        llama::metric(
             "llamacpp:predicted_tokens_seconds 25\n",
             "llamacpp:predicted_tokens_seconds"
         ),
         Some(25.0)
     );
-    assert_eq!(metric("rate NaN\n", "rate"), None);
+    assert_eq!(llama::metric("rate NaN\n", "rate"), None);
 }
 
 #[test]
@@ -710,7 +699,7 @@ fn identifiers_accept_numbers_and_reject_structures_or_empty_text() {
 #[test]
 fn llama_metrics_status_follows_processing_and_deferred_counters() {
     let status = |metrics: &str| {
-        merge_llama_metrics(None, Some(metrics))
+        llama::merge_llama_metrics(None, Some(metrics))
             .unwrap()
             .status
             .unwrap()
@@ -726,7 +715,7 @@ fn llama_metrics_status_follows_processing_and_deferred_counters() {
         "running"
     );
     assert_eq!(
-        metric_count(
+        llama::metric_count(
             "llamacpp:requests_processing 1.5\n",
             "llamacpp:requests_processing"
         ),
@@ -959,9 +948,12 @@ fn runtime_report_distinguishes_auth_schema_and_optional_endpoint_failures() {
         assert!(report.probes.iter().any(|p| p.issue == Some(issue.clone())));
         server.join().unwrap();
     }
+    // An idle llama-server is not asked for its slots; what it does not
+    // describe is an optional endpoint missing, not a failure.
     let (port, server) = serve(vec![
-        reply("GET /slots", 404, "{}"),
         reply("GET /metrics", 200, "llamacpp:requests_processing 0\n"),
+        reply("GET /props", 404, "{}"),
+        reply("GET /v1/models", 404, "{}"),
     ]);
     let mut adapter = diagnostic_adapter("llama.cpp", port);
     adapter.selected(None);
@@ -969,6 +961,7 @@ fn runtime_report_distinguishes_auth_schema_and_optional_endpoint_failures() {
     let report = adapter.report();
     assert!(report.connected && !report.failed());
     assert!(report.status().contains("partial"));
+    assert!(!report.probes.iter().any(|probe| probe.path == "/slots"));
     server.join().unwrap();
 }
 
@@ -1108,16 +1101,19 @@ fn llama_slots_read_next_token_as_an_object_or_a_list() {
     let object = json!([{"id":0,"id_task":7,"is_processing":true,"next_token":{"n_decoded":40}}]);
     let list = json!([{"id":0,"id_task":7,"is_processing":true,"next_token":[{"n_decoded":40}]}]);
     for slots in [&object, &list] {
-        assert_eq!(parse_llama_slots(slots).unwrap().output_tokens, Some(40));
-        assert_eq!(llama_progress(slots), Some(vec![(0, 7, 40)]));
+        assert_eq!(
+            llama::parse_llama_slots(slots).unwrap().output_tokens,
+            Some(40)
+        );
+        assert_eq!(llama::llama_progress(slots), Some(vec![(0, 7, 40)]));
     }
     // Idle slots are not running requests; a running slot without a task id
     // cannot be followed between samples.
     let idle = json!([{"id":0,"id_task":7,"is_processing":false,"next_token":[{"n_decoded":40}]}]);
-    assert_eq!(llama_progress(&idle), Some(vec![]));
+    assert_eq!(llama::llama_progress(&idle), Some(vec![]));
     let untracked = json!([{"id":0,"is_processing":true,"next_token":[{"n_decoded":40}]}]);
-    assert_eq!(llama_progress(&untracked), None);
-    assert_eq!(llama_progress(&json!({"error":"disabled"})), None);
+    assert_eq!(llama::llama_progress(&untracked), None);
+    assert_eq!(llama::llama_progress(&json!({"error":"disabled"})), None);
 }
 
 #[test]
@@ -1347,4 +1343,132 @@ llamacpp:prompt_tokens_seconds 0\n"
         rate.averages("llamacpp:predicted_tokens_seconds 12\n"),
         None
     );
+}
+
+#[test]
+fn a_sleeping_llama_server_is_never_asked_for_its_slots() {
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    // A llama-server on a loopback port, answering as llama.cpp v1.0.0 does:
+    // `/props` and `/metrics` while asleep without waking it, while a
+    // `/slots` request wakes it and loads the model again. It counts every
+    // path it is asked for.
+    struct State {
+        sleeping: bool,
+        metrics: bool,
+        processing: u64,
+        asked: Vec<String>,
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let state = Arc::new(Mutex::new(State {
+        sleeping: true,
+        metrics: false,
+        processing: 0,
+        asked: Vec::new(),
+    }));
+    let shared = state.clone();
+    let server = thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = [0; 2048];
+            let n = stream.read(&mut bytes).unwrap_or(0);
+            let request = String::from_utf8_lossy(&bytes[..n]).to_string();
+            let Some(path) = request.split_whitespace().nth(1).map(str::to_owned) else {
+                break;
+            };
+            let mut state = shared.lock().unwrap();
+            state.asked.push(path.clone());
+            let (status, body) = match path.as_str() {
+                "/metrics" if state.metrics => (
+                    "200 OK",
+                    format!(
+                        "llamacpp:requests_processing {}\nllamacpp:requests_deferred 0\n",
+                        state.processing
+                    ),
+                ),
+                "/props" => (
+                    "200 OK",
+                    json!({"default_generation_settings": {"n_ctx": 4096},
+                           "total_slots": 1, "endpoint_slots": true,
+                           "build_info": "b8240-4f1e2a7", "is_sleeping": state.sleeping})
+                    .to_string(),
+                ),
+                "/v1/models" => (
+                    "200 OK",
+                    json!({"object": "list", "data": [{"id": "/models/tiny.gguf",
+                           "meta": {"n_params": 494032768_u64, "size": 397808192_u64,
+                                    "n_ctx": 4096, "n_ctx_train": 32768}}]})
+                    .to_string(),
+                ),
+                "/slots" => {
+                    state.sleeping = false;
+                    (
+                        "200 OK",
+                        json!([{"id": 0, "n_ctx": 4096, "speculative": false,
+                                "is_processing": false}])
+                        .to_string(),
+                    )
+                }
+                _ => (
+                    "501 Not Implemented",
+                    r#"{"error":{"code":501,"type":"not_supported_error"}}"#.into(),
+                ),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let poll = |adapter: &mut Adapter| {
+        adapter.next_poll = Instant::now();
+        adapter.poll()
+    };
+    let slot_reads = || {
+        state
+            .lock()
+            .unwrap()
+            .asked
+            .iter()
+            .filter(|path| *path == "/slots")
+            .count()
+    };
+    // Without `--metrics` and asleep: idle and asleep, not a failure, and
+    // the server sleeps on.
+    let mut adapter = diagnostic_adapter("llama.cpp", port);
+    adapter.selected(None);
+    for _ in 0..5 {
+        let result = poll(&mut adapter).expect("asleep is not a failure");
+        assert!(result.llama.asleep);
+        assert_eq!(result.status.as_deref(), Some("idle"));
+        assert!(!adapter.report().failed());
+    }
+    assert_eq!(slot_reads(), 0, "{:?}", state.lock().unwrap().asked);
+    assert!(state.lock().unwrap().sleeping);
+    // With `--metrics`: asleep while nothing is in flight, and its slots are
+    // read as soon as a request has woken it.
+    state.lock().unwrap().metrics = true;
+    let mut adapter = diagnostic_adapter("llama.cpp", port);
+    adapter.selected(None);
+    for _ in 0..5 {
+        assert!(poll(&mut adapter).unwrap().llama.asleep);
+    }
+    assert_eq!(slot_reads(), 0);
+    assert!(state.lock().unwrap().sleeping);
+    {
+        let mut state = state.lock().unwrap();
+        state.sleeping = false;
+        state.processing = 1;
+    }
+    let busy = poll(&mut adapter).unwrap();
+    assert!(!busy.llama.asleep);
+    assert_eq!(slot_reads(), 1);
+    assert_eq!(busy.model.as_deref(), Some("tiny.gguf"));
+    drop(std::net::TcpStream::connect(("127.0.0.1", port)));
+    server.join().unwrap();
 }
