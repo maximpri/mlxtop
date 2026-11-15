@@ -729,6 +729,8 @@ mod other;
 mod qa;
 #[path = "main_qa_chip_facts.rs"]
 mod qa_chip_facts;
+#[path = "main_qa_context_left.rs"]
+mod qa_context_left;
 #[path = "main_qa_efficiency.rs"]
 mod qa_efficiency;
 #[path = "main_runtimes.rs"]

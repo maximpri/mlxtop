@@ -388,3 +388,7 @@ fn a_connected_omlx_without_a_key_says_what_is_missing() {
         "No live rates: llama.cpp asks for an API key · 4 for Settings"
     );
 }
+
+// The wired-limit trigger, in a file of its own.
+#[path = "diagnosis_wired_limit.rs"]
+mod wired_limit;

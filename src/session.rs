@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 //! What a session amounted to: how long the model worked and where its
 //! requests' time went, how much speed each cause cost, what the prompt
-//! cache saved, and the energy per token. A finding scrolls out of the
-//! window; this keeps the total, so the change worth making is the one at
-//! the top.
-use crate::domain::{CorrelationCause, Phase, Sample};
-use crate::formatting::{compact_tokens, duration_label};
+//! cache saved, the energy per token, and the most memory each model load
+//! took. A finding scrolls out of the window; this keeps the total, so the
+//! change worth making is the one at the top.
+use crate::domain::{CorrelationCause, Phase, Sample, TelemetrySource};
+use crate::formatting::{bytes, compact_tokens, duration_label};
 use crate::request_history::{History, Timing};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::SystemTime;
 
 /// Polls further apart than this were not watched in between.
@@ -19,6 +19,8 @@ pub(crate) struct Session {
     last: Option<SystemTime>,
     /// Seconds between the previous two samples: the poll cadence.
     cadence: f64,
+    /// Each model load's peak memory, kept after the model is unloaded.
+    pub(crate) loads: Loads,
     /// Seconds watched while an answer was being written, or a prompt read.
     pub(crate) generating: f64,
     pub(crate) prefilling: f64,
@@ -42,6 +44,7 @@ impl Session {
     /// Count one sample.
     pub(crate) fn observe(&mut self, sample: &Sample) {
         self.decode.observe(sample);
+        self.loads.observe(sample);
         let now = sample.llm_observed_at.unwrap_or_else(SystemTime::now);
         self.started.get_or_insert(now);
         let seconds = self
@@ -220,6 +223,111 @@ pub(crate) fn lines(
             joules,
             session.joules / 3600.0
         ));
+    }
+    lines.extend(load_lines(&session.loads));
+    lines
+}
+
+/// Model loads remembered, the oldest dropped first.
+const LOADS_KEPT: usize = 8;
+
+/// One model load: the model, the most memory its runtime held while it
+/// was loaded, and the context in flight when it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Load {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    /// The runtime's footprint at its highest (0 until one is read).
+    pub(crate) peak: u64,
+    /// The requests in flight then, and the context they held together.
+    pub(crate) requests: u64,
+    pub(crate) context: Option<u64>,
+}
+
+/// The session's model loads: one for each model the runtime served with
+/// no other in between, oldest first, kept after the model is unloaded.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Loads {
+    pub(crate) loads: VecDeque<Load>,
+    /// Whether the last load is still loaded.
+    pub(crate) loaded: bool,
+}
+
+impl Loads {
+    /// Count one sample. Only the runtime's live telemetry names the model
+    /// it has loaded; a sample without it neither starts nor ends a load,
+    /// nor counts toward its peak. A load ends when the runtime names
+    /// another model or goes away.
+    pub(crate) fn observe(&mut self, sample: &Sample) {
+        if sample.llm_count == 0 && sample.llm_source == TelemetrySource::None {
+            self.loaded = false;
+            return;
+        }
+        let named = sample.llm_source == TelemetrySource::Live
+            && !sample.llm_remote
+            && !matches!(sample.llm_model.as_str(), "" | "not detected")
+            && !matches!(sample.llm_provider.as_str(), "none" | "not detected");
+        if !named {
+            return;
+        }
+        let same = self.loaded
+            && self.loads.back().is_some_and(|load| {
+                load.model == sample.llm_model && load.provider == sample.llm_provider
+            });
+        if !same {
+            if self.loads.len() >= LOADS_KEPT {
+                self.loads.pop_front();
+            }
+            self.loads.push_back(Load {
+                provider: sample.llm_provider.clone(),
+                model: sample.llm_model.clone(),
+                ..Load::default()
+            });
+            self.loaded = true;
+        }
+        let footprint = sample.runtime_memory();
+        if let Some(load) = self.loads.back_mut().filter(|load| footprint > load.peak) {
+            load.peak = footprint;
+            let flight = crate::context_left::in_flight(sample);
+            load.requests = flight.map_or(0, |flight| flight.requests);
+            load.context = flight
+                .filter(|flight| flight.requests > 0)
+                .map(|flight| flight.total);
+        }
+    }
+}
+
+/// Each model load's peak memory, the oldest first: what it took with the
+/// context it then held, so a quant that only fit before its context grew
+/// shows. Loads whose runtime memory was never read are left out.
+fn load_lines(loads: &Loads) -> Vec<String> {
+    let measured: Vec<(usize, &Load)> = loads
+        .loads
+        .iter()
+        .enumerate()
+        .filter(|(_, load)| load.peak > 0)
+        .collect();
+    if measured.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["Peak memory per model load:".to_owned()];
+    let last = loads.loads.len() - 1;
+    for (index, load) in measured {
+        let held = match (load.context, load.requests) {
+            (Some(context), 1) => format!(" with {} tokens of context", compact_tokens(context)),
+            (Some(context), requests) => format!(
+                " with {} tokens of context in {requests} requests",
+                compact_tokens(context)
+            ),
+            (None, _) => String::new(),
+        };
+        // The load still in place; an earlier one may since be unloaded.
+        let now = if index == last && loads.loaded {
+            " · now"
+        } else {
+            ""
+        };
+        lines.push(format!("  {}: {}{held}{now}", load.model, bytes(load.peak)));
     }
     lines
 }

@@ -73,9 +73,12 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   cache is full and whose pressure is normal: a GPU meter of wired memory
   against the GPU wired limit, with what is left under it; a RAM meter of
   what is in use (wired, app, compressed) with file cache as its last
-  segment, and what is left (free plus cache); and a trace of what was left
-  over time, each sample in its pressure colour. Short panels keep the two
-  meters. Without composition counters it is an occupancy area.
+  segment, and what is left (free plus cache); under it, how much more
+  context fits, in tokens per request in flight (`≈37k tokens at 2
+  requests`): a forecast in muted text, never a grade, and the first row to
+  go when rows run short; and a trace of what was left over time, each
+  sample in its pressure colour. Short panels keep the two meters. Without
+  composition counters it is an occupancy area.
   Compression charts compress + decompress traffic (the compressor's size is
   in the memory legend, not repeated as a share of RAM); paging includes the
   swap capacity bar. Prompt history spans two

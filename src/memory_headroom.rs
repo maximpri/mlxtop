@@ -35,6 +35,37 @@ pub(crate) fn left(sizes: [u64; 5]) -> u64 {
     sizes[3].saturating_add(sizes[4])
 }
 
+/// What one pool has left for a model to grow into, as the panel says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Left {
+    /// Free RAM and the file cache the OS gives back on demand.
+    Ram(u64),
+    /// The room under the GPU limit, where that is less.
+    ToLimit(u64),
+    /// GPU memory is past its limit.
+    OverLimit,
+}
+
+/// What is left on a machine whose GPU memory is `memory`: free RAM and
+/// file cache, or on one pool the room under the GPU limit where that is
+/// less. Against the limit counts Metal's own count of GPU memory, else
+/// wired RAM, which bounds it. `None` when the OS reports no composition.
+pub(crate) fn left_for(sample: &Sample, memory: crate::gpu::Memory) -> Option<Left> {
+    segments(sample).map(|sizes| left_of(sample, sizes, memory))
+}
+
+/// `left_for` over RAM's composition, `sizes`.
+fn left_of(sample: &Sample, sizes: [u64; 5], memory: crate::gpu::Memory) -> Left {
+    let ram = left(sizes);
+    let limit = gpu_limit(sample).filter(|_| memory == crate::gpu::Memory::Shared);
+    let limited = sample.gpu_in_use.unwrap_or(sample.wired);
+    match limit {
+        Some(limit) if limited > limit => Left::OverLimit,
+        Some(limit) if limit - limited < ram => Left::ToLimit(limit - limited),
+        _ => Left::Ram(ram),
+    }
+}
+
 /// GPU memory's colour: the colour of wired RAM, which it is the larger
 /// part of on a machine running a model. The header's meter uses it too.
 pub(crate) fn gpu_fill() -> Color {
@@ -212,9 +243,10 @@ fn legend_rows(parts: &[Part], room: usize, rows: usize) -> Option<Vec<Vec<Span<
 }
 
 /// Draw the panel body: one bar of all RAM by what holds it, GPU memory
-/// first; what is left; each part's size; who holds the most; and the same
-/// parts over time. `columns` gives, for a plot of that many columns, each
-/// column's memory. Returns false when the OS reports no composition.
+/// first; what is left, and how much more context fits; each part's size;
+/// who holds the most; and the same parts over time. `columns` gives, for a
+/// plot of that many columns, each column's memory. Returns false when the
+/// OS reports no composition.
 pub(crate) fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -406,22 +438,39 @@ pub(crate) fn draw_for(
         }
     }
 
+    // Who holds it: the runtime's own footprint and the largest other app.
+    let holders = {
+        let runtime = Some(sample.runtime_memory()).filter(|memory| *memory > 0);
+        let mut parts = Vec::new();
+        if let Some(runtime) = runtime.filter(|_| sample.llm_provider != "none") {
+            parts.push(format!("{} {}", sample.llm_provider, bytes(runtime)));
+        }
+        if let Some((name, rss)) = &sample.largest_other {
+            parts.push(format!(
+                "{} {}",
+                crate::formatting::compact_label(name, 22),
+                bytes(*rss)
+            ));
+        }
+        (!parts.is_empty()).then(|| format!("{:<5}by app: {}", "", parts.join(" · ")))
+    };
+    // The same pool over time, where there is width for it and samples.
+    let points = (area.width > AXIS_GUTTER + 2)
+        .then(|| columns(usize::from(area.width - AXIS_GUTTER)))
+        .filter(|points| points.iter().any(Option::is_some));
+
     if detailed && y < bottom {
         // What is left for a model to grow into: free RAM and file cache,
         // or the room under the GPU limit where that is less.
-        let ram_left = left(sizes);
-        let headroom = match limit {
-            Some(limit) if limited > limit => {
-                Span::styled("over the GPU limit", Style::default().fg(RED))
-            }
-            Some(limit) if limit - limited < ram_left => Span::styled(
-                format!("{} to GPU limit", bytes(limit - limited)),
+        let headroom = match left_of(sample, sizes, memory) {
+            Left::OverLimit => Span::styled("over the GPU limit", Style::default().fg(RED)),
+            Left::ToLimit(room) => Span::styled(
+                format!("{} to GPU limit", bytes(room)),
                 Style::default().fg(warning.unwrap_or(tone)),
             ),
-            _ => Span::styled(
-                format!("{} left", bytes(ram_left)),
-                Style::default().fg(tone),
-            ),
+            Left::Ram(room) => {
+                Span::styled(format!("{} left", bytes(room)), Style::default().fg(tone))
+            }
         };
         // How close GPU memory is to its limit, beside what is left. A
         // GPU that shares RAM without a count of its part says so: there
@@ -448,6 +497,8 @@ pub(crate) fn draw_for(
         let beside = |spans: &[Span]| {
             spans.iter().map(Span::width).sum::<usize>() + 1 + headroom.width() <= room
         };
+        // The GPU note's own row, where it does not fit beside what is left.
+        let mut note_row: Option<Span<'static>> = None;
         match gpu_note {
             Some(notes) => {
                 let indented =
@@ -465,18 +516,14 @@ pub(crate) fn draw_for(
                     headroom,
                 );
                 y += 1;
-                // No room beside what is left: a row of its own.
-                if !placed && y < bottom {
-                    let note = notes
-                        .iter()
-                        .find(|note| note.width() <= room)
-                        .cloned()
-                        .unwrap_or_default();
-                    frame.render_widget(
-                        Paragraph::new(Line::from(note)).style(Style::default().bg(PANEL)),
-                        row(y),
+                if !placed {
+                    note_row = Some(
+                        notes
+                            .iter()
+                            .find(|note| note.width() <= room)
+                            .cloned()
+                            .unwrap_or_default(),
                     );
-                    y += 1;
                 }
             }
             // No GPU limit to report: the breakdown sits beside what is
@@ -495,32 +542,85 @@ pub(crate) fn draw_for(
                 }
             }
         }
-        // Each part with its size: the legend is the breakdown.
-        let free_rows = usize::from(bottom.saturating_sub(y));
-        let legend = breakdowns
-            .iter()
-            .find_map(|parts| legend_rows(parts, room, free_rows.min(2)));
-        // Names alone are the last resort: the sizes are the point.
-        let names = || {
-            let parts = breakdowns.last()?;
-            [prefix, 0].into_iter().find_map(|indent| {
-                let mut spans = vec![Span::raw(" ".repeat(indent))];
-                for (index, part) in parts.iter().enumerate() {
-                    spans.push(Span::styled("█", Style::default().fg(part.color)));
-                    spans.push(Span::styled(
-                        format!(
-                            "{}{}",
-                            part.name,
-                            if index + 1 < parts.len() { " " } else { "" }
-                        ),
-                        Style::default().fg(MUTED),
-                    ));
-                }
-                (free_rows >= 1 && spans.iter().map(Span::width).sum::<usize>() <= room)
-                    .then_some(vec![spans])
+        // Each part with its size, in the rows free for it: the legend is
+        // the breakdown. Names alone are the last resort: the sizes are the
+        // point.
+        let legend = |free_rows: usize| -> Vec<Vec<Span<'static>>> {
+            let names = || {
+                let parts = breakdowns.last()?;
+                [prefix, 0].into_iter().find_map(|indent| {
+                    let mut spans = vec![Span::raw(" ".repeat(indent))];
+                    for (index, part) in parts.iter().enumerate() {
+                        spans.push(Span::styled("█", Style::default().fg(part.color)));
+                        spans.push(Span::styled(
+                            format!(
+                                "{}{}",
+                                part.name,
+                                if index + 1 < parts.len() { " " } else { "" }
+                            ),
+                            Style::default().fg(MUTED),
+                        ));
+                    }
+                    (free_rows >= 1 && spans.iter().map(Span::width).sum::<usize>() <= room)
+                        .then_some(vec![spans])
+                })
+            };
+            breakdowns
+                .iter()
+                .find_map(|parts| legend_rows(parts, room, free_rows.min(2)))
+                .or_else(names)
+                .unwrap_or_default()
+        };
+        // What the rows below hold, with the forecast's row or without it.
+        let below = |forecast: bool| -> Option<Below> {
+            let mut at = y;
+            let note = note_row.is_some() && at < bottom;
+            at += u16::from(note);
+            if forecast && at >= bottom {
+                return None;
+            }
+            at += u16::from(forecast);
+            let legend = legend(usize::from(bottom.saturating_sub(at)));
+            at += legend.len() as u16;
+            let holders = holders.is_some() && at + 3 < bottom;
+            at += u16::from(holders);
+            let rows = bottom.saturating_sub(at);
+            let charts = match (&points, dedicated) {
+                (None, _) => 0,
+                (Some(_), _) if rows < 2 => 0,
+                (Some(_), Some(_)) if rows >= 4 => 2,
+                (Some(_), _) => 1,
+            };
+            Some(Below {
+                note,
+                legend,
+                holders,
+                charts,
             })
         };
-        for spans in legend.or_else(names).into_iter().flatten() {
+        // How much more context fits, under what is left. It is the first
+        // row to go: shown only where everything else keeps its rows.
+        let forecast = crate::context_left::forecast_for(sample, memory)
+            .map(|forecast| forecast.label())
+            .filter(|label| Line::from(label.as_str()).width() <= room)
+            .filter(|_| below(true).is_some_and(|with| below(false) == Some(with)));
+        if let Some(label) = forecast {
+            text(
+                frame,
+                row(y),
+                vec![vec![]],
+                Span::styled(label, Style::default().fg(MUTED)),
+            );
+            y += 1;
+        }
+        if let Some(note) = note_row.filter(|_| y < bottom) {
+            frame.render_widget(
+                Paragraph::new(Line::from(note)).style(Style::default().bg(PANEL)),
+                row(y),
+            );
+            y += 1;
+        }
+        for spans in legend(usize::from(bottom.saturating_sub(y))) {
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(Style::default().bg(PANEL)),
                 row(y),
@@ -528,45 +628,24 @@ pub(crate) fn draw_for(
             y += 1;
         }
     }
-    // Who holds it: the runtime's own footprint and the largest other app.
-    if detailed && y + 3 < bottom {
-        let runtime = Some(sample.runtime_memory()).filter(|memory| *memory > 0);
-        let mut parts = Vec::new();
-        if let Some(runtime) = runtime.filter(|_| sample.llm_provider != "none") {
-            parts.push(format!("{} {}", sample.llm_provider, bytes(runtime)));
-        }
-        if let Some((name, rss)) = &sample.largest_other {
-            parts.push(format!(
-                "{} {}",
-                crate::formatting::compact_label(name, 22),
-                bytes(*rss)
-            ));
-        }
-        if !parts.is_empty() {
-            let line = format!("{:<5}by app: {}", "", parts.join(" · "));
-            frame.render_widget(
-                Paragraph::new(crate::formatting::compact_label(
-                    &line,
-                    usize::from(area.width),
-                ))
-                .style(Style::default().fg(MUTED).bg(PANEL)),
-                row(y),
-            );
-            y += 1;
-        }
+    if let Some(line) = holders.filter(|_| detailed && y + 3 < bottom) {
+        frame.render_widget(
+            Paragraph::new(crate::formatting::compact_label(
+                &line,
+                usize::from(area.width),
+            ))
+            .style(Style::default().fg(MUTED).bg(PANEL)),
+            row(y),
+        );
+        y += 1;
     }
     // The same pool over time, against all of RAM: GPU memory, other wired
     // RAM, app and compressed, stacked. A model load or a growing KV cache
     // shows as the GPU band rising, another app as the app band.
     let rows = bottom.saturating_sub(y);
-    if rows < 2 || area.width <= AXIS_GUTTER + 2 {
+    let Some(points) = points.filter(|_| rows >= 2) else {
         return true;
-    }
-    let width = area.width - AXIS_GUTTER;
-    let points = columns(usize::from(width));
-    if points.iter().all(Option::is_none) {
-        return true;
-    }
+    };
     let bands = history_colors();
     // Without a GPU count the wired band is all one colour.
     let wired_color = dim(kind_colors()[0]);
@@ -603,6 +682,16 @@ pub(crate) fn draw_for(
         },
     );
     true
+}
+
+/// What the rows under what is left hold: the GPU note's own row, the
+/// legend, who holds the memory, and how many history charts.
+#[derive(PartialEq)]
+struct Below {
+    note: bool,
+    legend: Vec<Vec<Span<'static>>>,
+    holders: bool,
+    charts: u8,
 }
 
 /// A level over time against `top`: up to four stacked bands per column,

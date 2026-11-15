@@ -193,3 +193,7 @@ fn energy_counts_the_gpus_own_power_where_the_machine_reports_none() {
     assert_eq!(session.joules, 0.0);
     assert_eq!(session.joules_per_token(), None);
 }
+
+// Peak memory per model load, in a file of its own.
+#[path = "session_loads.rs"]
+mod loads;
