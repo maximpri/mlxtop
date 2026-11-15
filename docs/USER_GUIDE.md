@@ -329,6 +329,13 @@ labels that fallback with its age:
 ~/.omlx-coding/logs/launchd.stderr.log
 ```
 
+oMLX logs a request's tokens over the time after its first token, but over
+the whole request, the wait for the first token included, when it recorded no
+first token: an answer that was not streamed, which on one Mac Studio was most
+short requests served through Splash. That figure is no generation speed, so
+the fallback shows a logged rate only when it is clearly faster than the
+request's tokens over its whole time, and leaves `GEN` unknown otherwise.
+
 API credentials are sent only to loopback endpoints by default. To use an
 intentionally remote oMLX endpoint, set `MLXTOP_ALLOW_REMOTE_AUTH=1` and use a
 trusted, protected network path.
@@ -349,8 +356,19 @@ nothing active while the GPU is saturated. When the GPU is busy and oMLX
 tracks no active or waiting request, the status reads **untracked** rather than
 idle, the assessment says `GPU busy outside oMLX's request tracking (oMLX
 benchmark on Splash?) · no live rates`, and prompt load says it is busy outside
-oMLX. Splash's own `/status` needs the key oMLX generates, so mlxtop does not
-read it.
+oMLX.
+
+oMLX starts Splash on a loopback port it picks at each start, with an API key
+it generates and hands to Splash privately, and passes on none of Splash's
+draft counters; Splash answers `/status` only with that key. mlxtop therefore
+cannot see tokens per verify pass, draft acceptance or what held Splash's work
+up for a model oMLX serves through Splash, and Diagnostics says why:
+
+```text
+Draft: tokens per verify pass unknown · oMLX keeps Splash's status private
+```
+
+A Splash run on its own reports all of them (see [Splash](#provider-endpoints)).
 
 ### Model facts
 
@@ -379,14 +397,26 @@ model costs per token and per sequence, and shows it in Diagnostics (`d`):
   each state.
 - **Draft**: Splash always drafts with a DFlash2 checkpoint; its size is shown
   when the draft configured in `dflash_draft_model` fits the model. On oMLX's
-  own engine, the model's MTP head or a DFlash draft, as its settings say.
+  own engine, the model's MTP head, a DFlash draft or a vision model's
+  assistant, as its settings say; a model without settings, or no
+  `model_settings.json` at all, runs on oMLX's defaults, with no draft.
 - **Context** oMLX allows for the model (`/v1/models/status`) and the context
   the model was trained for, and the oMLX and Splash versions.
 
+A Splash run on its own states its model's KV layers, heads, format and cost per
+token, the state each request holds, whether it drafts and the contexts in its
+`/status` memory plan, and mlxtop shows those; it names neither the bytes a pass
+reads nor the parameters.
+
 The model's directory comes from oMLX's `/v1/models/status` and oMLX's version
 from `/api/status`, asked once a minute and sent the same API key as the admin
-login, under the same rules; the per-model settings come from
-`model_settings.json` in oMLX's base directory. mlxtop reads only
+login, under the same rules (the key alone, as a bearer token: no admin
+session); the per-model settings come from `model_settings.json` in oMLX's base
+directory. `/api/status` also names the custom kernels oMLX could not load,
+which leaves the models that use them on much slower generic code, and the
+models whose Neural Engine prefill was shed back to the GPU; for a model on
+oMLX's own engine these lead its runtime details, in Diagnostics and the
+Processes view's engine panel. mlxtop reads only
 `config.json` and the shard headers, never the weights; it reads them once per
 model and again only when a file changes, which it checks once a minute. A
 file it cannot read leaves its facts unknown, and a remote oMLX's files are not
@@ -589,6 +619,7 @@ Qwen3.8-27B through Splash:
 Model: 14.0 GiB read per pass · 4.69 bits per weight, 4/5-bit g64 · 26.9B parameters · draft 3.6 GiB
 Context: KV 32.5 KiB per token, int8 · 152.6 MiB state per sequence · 131.1k tokens allowed of 262.1k trained
 Version: oMLX 0.7.3 · Splash 1.5.0
+Draft: tokens per verify pass unknown · oMLX keeps Splash's status private
 ```
 
 Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
@@ -1520,10 +1551,25 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   output speed from the decode tokens over decode time; concurrent requests share those
   counters and keep their last observed output instead. A request that leaves the
   engine becomes a completed record for prompt load and the Journal, with an exact
-  final output when nothing else was running. The details line leads with problems
+  final output when nothing else was running. With a draft, tokens per verify pass are
+  the draft tokens accepted per pass plus the one each pass adds, between captures:
+  `metrics.accepted_draft_tokens` over the passes in `scheduler.decode_batches_by_width`,
+  a batch of width w being w passes, as Splash's log counts its `tok/cycle`. Fewer than
+  eight passes since the last capture give none. While one request writes alone, prompt
+  load shows them beside its output (`OUT 1,200 · 7.8 tok/pass`). The memory plan gives
+  the [model's facts](#model-facts) (KV layers, heads and format, KV per token, the state
+  each request holds, the context allowed and trained) and the KV room left: the plan's
+  KV pages less those running requests hold, pages that only hold cached prefixes
+  counting as room. Requests suspended for memory (`cache.resource_suspensions`) are
+  counted. The details line leads with problems
   (failed or cancelled requests, Metal health, capacity failures, requests waiting for
   memory, gated SSD cache writes, thermal state, pressure), then TTFT and inter-token
-  p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
+  p50/p95 and Metal headroom. Splash 1.6 also counts what held work up, and the details
+  line says what did since the last capture: requests waiting for more memory and
+  Metal pipelines compiled while serving among the problems, then what paused decoding
+  (`decode paused 3× for prefill (420 ms)`), what held each first token (`first token
+  5.1 s: 3.4 s behind another prefill, 1.2 s own prefill`) and KV moved to or read from
+  the SSD. Splash reports no per-request cached tokens or TTFT.
 - **TensorFold:** detected by the `tensorfold` or `tensorfold-native` executable,
   or selected with `MLXTOP_PROVIDER=tensorfold`. Reads `/metrics` for active/queued requests,
   completion-counter throughput, prefix-cache reuse, KV occupancy and model memory

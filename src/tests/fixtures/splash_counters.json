@@ -1,0 +1,527 @@
+{
+ "note": "Splash 1.5.0 /status counters every 2 s on the owner's server, 2026-11-15 04:18:00-04:19:12 EST, and the Splash log's Done lines for the six requests in that window",
+ "captures": [
+  {
+   "ms": 0,
+   "decode_output_tokens": 6847530,
+   "drafted_tokens": 8583715,
+   "accepted_draft_tokens": 5611796,
+   "decode_batches": 1155499,
+   "by_width": {
+    "b1": 1090106,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 2103,
+   "decode_output_tokens": 6847530,
+   "drafted_tokens": 8583715,
+   "accepted_draft_tokens": 5611796,
+   "decode_batches": 1155499,
+   "by_width": {
+    "b1": 1090106,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 4198,
+   "decode_output_tokens": 6847530,
+   "drafted_tokens": 8583715,
+   "accepted_draft_tokens": 5611796,
+   "decode_batches": 1155499,
+   "by_width": {
+    "b1": 1090106,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 6283,
+   "decode_output_tokens": 6847530,
+   "drafted_tokens": 8583715,
+   "accepted_draft_tokens": 5611796,
+   "decode_batches": 1155499,
+   "by_width": {
+    "b1": 1090106,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 8362,
+   "decode_output_tokens": 6847562,
+   "drafted_tokens": 8583743,
+   "accepted_draft_tokens": 5611824,
+   "decode_batches": 1155503,
+   "by_width": {
+    "b1": 1090110,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 10444,
+   "decode_output_tokens": 6847770,
+   "drafted_tokens": 8583925,
+   "accepted_draft_tokens": 5612006,
+   "decode_batches": 1155530,
+   "by_width": {
+    "b1": 1090137,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 12527,
+   "decode_output_tokens": 6848006,
+   "drafted_tokens": 8584135,
+   "accepted_draft_tokens": 5612212,
+   "decode_batches": 1155560,
+   "by_width": {
+    "b1": 1090167,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9466
+  },
+  {
+   "ms": 14618,
+   "decode_output_tokens": 6848125,
+   "drafted_tokens": 8584247,
+   "accepted_draft_tokens": 5612314,
+   "decode_batches": 1155575,
+   "by_width": {
+    "b1": 1090182,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9467
+  },
+  {
+   "ms": 16722,
+   "decode_output_tokens": 6848125,
+   "drafted_tokens": 8584247,
+   "accepted_draft_tokens": 5612314,
+   "decode_batches": 1155575,
+   "by_width": {
+    "b1": 1090182,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9467
+  },
+  {
+   "ms": 18813,
+   "decode_output_tokens": 6848125,
+   "drafted_tokens": 8584247,
+   "accepted_draft_tokens": 5612314,
+   "decode_batches": 1155575,
+   "by_width": {
+    "b1": 1090182,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9467
+  },
+  {
+   "ms": 20897,
+   "decode_output_tokens": 6848173,
+   "drafted_tokens": 8584289,
+   "accepted_draft_tokens": 5612356,
+   "decode_batches": 1155582,
+   "by_width": {
+    "b1": 1090189,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9467
+  },
+  {
+   "ms": 22983,
+   "decode_output_tokens": 6848440,
+   "drafted_tokens": 8584527,
+   "accepted_draft_tokens": 5612589,
+   "decode_batches": 1155616,
+   "by_width": {
+    "b1": 1090223,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9467
+  },
+  {
+   "ms": 25075,
+   "decode_output_tokens": 6848685,
+   "drafted_tokens": 8584744,
+   "accepted_draft_tokens": 5612803,
+   "decode_batches": 1155646,
+   "by_width": {
+    "b1": 1090253,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9467
+  },
+  {
+   "ms": 27166,
+   "decode_output_tokens": 6848727,
+   "drafted_tokens": 8584786,
+   "accepted_draft_tokens": 5612838,
+   "decode_batches": 1155652,
+   "by_width": {
+    "b1": 1090259,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9468
+  },
+  {
+   "ms": 29270,
+   "decode_output_tokens": 6848727,
+   "drafted_tokens": 8584786,
+   "accepted_draft_tokens": 5612838,
+   "decode_batches": 1155652,
+   "by_width": {
+    "b1": 1090259,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9468
+  },
+  {
+   "ms": 31355,
+   "decode_output_tokens": 6848727,
+   "drafted_tokens": 8584786,
+   "accepted_draft_tokens": 5612838,
+   "decode_batches": 1155652,
+   "by_width": {
+    "b1": 1090259,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9468
+  },
+  {
+   "ms": 33435,
+   "decode_output_tokens": 6848926,
+   "drafted_tokens": 8584961,
+   "accepted_draft_tokens": 5613012,
+   "decode_batches": 1155678,
+   "by_width": {
+    "b1": 1090285,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9468
+  },
+  {
+   "ms": 35528,
+   "decode_output_tokens": 6849182,
+   "drafted_tokens": 8585185,
+   "accepted_draft_tokens": 5613236,
+   "decode_batches": 1155710,
+   "by_width": {
+    "b1": 1090317,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9468
+  },
+  {
+   "ms": 37628,
+   "decode_output_tokens": 6849328,
+   "drafted_tokens": 8585318,
+   "accepted_draft_tokens": 5613362,
+   "decode_batches": 1155728,
+   "by_width": {
+    "b1": 1090335,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9469
+  },
+  {
+   "ms": 39724,
+   "decode_output_tokens": 6849328,
+   "drafted_tokens": 8585318,
+   "accepted_draft_tokens": 5613362,
+   "decode_batches": 1155728,
+   "by_width": {
+    "b1": 1090335,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9469
+  },
+  {
+   "ms": 41817,
+   "decode_output_tokens": 6849328,
+   "drafted_tokens": 8585318,
+   "accepted_draft_tokens": 5613362,
+   "decode_batches": 1155728,
+   "by_width": {
+    "b1": 1090335,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9469
+  },
+  {
+   "ms": 43899,
+   "decode_output_tokens": 6849328,
+   "drafted_tokens": 8585318,
+   "accepted_draft_tokens": 5613362,
+   "decode_batches": 1155729,
+   "by_width": {
+    "b1": 1090336,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9469
+  },
+  {
+   "ms": 45988,
+   "decode_output_tokens": 6849583,
+   "drafted_tokens": 8585549,
+   "accepted_draft_tokens": 5613584,
+   "decode_batches": 1155762,
+   "by_width": {
+    "b1": 1090369,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9469
+  },
+  {
+   "ms": 48074,
+   "decode_output_tokens": 6849826,
+   "drafted_tokens": 8585766,
+   "accepted_draft_tokens": 5613796,
+   "decode_batches": 1155793,
+   "by_width": {
+    "b1": 1090400,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9469
+  },
+  {
+   "ms": 50176,
+   "decode_output_tokens": 6849924,
+   "drafted_tokens": 8585857,
+   "accepted_draft_tokens": 5613880,
+   "decode_batches": 1155805,
+   "by_width": {
+    "b1": 1090412,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9470
+  },
+  {
+   "ms": 52272,
+   "decode_output_tokens": 6849924,
+   "drafted_tokens": 8585857,
+   "accepted_draft_tokens": 5613880,
+   "decode_batches": 1155805,
+   "by_width": {
+    "b1": 1090412,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9470
+  },
+  {
+   "ms": 54375,
+   "decode_output_tokens": 6849924,
+   "drafted_tokens": 8585857,
+   "accepted_draft_tokens": 5613880,
+   "decode_batches": 1155805,
+   "by_width": {
+    "b1": 1090412,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9470
+  },
+  {
+   "ms": 56458,
+   "decode_output_tokens": 6849924,
+   "drafted_tokens": 8585857,
+   "accepted_draft_tokens": 5613880,
+   "decode_batches": 1155805,
+   "by_width": {
+    "b1": 1090412,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9470
+  },
+  {
+   "ms": 58540,
+   "decode_output_tokens": 6850060,
+   "drafted_tokens": 8585976,
+   "accepted_draft_tokens": 5613999,
+   "decode_batches": 1155823,
+   "by_width": {
+    "b1": 1090430,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9470
+  },
+  {
+   "ms": 60633,
+   "decode_output_tokens": 6850316,
+   "drafted_tokens": 8586200,
+   "accepted_draft_tokens": 5614223,
+   "decode_batches": 1155855,
+   "by_width": {
+    "b1": 1090462,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9470
+  },
+  {
+   "ms": 62732,
+   "decode_output_tokens": 6850518,
+   "drafted_tokens": 8586382,
+   "accepted_draft_tokens": 5614398,
+   "decode_batches": 1155880,
+   "by_width": {
+    "b1": 1090487,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9471
+  },
+  {
+   "ms": 64837,
+   "decode_output_tokens": 6850518,
+   "drafted_tokens": 8586382,
+   "accepted_draft_tokens": 5614398,
+   "decode_batches": 1155880,
+   "by_width": {
+    "b1": 1090487,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9471
+  },
+  {
+   "ms": 66934,
+   "decode_output_tokens": 6850518,
+   "drafted_tokens": 8586382,
+   "accepted_draft_tokens": 5614398,
+   "decode_batches": 1155880,
+   "by_width": {
+    "b1": 1090487,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9471
+  },
+  {
+   "ms": 69034,
+   "decode_output_tokens": 6850547,
+   "drafted_tokens": 8586410,
+   "accepted_draft_tokens": 5614422,
+   "decode_batches": 1155884,
+   "by_width": {
+    "b1": 1090491,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9472
+  },
+  {
+   "ms": 71134,
+   "decode_output_tokens": 6850547,
+   "drafted_tokens": 8586410,
+   "accepted_draft_tokens": 5614422,
+   "decode_batches": 1155884,
+   "by_width": {
+    "b1": 1090491,
+    "b2": 59454,
+    "b3": 5633,
+    "b4": 306
+   },
+   "completed": 9472
+  }
+ ],
+ "done": [
+  {
+   "at": "04:18:14",
+   "output": 595,
+   "tok_per_cycle": 7.8
+  },
+  {
+   "at": "04:18:26",
+   "output": 602,
+   "tok_per_cycle": 7.8
+  },
+  {
+   "at": "04:18:37",
+   "output": 601,
+   "tok_per_cycle": 7.9
+  },
+  {
+   "at": "04:18:49",
+   "output": 596,
+   "tok_per_cycle": 7.7
+  },
+  {
+   "at": "04:19:02",
+   "output": 594,
+   "tok_per_cycle": 7.9
+  },
+  {
+   "at": "04:19:08",
+   "output": 29,
+   "tok_per_cycle": 7.0
+  }
+ ]
+}

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! Splash: one `/status` JSON carries the running requests, the engine's token counters, Metal
-//! memory and the Mac's thermal state. No inference requests.
+//! memory, its memory plan and the Mac's thermal state. No inference requests.
 use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
-use crate::formatting::bytes;
+use crate::formatting::{bytes, duration_label};
 use crate::json::json_value;
+use crate::model_facts::ModelFacts;
 use crate::providers::{counter, identifier};
 use serde_json::Value;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,6 +13,10 @@ use std::time::{Duration, Instant, SystemTime};
 const PREFILL_HOLD: Duration = Duration::from_secs(3);
 /// Counters further apart than this are not a current rate.
 const MAX_RATE_SPAN: Duration = Duration::from_secs(30);
+/// Fewer verify passes than this between two captures say too little about the draft: the
+/// engine counts a pass and its tokens a moment apart, so one pass on the other side of a
+/// capture moves the average of eight by an eighth.
+const MIN_PASSES: u64 = 8;
 
 /// The engine's cumulative counters at the moment its status was captured.
 #[derive(Clone)]
@@ -28,6 +33,11 @@ struct Counters {
     /// model has a draft.
     drafted: Option<u64>,
     accepted: Option<u64>,
+    /// Verify passes: a decode batch verifies a draft block for each request in it, so a batch
+    /// of width w is w passes. Each pass emits the draft tokens it accepted and one more.
+    passes: Option<u64>,
+    /// What held decoding and first tokens up, where the engine counts it.
+    holdups: Holdups,
 }
 
 impl Counters {
@@ -48,7 +58,277 @@ impl Counters {
                 .filter(|ms| ms.is_finite() && *ms >= 0.0)?,
             drafted: counter(status, &["metrics", "drafted_tokens"]),
             accepted: counter(status, &["metrics", "accepted_draft_tokens"]),
+            passes: passes(status),
+            holdups: Holdups::read(status),
         })
+    }
+
+    /// Tokens a verify pass emitted between two captures: the draft tokens it accepted and
+    /// the one it adds. Unknown without a draft, and over too few passes to say.
+    fn tokens_per_pass(&self, old: &Self) -> Option<f64> {
+        let passes = self.passes?.checked_sub(old.passes?)?;
+        let drafted = self.drafted?.checked_sub(old.drafted?)?;
+        let accepted = self.accepted?.checked_sub(old.accepted?)?;
+        (passes >= MIN_PASSES && accepted <= drafted).then(|| 1.0 + accepted as f64 / passes as f64)
+    }
+
+    /// The share of draft tokens accepted between two captures: what speculative decoding is
+    /// earning now, not over the engine's life.
+    fn acceptance(&self, old: &Self) -> Option<f64> {
+        let drafted = self.drafted?.checked_sub(old.drafted?)?;
+        let accepted = self.accepted?.checked_sub(old.accepted?)?;
+        (drafted > 0 && accepted <= drafted).then(|| accepted as f64 / drafted as f64)
+    }
+}
+
+/// Verify passes since the engine started, from its decode batches by width (`b1`, `b2`, …).
+/// A width it does not name leaves them unknown rather than undercounted.
+fn passes(status: &Value) -> Option<u64> {
+    let widths = json_value(status, &["scheduler", "decode_batches_by_width"])?.as_object()?;
+    widths
+        .iter()
+        .map(|(width, batches)| {
+            let width: u64 = width.strip_prefix('b')?.parse().ok()?;
+            width.checked_mul(batches.as_u64()?)
+        })
+        .try_fold(None, |total: Option<u64>, passes| {
+            Some(Some(total.unwrap_or(0).checked_add(passes?)?))
+        })
+        .flatten()
+}
+
+/// What held work up, as Splash counts it since its engine started (1.6): decode gaps past
+/// the scheduler's target by their first cause, each request's wait for its first token by
+/// what held it, kernel pipelines Metal created while serving, and KV kept on the SSD.
+#[derive(Clone, Default)]
+struct Holdups {
+    /// Each cause's gaps and their milliseconds.
+    gaps: Vec<(String, u64, f64)>,
+    /// Each part's milliseconds over all first tokens, and how many first tokens.
+    first_token: Vec<(String, f64)>,
+    first_tokens: Option<u64>,
+    pipelines: Option<u64>,
+    /// Releases of a spilling request's pages for a memory claim, and the KV history streams'
+    /// bytes read with the milliseconds the reads took.
+    spill_releases: Option<u64>,
+    spill_read: Option<(u64, f64)>,
+}
+
+impl Holdups {
+    fn read(status: &Value) -> Self {
+        let entries = |path: &[&str]| {
+            json_value(status, path)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        let millis = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_f64)
+                .filter(|ms| ms.is_finite() && *ms >= 0.0)
+        };
+        let parts = entries(&["metrics", "ttft_parts_ms"]);
+        let read_ms = json_value(status, &["kv_spill", "history_stream", "read_ms"])
+            .and_then(|ms| millis(Some(ms)).or_else(|| millis(ms.get("total"))));
+        Self {
+            gaps: entries(&["metrics", "decode_gap_causes"])
+                .into_iter()
+                .filter_map(|(cause, counts)| {
+                    Some((
+                        cause.clone(),
+                        counts.get("gaps")?.as_u64()?,
+                        millis(counts.get("ms"))?,
+                    ))
+                })
+                .collect(),
+            first_token: parts
+                .iter()
+                .filter_map(|(part, shape)| Some(((*part).clone(), millis(shape.get("total"))?)))
+                .collect(),
+            first_tokens: parts
+                .iter()
+                .filter_map(|(_, shape)| shape.get("samples")?.as_u64())
+                .max(),
+            pipelines: counter(status, &["metal", "pipelines_created_while_serving"]),
+            spill_releases: counter(status, &["kv_spill", "releases"]),
+            spill_read: counter(status, &["kv_spill", "history_stream", "bytes"]).zip(read_ms),
+        }
+    }
+
+    /// What held work up between two captures, in words: the problems, then the rest.
+    fn since(&self, old: &Self) -> Said {
+        let grown = |now: Option<u64>, then: Option<u64>| {
+            now?.checked_sub(then?).filter(|grown| *grown > 0)
+        };
+        let mut said = Said::default();
+        if let Some(n) = grown(self.pipelines, old.pipelines) {
+            let noun = if n == 1 { "pipeline" } else { "pipelines" };
+            said.problems
+                .push(format!("{n} Metal {noun} compiled while serving"));
+        }
+        let mut gaps: Vec<(&str, u64, f64)> = self
+            .gaps
+            .iter()
+            .filter_map(|(cause, gaps, ms)| {
+                let (_, old_gaps, old_ms) = old.gaps.iter().find(|(old, ..)| old == cause)?;
+                Some((
+                    cause_name(cause)?,
+                    grown(Some(*gaps), Some(*old_gaps))?,
+                    (ms - old_ms).max(0.0),
+                ))
+            })
+            .collect();
+        gaps.sort_by(|a, b| b.2.total_cmp(&a.2));
+        if !gaps.is_empty() {
+            let gaps: Vec<String> = gaps
+                .iter()
+                .map(|(cause, n, ms)| format!("{n}× for {cause} ({})", millis_label(*ms)))
+                .collect();
+            said.notes
+                .push(format!("decode paused {}", gaps.join(", ")));
+        }
+        if let Some(count) = grown(self.first_tokens, old.first_tokens) {
+            let mut parts: Vec<(&str, f64)> = self
+                .first_token
+                .iter()
+                .filter_map(|(part, total)| {
+                    let (_, old_total) = old.first_token.iter().find(|(old, _)| old == part)?;
+                    Some((
+                        part_name(part)?,
+                        (total - old_total).max(0.0) / count as f64,
+                    ))
+                })
+                .collect();
+            let whole: f64 = parts.iter().map(|(_, ms)| ms).sum();
+            // A part under a twentieth of the wait explains none of it.
+            parts.retain(|(_, ms)| *ms >= whole / 20.0 && *ms >= 1.0);
+            parts.sort_by(|a, b| b.1.total_cmp(&a.1));
+            if !parts.is_empty() {
+                let head = if count == 1 {
+                    format!("first token {}", millis_label(whole))
+                } else {
+                    format!("{count} first tokens, {} each", millis_label(whole))
+                };
+                let parts: Vec<String> = parts
+                    .iter()
+                    .map(|(part, ms)| format!("{} {part}", millis_label(*ms)))
+                    .collect();
+                said.notes.push(format!("{head}: {}", parts.join(", ")));
+            }
+        }
+        if let Some(n) = grown(self.spill_releases, old.spill_releases) {
+            said.notes
+                .push(format!("KV released to the SSD {n}× for memory"));
+        }
+        if let Some(((now, now_ms), (then, then_ms))) = self.spill_read.zip(old.spill_read) {
+            let read = now.checked_sub(then).filter(|read| *read > 0);
+            if let Some(read) = read.filter(|_| now_ms > then_ms) {
+                let rate = read as f64 * 1000.0 / (now_ms - then_ms);
+                said.notes
+                    .push(format!("KV read from the SSD at {}/s", bytes(rate as u64)));
+            }
+        }
+        said
+    }
+}
+
+/// What a decode gap's first cause is called, for the causes Splash documents.
+fn cause_name(cause: &str) -> Option<&'static str> {
+    Some(match cause {
+        "prefill_unit" => "prefill",
+        "claim_wait" => "memory",
+        "ssd_read" => "SSD reads",
+        "pool_release" => "pool releases",
+        "replan" => "replans",
+        "other" => "other work",
+        _ => return None,
+    })
+}
+
+/// What held a first token, for the parts Splash documents.
+fn part_name(part: &str) -> Option<&'static str> {
+    Some(match part {
+        "own_prefill" => "own prefill",
+        "claim_wait" => "waiting for memory",
+        "decode" => "behind decoding",
+        "other_prefill" => "behind another prefill",
+        "rest" => "host and queue",
+        _ => return None,
+    })
+}
+
+fn millis_label(ms: f64) -> String {
+    if ms >= 1000.0 {
+        format!("{:.1} s", ms / 1000.0)
+    } else {
+        format!("{ms:.0} ms")
+    }
+}
+
+/// Words about the engine: what is wrong, which leads, and what explains its speed.
+#[derive(Clone, Default)]
+struct Said {
+    problems: Vec<String>,
+    notes: Vec<String>,
+}
+
+/// The room Splash's memory plan has left for KV cache: the pages it planned for KV, less
+/// those running requests hold, in bytes and in tokens. Pages that only hold cached prefixes
+/// count as room, since cached blocks give way to running requests; the memory governor's
+/// headroom would not, as it counts the caches grown into its budget as spent. Windowed and
+/// spilling targets count their pages otherwise, so their room is unknown.
+fn kv_room(status: &Value) -> Option<(u64, u64)> {
+    let budget = json_value(status, &["memory_plan", "budget"])?;
+    let present = |field: &str| budget.get(field).is_some_and(|value| !value.is_null());
+    if present("kv_window")
+        || present("kv_spill")
+        || json_value(status, &["memory_plan", "valid"]).and_then(Value::as_bool) == Some(false)
+    {
+        return None;
+    }
+    let free = counter(budget, &["kv_capacity_pages"])?
+        .saturating_sub(counter(status, &["kv", "pages_active"])?);
+    let page_bytes = counter(budget, &["kv_page_bytes"]).filter(|bytes| *bytes > 0)?;
+    let page_tokens = counter(budget, &["kv_page_tokens"]).filter(|tokens| *tokens > 0)?;
+    free.checked_mul(page_bytes)
+        .zip(free.checked_mul(page_tokens))
+}
+
+/// The served model as Splash's memory plan states it: the layers that keep KV, their format
+/// and cost per token, the state each request holds whatever its length, the contexts and the
+/// draft. Splash names neither the weights a pass reads nor the parameters.
+fn splash_facts(status: &Value) -> ModelFacts {
+    let model = |path: &[&str]| {
+        json_value(status, &["memory_plan", "model"]).and_then(|model| json_value(model, path))
+    };
+    let number = |path: &[&str]| model(path).and_then(Value::as_u64);
+    let small = |path: &[&str]| {
+        number(path)
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+    };
+    let page = number(&["kv_page_bytes"])
+        .filter(|bytes| *bytes > 0)
+        .zip(number(&["kv_page_tokens"]).filter(|tokens| *tokens > 0));
+    ModelFacts {
+        kv_layers: small(&["attention_layers"]),
+        kv_heads: small(&["kv_heads"]),
+        head_dim: small(&["head_dimension"]),
+        kv_dtype: model(&["kv_format"])
+            .and_then(Value::as_str)
+            .map(sanitized)
+            .filter(|format| !format.is_empty()),
+        kv_bytes_per_token_reported: page
+            .map(|(bytes, tokens)| (bytes as f64 / tokens as f64).round() as u64),
+        // One request's state cell, which Splash stages whole.
+        fixed_state_bytes: number(&["memory", "state_staging_bytes"]),
+        context_configured: counter(status, &["capabilities", "max_context_tokens"])
+            .or_else(|| counter(status, &["maximum_context_tokens"]))
+            .filter(|tokens| *tokens > 0),
+        context_trained: number(&["maximum_context_tokens"]).filter(|tokens| *tokens > 0),
+        draft: number(&["memory", "draft_weights_bytes"]).map(|bytes| bytes > 0),
+        ..ModelFacts::default()
     }
 }
 
@@ -56,6 +336,10 @@ impl Counters {
 pub(super) struct SplashHistory {
     previous: Option<Counters>,
     generation: Option<f64>,
+    tokens_per_pass: Option<f64>,
+    acceptance: Option<f64>,
+    /// What held work up over the last interval.
+    holdups: Said,
     /// The latest prefill speed and when it was measured.
     prefill: Option<(f64, Instant)>,
     /// When the prefills under way began to be seen.
@@ -85,8 +369,7 @@ impl SplashHistory {
         self.prefilling_since = prefilling.then(|| self.prefilling_since.unwrap_or(now));
         let Some(current) = counters else {
             self.previous = None;
-            self.generation = None;
-            self.prefill = None;
+            self.forget();
             return Rates::default();
         };
         match &self.previous {
@@ -100,6 +383,9 @@ impl SplashHistory {
             {
                 let seconds = current.at.duration_since(old.at).as_secs_f64();
                 self.generation = Some((current.decoded - old.decoded) as f64 / seconds);
+                self.tokens_per_pass = current.tokens_per_pass(old);
+                self.acceptance = current.acceptance(old);
+                self.holdups = current.holdups.since(&old.holdups);
                 // Prefill tokens over the prefill commands' own GPU time: the counters move once per
                 // chunk, so dividing by the poll interval would read 0 or a multiple of the speed.
                 let tokens = (current.prefilled - old.prefilled) as f64;
@@ -110,8 +396,7 @@ impl SplashHistory {
                 self.previous = Some(current);
             }
             _ => {
-                self.generation = None;
-                self.prefill = None;
+                self.forget();
                 self.previous = Some(current);
             }
         }
@@ -130,7 +415,19 @@ impl SplashHistory {
         Rates {
             generation: Some(generation),
             prefill,
+            tokens_per_pass: self.tokens_per_pass,
+            acceptance: self.acceptance,
+            holdups: self.holdups.clone(),
         }
+    }
+
+    /// No interval to measure over: what the last one gave goes.
+    fn forget(&mut self) {
+        self.generation = None;
+        self.prefill = None;
+        self.tokens_per_pass = None;
+        self.acceptance = None;
+        self.holdups = Said::default();
     }
 
     /// Each running request's own output speed while it decodes alone, and a completed record for
@@ -259,19 +556,8 @@ impl SplashHistory {
             .unwrap_or(Duration::ZERO);
         let captured = now.checked_sub(age).unwrap_or(now);
         let counters = Counters::read(status, captured);
-        // The share of draft tokens accepted since the last capture: what
-        // speculative decoding is earning now, not over the engine's life.
-        let draft_acceptance = self
-            .previous
-            .as_ref()
-            .zip(counters.as_ref())
-            .filter(|(before, now)| before.engine == now.engine)
-            .and_then(|(before, now)| {
-                let drafted = now.drafted?.checked_sub(before.drafted?)?;
-                let accepted = now.accepted?.checked_sub(before.accepted?)?;
-                (drafted > 0 && accepted <= drafted).then(|| accepted as f64 / drafted as f64)
-            });
         let rates = self.rates(counters.clone(), prefilling > 0, now);
+        let (kv_free_bytes, kv_free_tokens) = kv_room(status).unzip();
 
         let mut result = LlmTelemetry {
             source: TelemetrySource::Live,
@@ -288,7 +574,14 @@ impl SplashHistory {
             model_memory: counter(status, &["memory_actual", "current_bytes"]),
             model_memory_max: counter(status, &["memory_governor", "limit_bytes"])
                 .filter(|limit| *limit > 0),
-            draft_acceptance,
+            draft_acceptance: rates.acceptance,
+            tokens_per_pass: rates.tokens_per_pass,
+            kv_free_bytes,
+            kv_free_tokens,
+            // Requests suspended for want of memory, to resume later by computing their
+            // tokens again.
+            preemptions_total: counter(status, &["cache", "resource_suspensions"]),
+            model_facts: splash_facts(status),
             ..LlmTelemetry::default()
         };
 
@@ -379,12 +672,23 @@ impl SplashHistory {
         if let Some(n) = count(&["admission", "waiting_memory"]) {
             problems.push(format!("{n} waiting for memory"));
         }
+        // Running requests whose memory claims wait to grow: the oldest's wait, and what they
+        // lack.
+        if let Some(n) = count(&["memory_governor", "claims", "waiting"]) {
+            let wait = count(&["memory_governor", "claims", "oldest_ms"])
+                .map(|ms| format!(" {}", duration_label(ms as f64 / 1000.0)))
+                .unwrap_or_default();
+            let lack = count(&["memory_governor", "claims", "bytes"])
+                .map(|lack| format!(" {}", bytes(lack)))
+                .unwrap_or_default();
+            problems.push(format!("{n} waiting{wait} for{lack} more memory"));
+        }
+        problems.extend(rates.holdups.problems);
         if let Some(gate) = text(&["disk", "writes_gated"]).filter(|gate| *gate != "no") {
             problems.push(format!("SSD cache writes gated ({})", sanitized(gate)));
         }
-        if let Some(context) = counter(status, &["maximum_context_tokens"]).filter(|n| *n > 0) {
-            details.push(format!("context capacity {context} tokens"));
-        }
+        // What held this interval's decoding and first tokens up, before the percentiles.
+        details.extend(rates.holdups.notes);
         if let Some(rate) = json_value(status, &["metrics", "draft_acceptance_rate"])
             .and_then(Value::as_f64)
             .filter(|rate| (0.0..=1.0).contains(rate))
@@ -430,11 +734,15 @@ impl SplashHistory {
     }
 }
 
+/// What the counters said over the last interval.
 #[derive(Default)]
 struct Rates {
     generation: Option<f64>,
     /// The speed and whether a prefill is under way or the reading is otherwise current.
     prefill: Option<(f64, bool)>,
+    tokens_per_pass: Option<f64>,
+    acceptance: Option<f64>,
+    holdups: Said,
 }
 
 fn phase(request: &Value) -> &str {

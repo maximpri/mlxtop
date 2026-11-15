@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! oMLX monitoring, login, endpoint discovery and telemetry normalization.
 use crate::config::{Config, DEFAULT_OMLX_HOST, DEFAULT_OMLX_PORT};
-use crate::domain::{LlmTelemetry, MlxTelemetry, SsdCache, TelemetrySource};
+use crate::domain::{LlmTelemetry, MlxTelemetry, RequestUsage, Sample, SsdCache, TelemetrySource};
 use crate::host::Host;
 use crate::json::{
     gib_to_bytes, json_f64, json_f64_key, json_string, json_string_paths_or_keys, json_u64,
@@ -298,6 +298,14 @@ impl LlmTelemetryClient {
         );
         telemetry.model_facts =
             self.model_facts(telemetry.model.as_deref(), stats.as_ref(), refresh);
+        telemetry.details = telemetry.model.as_deref().and_then(|id| {
+            let splash = self
+                .models
+                .status
+                .iter()
+                .any(|status| status.id == id && status.engine.as_deref() == Some("splash"));
+            self.models.server.slowing(id, splash)
+        });
         telemetry.observed_at = Some(SystemTime::now());
         Some(telemetry)
     }
@@ -329,11 +337,13 @@ impl LlmTelemetryClient {
             if let Some(status) = self.fetch_api_json("/v1/models/status") {
                 self.models.status = parse_models_status(&status);
             }
-            if let Some(version) = self
-                .fetch_api_json("/api/status")
-                .and_then(|status| json_string(&status, &["version"]))
-            {
-                self.models.version = Some(printable(&version));
+            if let Some(status) = self.fetch_api_json("/api/status") {
+                // A server that stops naming its version keeps the one it gave.
+                let server = ServerStatus::parse(&status);
+                self.models.server = ServerStatus {
+                    version: server.version.or(self.models.server.version.take()),
+                    ..server
+                };
             }
         }
         // A remote oMLX names files on its own machine, not this one.
@@ -383,7 +393,7 @@ impl LlmTelemetryClient {
             model_settings: model_settings.as_ref(),
             model: model.as_ref(),
             draft: draft.as_ref(),
-            version: self.models.version.as_deref(),
+            version: self.models.server.version.as_deref(),
             loaded: Some(loaded),
         })
     }
@@ -1139,12 +1149,66 @@ pub(crate) struct OmlxModels {
     pub(crate) settings: OmlxSettings,
     /// `/v1/models/status`.
     pub(crate) status: Vec<ModelStatus>,
-    /// oMLX's own version, from `/api/status`.
-    pub(crate) version: Option<String>,
+    /// `/api/status`.
+    pub(crate) server: ServerStatus,
     model_settings: Option<SettingsFile>,
     files: ModelFiles,
     /// The model the status was last asked for between metadata polls.
     asked: Option<String>,
+}
+
+/// What oMLX's `/api/status`, which takes the API key alone, adds to its admin statistics: its
+/// version, and what slows its own engine. A native kernel it could not load leaves the models
+/// that use it on much slower generic code; a model whose Neural Engine prefill was shed reads
+/// its prompts on the GPU alone. The import errors themselves are not kept.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ServerStatus {
+    pub(crate) version: Option<String>,
+    pub(crate) missing_kernels: Vec<String>,
+    pub(crate) shed_prefill: Vec<String>,
+}
+
+impl ServerStatus {
+    pub(crate) fn parse(status: &Value) -> Self {
+        let kernels = status.get("custom_kernels").and_then(Value::as_object);
+        let models = status
+            .pointer("/ane_prefill/models")
+            .and_then(Value::as_array);
+        Self {
+            version: json_string(status, &["version"]).map(|version| printable(&version)),
+            missing_kernels: kernels
+                .into_iter()
+                .flatten()
+                .filter(|(_, kernel)| {
+                    kernel.get("available").and_then(Value::as_bool) == Some(false)
+                })
+                .map(|(name, _)| printable(name))
+                .collect(),
+            shed_prefill: models
+                .into_iter()
+                .flatten()
+                .filter(|model| model.get("shed").and_then(Value::as_bool) == Some(true))
+                .filter_map(|model| json_string(model, &["model_id"]))
+                .map(|id| printable(&id))
+                .collect(),
+        }
+    }
+
+    /// What slows the model oMLX serves, in words; `splash` when Splash runs it, on kernels
+    /// of its own.
+    pub(crate) fn slowing(&self, model: &str, splash: bool) -> Option<String> {
+        let mut said = Vec::new();
+        if !splash && !self.missing_kernels.is_empty() {
+            said.push(format!(
+                "custom kernels not loaded: {}",
+                self.missing_kernels.join(", ")
+            ));
+        }
+        if self.shed_prefill.iter().any(|shed| shed == model) {
+            said.push("Neural Engine prefill shed: prompts read on the GPU alone".into());
+        }
+        (!said.is_empty()).then(|| said.join(" · "))
+    }
 }
 
 /// `model_settings.json` as last read: when it changed, and each model's
@@ -1171,11 +1235,25 @@ impl OmlxModels {
                 .as_ref()
                 .is_none_or(|file| file.changed != changed)
             {
-                let models = changed
-                    .and_then(|_| host.read_prefix(path, 4 * 1024 * 1024))
-                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                    .as_ref()
-                    .and_then(parse_model_settings);
+                let models = match changed {
+                    Some(_) => host
+                        .read_prefix(path, 4 * 1024 * 1024)
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                        .as_ref()
+                        .and_then(parse_model_settings),
+                    // Without the file oMLX runs every model on its defaults: its own
+                    // engine, no draft. A base directory that cannot be read says nothing.
+                    None => path
+                        .parent()
+                        .filter(|base| {
+                            host.read_dir(base).iter().any(|entry| {
+                                entry
+                                    .file_name()
+                                    .is_some_and(|name| name == "settings.json")
+                            })
+                        })
+                        .map(|_| HashMap::new()),
+                };
                 self.model_settings = Some(SettingsFile { changed, models });
             }
         }
@@ -1248,11 +1326,13 @@ pub(crate) struct ModelSettings {
     /// The KV cache's quantized format on oMLX's own engine: `TurboQuant
     /// 8-bit`, `affine 4-bit`; `None` when it is not quantized.
     pub(crate) kv_quantized: Option<String>,
-    /// Speculative decoding on oMLX's own engine: the model's MTP head, or
-    /// a DFlash draft (`draft`, the configured checkpoint).
+    /// Speculative decoding on oMLX's own engine: the model's MTP head, a
+    /// DFlash draft (`draft`, the configured checkpoint), or for a vision
+    /// model an assistant model's MTP.
     pub(crate) mtp: bool,
     pub(crate) dflash: bool,
     pub(crate) draft: Option<PathBuf>,
+    pub(crate) vlm_mtp: bool,
 }
 
 /// Each model's settings in `model_settings.json` (`{"models": {id: …}}`).
@@ -1289,6 +1369,7 @@ pub(crate) fn parse_model_settings(file: &Value) -> Option<HashMap<String, Model
                         draft: text("dflash_draft_model")
                             .map(PathBuf::from)
                             .filter(|path| path.is_absolute()),
+                        vlm_mtp: on("vlm_mtp_enabled"),
                     },
                 )
             })
@@ -1309,7 +1390,8 @@ fn through_splash(status: Option<&ModelStatus>, settings: Option<&ModelSettings>
 pub(crate) struct Serving<'a> {
     pub(crate) status: Option<&'a ModelStatus>,
     pub(crate) settings: &'a OmlxSettings,
-    /// `None` when `model_settings.json` could not be read.
+    /// `None` when `model_settings.json` could not be read; a model it
+    /// does not list, or a missing file, means oMLX's defaults.
     pub(crate) model_settings: Option<&'a ModelSettings>,
     /// The model's files and the draft's, where they could be read.
     pub(crate) model: Option<&'a MlxModel>,
@@ -1370,6 +1452,8 @@ pub(crate) fn omlx_model_facts(serving: &Serving) -> ModelFacts {
                 Some(true),
                 serving.draft.and_then(|draft| draft.weight_bytes),
             ),
+            // An assistant model drafts for a vision model; its files are not read.
+            Some(settings) if settings.vlm_mtp => (Some(true), None),
             // MTP drafts with the model's own head, where it has one.
             Some(settings) if settings.mtp => {
                 match serving.model.and_then(|model| model.mtp_bytes) {
@@ -1403,6 +1487,40 @@ pub(crate) fn omlx_model_facts(serving: &Serving) -> ModelFacts {
         .loaded
         .and_then(|model| json_u64(model, &["estimated_size"]));
     facts
+}
+
+/// What Diagnostics says about the draft: why tokens per verify pass are missing where oMLX
+/// runs the model through Splash. oMLX starts Splash on a port and with an API key of its own
+/// and passes on none of its draft counters. Nothing once the figure is known, or with no
+/// draft.
+pub(crate) fn draft_lines(sample: &Sample) -> Vec<String> {
+    let hosted = sample.llm_provider == "oMLX" && sample.llm_engine.as_deref() == Some("Splash");
+    if hosted && sample.llm_tokens_per_pass.is_none() && sample.model.draft != Some(false) {
+        vec!["Draft: tokens per verify pass unknown · oMLX keeps Splash's status private".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The tokens each verify pass gives the request shown, for its output line: what the draft
+/// adds to its speed. Only while it is the one request writing, since the counters are the
+/// engine's; empty otherwise.
+pub(crate) fn draft_note(sample: &Sample, request: &RequestUsage, live: bool) -> String {
+    let writing = |request: &RequestUsage| {
+        !request.completed && !request.queued && request.prefilled.is_none()
+    };
+    let alone = sample
+        .llm_requests
+        .iter()
+        .filter(|request| writing(request))
+        .count()
+        == 1;
+    match sample.llm_tokens_per_pass {
+        Some(tokens) if live && alone && writing(request) && sample.llm_fresh() => {
+            format!("{tokens:.1} tok/pass")
+        }
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]

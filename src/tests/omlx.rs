@@ -96,6 +96,7 @@ fn model_settings_say_how_omlx_serves_each_model() {
             mtp: true,
             dflash: false,
             draft: Some(PathBuf::from(OWNER_DRAFT)),
+            vlm_mtp: false,
         }
     );
     assert_eq!(all["Qwen3.8-27B-DFlash2-incoai"], ModelSettings::default());
@@ -386,7 +387,7 @@ fn a_model_that_comes_in_is_looked_up_once_and_several_have_no_facts() {
     assert_eq!(first.model.as_deref(), Some("other"));
     assert_eq!(first.model_facts.loaded_bytes, Some(25_744_836_152));
     assert_eq!(first.model_facts.bytes_per_pass, None);
-    assert_eq!(client.models.version, None);
+    assert_eq!(client.models.server.version, None);
     assert_eq!(
         client.poll_once().expect("telemetry").model_facts,
         first.model_facts
@@ -403,5 +404,251 @@ fn a_model_that_comes_in_is_looked_up_once_and_several_have_no_facts() {
         Some("2 models · Qwen3.8-27B-oQ4e-mtp")
     );
     assert_eq!(several.model_facts, ModelFacts::default());
+    server.join().unwrap();
+}
+
+/// oMLX 0.7.3's `/api/status` and `/v1/models/status` on the owner's server, redacted (model
+/// paths under `/omlx`).
+const API_STATUS: &str = include_str!("fixtures/omlx_api_status.json");
+const OWNER_MODELS_STATUS: &str = include_str!("fixtures/omlx_models_status.json");
+
+#[test]
+fn the_owners_status_endpoints_read_as_served() {
+    let server = ServerStatus::parse(&serde_json::from_str(API_STATUS).unwrap());
+    assert_eq!(
+        server,
+        ServerStatus {
+            version: Some("0.7.3".into()),
+            ..ServerStatus::default()
+        }
+    );
+    assert_eq!(server.slowing(MODEL, true), None);
+    let status = parse_models_status(&serde_json::from_str(OWNER_MODELS_STATUS).unwrap());
+    assert_eq!(status.len(), 4);
+    let served = status.iter().find(|status| status.id == MODEL).unwrap();
+    assert_eq!(
+        served,
+        &ModelStatus {
+            id: MODEL.into(),
+            path: Some(PathBuf::from("/omlx/models/Jundot/Qwen3.8-27B-oQ4e-mtp")),
+            engine: Some("splash".into()),
+            context: Some(131_072),
+            trained: Some(262_144),
+        }
+    );
+}
+
+#[test]
+fn api_status_names_missing_kernels_and_shed_prefill_never_their_errors() {
+    let mut status: Value = serde_json::from_str(API_STATUS).unwrap();
+    status["custom_kernels"]["attention"] =
+        json!({"available": false, "import_error": "dlopen /Users/someone/_ext.so failed"});
+    status["custom_kernels"]["lowbit"]["available"] = json!(false);
+    status["ane_prefill"]["models"] = json!([
+        {"model_id": MODEL, "attempted": true, "configured": true, "shed": true},
+        {"model_id": "other", "attempted": true, "configured": true, "shed": false}
+    ]);
+    let server = ServerStatus::parse(&status);
+    assert_eq!(server.missing_kernels, ["attention", "lowbit"]);
+    assert_eq!(server.shed_prefill, [MODEL]);
+    assert!(!format!("{server:?}").contains("dlopen"));
+    assert_eq!(
+        server.slowing(MODEL, false).as_deref(),
+        Some("custom kernels not loaded: attention, lowbit · Neural Engine prefill shed: prompts read on the GPU alone")
+    );
+    // Splash runs on kernels of its own; another model's prefill is not this one's.
+    assert_eq!(server.slowing("other", true), None);
+}
+
+#[test]
+fn the_client_says_what_slows_omlxs_own_engine() {
+    let home = TempDir::new("omlx-slowing");
+    home.write(".config/omlx-coding/server.env", "API_KEY=slow-key\n");
+    let health = json!({"status": "healthy", "default_model": MODEL}).to_string();
+    let stats = json!({"active_models": {"models": [loaded(MODEL)]}}).to_string();
+    let mut own = models_status();
+    own["models"][0]["external_engine"] = Value::Null;
+    let mut api = serde_json::from_str::<Value>(API_STATUS).unwrap();
+    api["custom_kernels"]["attention"]["available"] = json!(false);
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, &health),
+        Exchange {
+            request: "POST /admin/api/login ",
+            status: 200,
+            headers: "Set-Cookie: session=abc; Path=/\r\n",
+            body: "{}".into(),
+        },
+        reply("GET /admin/api/stats?scope=session ", 200, &stats),
+        reply("GET /admin/api/device-info ", 200, "{}"),
+        reply("GET /admin/api/global-settings ", 200, "{}"),
+        reply("GET /v1/models/status ", 200, &own.to_string()),
+        reply("GET /api/status ", 200, &api.to_string()),
+        // Served through Splash, its own kernels run it.
+        reply("GET /health ", 200, &health),
+        reply("GET /admin/api/stats?scope=session ", 200, &stats),
+        reply("GET /admin/api/device-info ", 200, "{}"),
+        reply("GET /admin/api/global-settings ", 200, "{}"),
+        reply("GET /v1/models/status ", 200, &models_status().to_string()),
+        reply("GET /api/status ", 200, r#"{"status": "ok"}"#),
+    ]);
+    let mut client = client(port, &home, &FakeHost::default());
+    let first = client.poll_once().expect("telemetry");
+    assert_eq!(
+        first.details.as_deref(),
+        Some("custom kernels not loaded: attention")
+    );
+    assert_eq!(client.models.server.version.as_deref(), Some("0.7.3"));
+    client.next_metadata_poll = Instant::now();
+    let splash = client.poll_once().expect("telemetry");
+    assert_eq!(splash.details, None);
+    assert_eq!(
+        client.models.server.version.as_deref(),
+        Some("0.7.3"),
+        "a status without a version keeps the one given before"
+    );
+    let requests = server.join().unwrap();
+    // The API key alone, as a bearer token: no admin session.
+    assert!(requests[6].contains("Authorization: Bearer slow-key\r\n"));
+    assert!(!requests[6].contains("Cookie"));
+}
+
+#[test]
+fn diagnostics_say_why_tokens_per_pass_are_missing_under_omlx() {
+    let mut hosted = Sample {
+        llm_provider: "oMLX".into(),
+        llm_engine: Some("Splash".into()),
+        ..Sample::default()
+    };
+    assert_eq!(
+        draft_lines(&hosted),
+        ["Draft: tokens per verify pass unknown · oMLX keeps Splash's status private"]
+    );
+    // Known, no draft, or Splash on its own: nothing to explain.
+    hosted.llm_tokens_per_pass = Some(7.8);
+    assert!(draft_lines(&hosted).is_empty());
+    hosted.llm_tokens_per_pass = None;
+    hosted.model.draft = Some(false);
+    assert!(draft_lines(&hosted).is_empty());
+    let alone = Sample {
+        llm_provider: "Splash".into(),
+        ..Sample::default()
+    };
+    assert!(draft_lines(&alone).is_empty());
+}
+
+#[test]
+fn the_request_shown_gets_tokens_per_pass_only_while_it_writes_alone() {
+    let writing = RequestUsage {
+        provider: "Splash".into(),
+        id: "1".into(),
+        prompt: 900,
+        output: Some(120),
+        ..RequestUsage::default()
+    };
+    let mut sample = Sample {
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_requests: vec![writing.clone()],
+        llm_tokens_per_pass: Some(7.84),
+        ..Sample::default()
+    };
+    assert_eq!(draft_note(&sample, &writing, true), "7.8 tok/pass");
+    // A request no longer live, or the counters stale: not this request's now.
+    assert_eq!(draft_note(&sample, &writing, false), "");
+    sample.llm_status = "stale".into();
+    assert_eq!(draft_note(&sample, &writing, true), "");
+    sample.llm_status = "generating".into();
+    // Prefilling or queued, it writes nothing; beside another writer, the counters are shared.
+    let prefilling = RequestUsage {
+        prefilled: Some(400),
+        ..writing.clone()
+    };
+    assert_eq!(draft_note(&sample, &prefilling, true), "");
+    let queued = RequestUsage {
+        queued: true,
+        ..writing.clone()
+    };
+    assert_eq!(draft_note(&sample, &queued, true), "");
+    sample.llm_requests.push(RequestUsage {
+        id: "2".into(),
+        ..writing.clone()
+    });
+    assert_eq!(draft_note(&sample, &writing, true), "");
+    // Unknown is not shown.
+    sample.llm_requests.pop();
+    sample.llm_tokens_per_pass = None;
+    assert_eq!(draft_note(&sample, &writing, true), "");
+}
+
+#[test]
+fn without_a_settings_file_omlx_runs_each_model_on_its_defaults() {
+    let path = Path::new("/omlx/model_settings.json");
+    // oMLX's base directory, which holds its settings, and no file of model settings: every
+    // model on oMLX's own engine with no draft.
+    let base = FakeHost::default().dir("/omlx", &["/omlx/settings.json", "/omlx/models"]);
+    let mut models = OmlxModels::default();
+    assert_eq!(
+        models.model_settings(&base, path, true),
+        Some(&HashMap::new())
+    );
+    let facts = omlx_model_facts(&Serving {
+        status: None,
+        settings: &OmlxSettings::default(),
+        model_settings: Some(&ModelSettings::default()),
+        model: None,
+        draft: None,
+        version: None,
+        loaded: None,
+    });
+    assert_eq!(facts.draft, Some(false));
+    // A directory that cannot be read says nothing.
+    let mut unread = OmlxModels::default();
+    assert_eq!(
+        unread.model_settings(&FakeHost::default(), path, true),
+        None
+    );
+    // A vision model's assistant drafts; its files are not read.
+    let all = parse_model_settings(&json!({"models": {"v": {"vlm_mtp_enabled": true}}})).unwrap();
+    assert!(all["v"].vlm_mtp);
+    let facts = omlx_model_facts(&Serving {
+        status: None,
+        settings: &OmlxSettings::default(),
+        model_settings: all.get("v"),
+        model: None,
+        draft: None,
+        version: None,
+        loaded: None,
+    });
+    assert_eq!((facts.draft, facts.draft_bytes), (Some(true), None));
+}
+
+#[test]
+fn the_client_says_a_model_on_omlxs_own_engine_without_settings_has_no_draft() {
+    let home = TempDir::new("omlx-defaults");
+    home.write(".config/omlx-coding/server.env", "API_KEY=defaults-key\n");
+    let files = owner_models(FakeHost::default()).dir("/omlx", &["/omlx/settings.json"]);
+    let health = json!({"status": "healthy", "default_model": MODEL}).to_string();
+    let stats = json!({"active_models": {"models": [loaded(MODEL)]}}).to_string();
+    let mut own = models_status();
+    own["models"][0]["external_engine"] = Value::Null;
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, &health),
+        Exchange {
+            request: "POST /admin/api/login ",
+            status: 200,
+            headers: "Set-Cookie: session=abc; Path=/\r\n",
+            body: "{}".into(),
+        },
+        reply("GET /admin/api/stats?scope=session ", 200, &stats),
+        reply("GET /admin/api/device-info ", 200, "{}"),
+        reply("GET /admin/api/global-settings ", 200, GLOBAL_SETTINGS),
+        reply("GET /v1/models/status ", 200, &own.to_string()),
+        reply("GET /api/status ", 200, API_STATUS),
+    ]);
+    let mut client = client(port, &home, &files);
+    let facts = client.poll_once().expect("telemetry").model_facts;
+    assert_eq!((facts.draft, facts.draft_bytes), (Some(false), None));
+    // Its own engine keeps KV in the activations' bf16.
+    assert_eq!(facts.kv_bytes_per_token(), Some(65_536));
     server.join().unwrap();
 }
