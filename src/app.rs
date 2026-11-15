@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Application state, input handling, selection and critical-alarm lifecycle.
 use crate::analysis::signal_summary;
+use crate::chart_navigation;
 use crate::chart_navigation::Chart;
 use crate::collector::CollectorView;
 use crate::config::{config_history, config_interval, config_path, Config, Thresholds};
@@ -8,11 +9,9 @@ use crate::domain::{EventKind, LlmProcess, Sample, SignalEvent};
 use crate::logging::{diagnostics_log, log_field};
 use crate::sampler::{Sampler, SamplerCommand};
 use crate::settings::Settings;
-use crate::{chart_navigation, operator_history, request_history};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use std::collections::VecDeque;
 use std::io::{stdout, Write};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
@@ -223,25 +222,7 @@ impl App {
         let interval = Duration::from_secs(interval);
         let thresholds = Thresholds::from_config(&config);
         Self {
-            collector: CollectorView {
-                current: Sample::default(),
-                generation_history: VecDeque::new(),
-                prefill_history: VecDeque::new(),
-                cache_history: VecDeque::new(),
-                disk_history: VecDeque::new(),
-                decode_reads: VecDeque::new(),
-                session: Default::default(),
-                load_history: VecDeque::new(),
-                composition_history: VecDeque::new(),
-                gpu_memory_history: VecDeque::new(),
-                swap_history: VecDeque::new(),
-                compression_history: VecDeque::new(),
-                platform: crate::host::Platform::current(),
-                gpu_history: VecDeque::new(),
-                signals: VecDeque::new(),
-                request_history: request_history::History::default(),
-                operator_history: operator_history::History::default(),
-            },
+            collector: CollectorView::default(),
             sampler,
             interval,
             paused: false,

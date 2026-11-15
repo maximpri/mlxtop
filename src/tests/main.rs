@@ -83,22 +83,8 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
                 total_memory: 1,
                 ..Sample::default()
             },
-            generation_history: VecDeque::new(),
-            prefill_history: VecDeque::new(),
-            cache_history: VecDeque::new(),
-            disk_history: VecDeque::new(),
-            decode_reads: Default::default(),
-            session: Default::default(),
-            load_history: VecDeque::new(),
-            composition_history: VecDeque::new(),
-            gpu_memory_history: VecDeque::new(),
-            swap_history: VecDeque::new(),
-            compression_history: VecDeque::new(),
             platform: Platform::MacOs,
-            gpu_history: VecDeque::new(),
-            signals: VecDeque::new(),
-            request_history: request_history::History::default(),
-            operator_history: operator_history::History::default(),
+            ..CollectorView::default()
         },
         sampler: Sampler {
             commands,
@@ -151,22 +137,8 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
             updated: updated.into(),
             ..Sample::default()
         },
-        generation_history: VecDeque::new(),
-        prefill_history: VecDeque::new(),
-        cache_history: VecDeque::new(),
-        disk_history: VecDeque::new(),
-        decode_reads: Default::default(),
-        session: Default::default(),
-        load_history: VecDeque::new(),
-        composition_history: VecDeque::new(),
-        gpu_memory_history: VecDeque::new(),
-        swap_history: VecDeque::new(),
-        compression_history: VecDeque::new(),
         platform: Platform::MacOs,
-        gpu_history: VecDeque::new(),
-        signals: VecDeque::new(),
-        request_history: request_history::History::default(),
-        operator_history: operator_history::History::default(),
+        ..CollectorView::default()
     }
 }
 

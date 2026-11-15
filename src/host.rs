@@ -351,6 +351,13 @@ impl Platform {
     }
 }
 
+/// The platform this build samples.
+impl Default for Platform {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/host.rs"]
 mod tests;

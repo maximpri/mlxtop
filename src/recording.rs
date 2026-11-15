@@ -6,7 +6,8 @@
 use crate::analysis::CorrelationEngine;
 use crate::collector::Collector;
 use crate::config::{Config, Thresholds};
-use crate::domain::{Phase, Sample};
+use crate::domain::{CorrelationCause, Phase, Sample};
+use crate::formatting::duration_label;
 use crate::host::{Host, Platform};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -81,6 +82,16 @@ impl Host for Nothing {
     }
 }
 
+/// How often one reason was given for a slowdown or stall.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Tally {
+    /// Samples inside a slowdown or stall with this reason.
+    pub(crate) samples: usize,
+    /// Slowdowns and stalls the Journal began with this reason: the rows a
+    /// person watching would have read.
+    pub(crate) episodes: usize,
+}
+
 /// What a recording's samples amount to under today's rules.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Replay {
@@ -90,10 +101,29 @@ pub(crate) struct Replay {
     /// Samples inside a slowdown or stall, by phase.
     pub(crate) slow_generation: usize,
     pub(crate) slow_prefill: usize,
+    /// Seconds an answer was being written or had stalled, counted as the
+    /// session summary counts them: what episodes are counted per hour of.
+    pub(crate) generating_seconds: f64,
+    /// Each reason given for a slowdown or stall, in the order first given.
+    pub(crate) tally: Vec<(CorrelationCause, Tally)>,
     /// Journal rows about the model's speed, with their time.
     pub(crate) findings: Vec<(String, String, String)>,
     /// Lines of the file this version could not read as a sample.
     pub(crate) skipped: usize,
+}
+
+impl Replay {
+    /// The tally of `cause`, empty until it is first given.
+    fn reason(&mut self, cause: CorrelationCause) -> &mut Tally {
+        let index = match self.tally.iter().position(|(given, _)| *given == cause) {
+            Some(index) => index,
+            None => {
+                self.tally.push((cause, Tally::default()));
+                self.tally.len() - 1
+            }
+        };
+        &mut self.tally[index].1
+    }
 }
 
 /// Run `samples` through the detection engine and Journal.
@@ -127,11 +157,17 @@ pub(crate) fn replay(samples: &mut [Sample], thresholds: Thresholds) -> Replay {
                 Phase::Generation => replay.slow_generation += 1,
                 Phase::Prefill => replay.slow_prefill += 1,
             }
+            replay.reason(insight.cause).samples += 1;
         }
         // Take this sample's rows out: the Journal keeps at most 240, so
         // counting its growth stops working once it is full.
         journal.record_journal_events(previous.as_ref(), sample);
         for event in journal.signals.drain(..) {
+            // A slowdown or stall begins with its row, which gives the
+            // reason this sample was judged slow for.
+            if matches!(event.state.as_str(), "SLOWDOWN" | "STALL") {
+                replay.reason(sample.correlation.cause).episodes += 1;
+            }
             if matches!(
                 event.state.as_str(),
                 "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED" | "SETTLED" | "ENDED"
@@ -143,8 +179,10 @@ pub(crate) fn replay(samples: &mut [Sample], thresholds: Thresholds) -> Replay {
                 ));
             }
         }
+        journal.session.observe(sample);
         previous = Some(sample.clone());
     }
+    replay.generating_seconds = journal.session.generating;
     replay
 }
 
@@ -158,10 +196,16 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
         }
     };
     writeln!(out, "SAMPLES     {}", replay.samples)?;
+    let hours = replay.generating_seconds / 3600.0;
     writeln!(
         out,
-        "GENERATION  {} samples · {} in a slowdown or stall ({})",
+        "GENERATION  {} samples{} · {} in a slowdown or stall ({})",
         replay.generating,
+        if hours > 0.0 {
+            format!(" over {}", duration_label(replay.generating_seconds))
+        } else {
+            String::new()
+        },
         replay.slow_generation,
         share(replay.slow_generation, replay.generating)
     )?;
@@ -172,6 +216,37 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
         replay.slow_prefill,
         share(replay.slow_prefill, replay.prefilling)
     )?;
+    // How often each reason fires: the count a new rule is checked by. The
+    // most frequent first.
+    if !replay.tally.is_empty() {
+        let mut reasons: Vec<&(CorrelationCause, Tally)> = replay.tally.iter().collect();
+        reasons.sort_by(|(cause, tally), (other, than)| {
+            than.episodes
+                .cmp(&tally.episodes)
+                .then(than.samples.cmp(&tally.samples))
+                .then((*cause as u8).cmp(&(*other as u8)))
+        });
+        writeln!(
+            out,
+            "{:<26}{:>6}{:>10}{:>10}",
+            "REASON", "SLOW", "EPISODES", "PER HOUR"
+        )?;
+        for (cause, tally) in reasons {
+            let per_hour = if hours > 0.0 {
+                format!("{:.2}", tally.episodes as f64 / hours)
+            } else {
+                "—".to_owned()
+            };
+            writeln!(
+                out,
+                "{:<26}{:>6}{:>10}{:>10}",
+                cause.label(),
+                tally.samples,
+                tally.episodes,
+                per_hour
+            )?;
+        }
+    }
     let started = replay
         .findings
         .iter()

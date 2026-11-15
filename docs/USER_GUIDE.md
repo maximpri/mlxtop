@@ -600,11 +600,28 @@ mlxtop replay FILE             read a recording back through the detection rules
 ```
 
 A recording keeps every sample as mlxtop saw it: the machine's readings and
-the runtime's, request by request. `mlxtop replay FILE` runs them through
-today's rules and Journal and prints how many generation and prefill samples
-there were, how many fell inside a slowdown or stall, and each finding with
-its time. Record a session in which the model slowed, then replay it after a
-change to the rules, or attach it to a bug report. A recording holds the
+the runtime's, request by request, each with the moment it was taken (`ts`,
+milliseconds since the epoch), so a recording that runs past midnight stays
+in order. `mlxtop replay FILE` runs them through today's rules and Journal
+and prints how many generation and prefill samples there were, how long
+generation ran, how many samples fell inside a slowdown or stall, a tally of
+the reasons given, and each finding with its time:
+
+```text
+GENERATION  7000 samples over 2h 0m · 21 in a slowdown or stall (0.3%)
+PREFILL     0 samples · 0 in a slowdown (—)
+REASON                      SLOW  EPISODES  PER HOUR
+paging                        12         3      1.50
+nothing else unusual           6         1      0.50
+generation stalled             3         1      0.50
+```
+
+For each reason, `SLOW` counts the samples inside a slowdown or stall it was
+given for, `EPISODES` the slowdowns and stalls the Journal began with it, and
+`PER HOUR` those episodes per hour of generation; the reason told most often
+comes first. That count is how a change to the rules is checked: record a
+session in which the model slowed, replay it before and after the change, and
+compare. A recording also goes with a bug report. A recording holds the
 machine's readings, hardware names, the name of the process using the most
 memory, and the runtime's request ids, model names and token counts. It never
 holds prompts, output or process command lines, and it is created readable by
@@ -723,6 +740,14 @@ sampling duration, provider/API availability, sampler failures, terminal
 errors and panic backtraces. A normal shutdown ends with `event=process_exit`;
 if that record is missing, the process was interrupted or crashed. The active
 log is capped at 8 MiB and rotated once to `mlxtop.log.1`.
+
+Each sample adds an `event=sample` line of `name=value` fields: memory,
+paging, GPU, generation and prefill speed, requests and the runtime's disk
+work, then `pressure=` (the memory pressure level), `thermal=`, `power_mw=`
+(the whole machine's draw), `draft=` (the share of draft tokens accepted since
+the last poll) and `ts=`, the sample's time as a recording gives it. A
+reading that was not taken is `na`. New fields are only ever added at the
+end.
 
 It contains counters and model/provider names for diagnosis, but never prompts,
 model output, request bodies or provider API keys. Diagnostics are local-only
