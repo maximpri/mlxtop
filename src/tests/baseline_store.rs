@@ -725,20 +725,29 @@ fn kinds_not_seen_for_180_days_are_forgotten_and_forgetting_is_per_machine() {
 
 #[test]
 fn the_finding_names_the_update_between_the_sessions() {
+    let below = |percent, then: Option<&str>, now: Option<&str>| BelowEarlier {
+        percent,
+        then: then.map(str::to_owned),
+        now: now.map(str::to_owned),
+    };
+    let updated = below(31.03, Some("oMLX 0.7.3"), Some("oMLX 0.8.0"));
     assert_eq!(
-        sentence(31.03, Some("oMLX 0.7.3"), Some("oMLX 0.8.0")),
+        updated.sentence(),
         "This model now generates 31% below its usual from earlier sessions at this depth, since oMLX 0.7.3 became 0.8.0"
     );
+    assert_eq!(updated.update(), Some(("oMLX 0.7.3", "oMLX 0.8.0")));
     // The same version, or one not known then or now: no update to name.
     for (then, now) in [
         (Some("oMLX 0.8.0"), Some("oMLX 0.8.0")),
         (None, Some("oMLX 0.8.0")),
         (Some("oMLX 0.7.3"), None),
     ] {
+        let same = below(24.6, then, now);
         assert_eq!(
-            sentence(24.6, then, now),
+            same.sentence(),
             "This model now generates 25% below its usual from earlier sessions at this depth"
         );
+        assert_eq!(same.update(), None);
     }
     for (old, new, change) in [
         (

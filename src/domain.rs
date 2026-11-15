@@ -485,9 +485,10 @@ pub(crate) struct CorrelationInsight {
     /// empty when it is taken over every kind of work.
     pub(crate) usual_for: String,
     /// When speed is judged against earlier sessions' usual alone and is
-    /// below it, that in one sentence: `This model now generates 31% below
-    /// its usual from earlier sessions at this depth`. Empty otherwise.
-    pub(crate) earlier: String,
+    /// below it: how far, and the runtime's version then and now. Its
+    /// sentence reads `This model now generates 31% below its usual from
+    /// earlier sessions at this depth`.
+    pub(crate) earlier: Option<crate::baseline_store::BelowEarlier>,
 }
 
 /// One slowdown, from the sample where speed first fell to now. The speed

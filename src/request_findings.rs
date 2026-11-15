@@ -796,6 +796,11 @@ impl Findings {
         Some((OVERLAP, summary))
     }
 
+    /// The overlap has been told this session: from then on its time counts.
+    pub(crate) fn overlap_told(&self) -> bool {
+        self.overlap_told
+    }
+
     /// Seconds first tokens lost: to prompts read in full after cached
     /// ones, to model loads, and to overlap that bought nothing.
     pub(crate) fn lost(&self) -> [(&'static str, f64); 3] {
@@ -921,4 +926,4 @@ pub(crate) fn summary(findings: &Findings) -> Vec<String> {
 
 #[cfg(test)]
 #[path = "tests/request_findings.rs"]
-mod tests;
+pub(crate) mod tests;

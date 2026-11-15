@@ -10,8 +10,8 @@ use crate::cli::{help_text, parse_args, CliAction};
 use crate::config::Config;
 use crate::domain::Sample;
 use crate::export::tests::{
-    linux_workstation, mac_no_runtime, mac_studio_slowdown, mac_studio_stall, splash_slowdown,
-    watched, watching,
+    below_earlier_sessions, linux_workstation, mac_no_runtime, mac_studio_slowdown,
+    mac_studio_stall, splash_slowdown, watched, watching,
 };
 use crate::host::Platform;
 use crate::test_support::{linux_host, offline_config, FakeHost};
@@ -186,6 +186,37 @@ fn a_reading_the_snapshot_holds_is_written_with_its_value_and_unit() {
     let once = values(&text(&splash_slowdown(), Platform::MacOs));
     assert!(once.contains_key("mlxtop_llm_decode_bandwidth_share_ratio"));
     assert!(!once.contains_key("mlxtop_llm_decode_best_bandwidth_share_ratio"));
+    // What the session's first tokens lost, in seconds, and whether the
+    // overlap was told; a snapshot with no session knows none of it.
+    for (series, value) in [
+        (
+            "mlxtop_llm_first_tokens_lost_to_cache_misses_seconds",
+            124.0,
+        ),
+        ("mlxtop_llm_first_tokens_lost_to_model_loads_seconds", 6.5),
+        ("mlxtop_llm_first_tokens_lost_to_overlap_seconds", 40.0),
+        ("mlxtop_llm_overlap_told", 1.0),
+    ] {
+        assert_eq!(splash.get(series), Some(&value), "{series}");
+        assert!(!once.contains_key(series), "{series}");
+    }
+    // Below earlier sessions: how far, and the update between.
+    let below = values(&text(&below_earlier_sessions(), Platform::MacOs));
+    assert_eq!(
+        below.get("mlxtop_llm_below_earlier_sessions_ratio"),
+        Some(&0.3103)
+    );
+    assert_eq!(
+        below.get("mlxtop_llm_runtime_update_info{from=\"oMLX 0.7.3\",to=\"oMLX 0.8.0\"}"),
+        Some(&1.0)
+    );
+    // With no update to name (the same version slowed), there is no info.
+    let mut same = below_earlier_sessions();
+    same.correlation.earlier.as_mut().unwrap().then = Some("oMLX 0.8.0".into());
+    let same = text(&same, Platform::MacOs);
+    assert!(same.contains("\nmlxtop_llm_below_earlier_sessions_ratio 0.3103\n"));
+    assert!(!same.contains("mlxtop_llm_runtime_update_info"), "{same}");
+    assert!(!splash.contains_key("mlxtop_llm_below_earlier_sessions_ratio"));
 }
 
 #[test]
@@ -193,7 +224,8 @@ fn metric_names_follow_prometheus_conventions() {
     let written = text(&mac_studio_slowdown(), Platform::MacOs)
         + &text(&linux_workstation(), Platform::Linux)
         + &text(&mac_studio_stall(), Platform::MacOs)
-        + &served(&splash_slowdown());
+        + &served(&splash_slowdown())
+        + &text(&below_earlier_sessions(), Platform::MacOs);
     let names: Vec<&str> = READINGS
         .iter()
         .map(|metric| metric.name)
@@ -244,7 +276,7 @@ fn metric_names_follow_prometheus_conventions() {
                 {
                     let key = label.split('=').next().unwrap();
                     assert!(
-                        ["provider", "model", "limiter", "gpu"].contains(&key),
+                        ["provider", "model", "from", "to", "limiter", "gpu"].contains(&key),
                         "label {key} in {line}"
                     );
                 }
@@ -302,9 +334,11 @@ fn unknown_readings_are_left_out_never_written_as_zero() {
         values.get("mlxtop_bottleneck{limiter=\"collecting_baseline\"}"),
         Some(&1.0)
     );
-    // With no runtime found, nothing is said about one.
+    // With no runtime found, nothing is said about one, by a session either.
     let quiet = self::text(&mac_no_runtime(), Platform::MacOs);
     assert!(!quiet.contains("mlxtop_llm_"), "{quiet}");
+    let watched_quiet = served(&mac_no_runtime());
+    assert!(!watched_quiet.contains("mlxtop_llm_"), "{watched_quiet}");
     assert!(quiet.contains("\nmlxtop_ram_total_bytes 38654705664\n"));
     // Linux has no compressor and reads no file paging: left out.
     let linux = self::text(&linux_workstation(), Platform::Linux);
@@ -459,6 +493,7 @@ fn the_user_guide_lists_every_metric() {
             "mlxtop_sample_age_seconds",
             "mlxtop_bottleneck",
             "mlxtop_llm_model_info",
+            "mlxtop_llm_runtime_update_info",
         ])
         .filter(|name| !guide.contains(&format!("`{name}`")))
         .collect();
@@ -468,6 +503,7 @@ fn the_user_guide_lists_every_metric() {
         text(&mac_studio_slowdown(), Platform::MacOs),
         text(&linux_workstation(), Platform::Linux),
         served(&splash_slowdown()),
+        text(&below_earlier_sessions(), Platform::MacOs),
     ] {
         for name in families(&platform_text) {
             assert!(guide.contains(&format!("`{name}`")), "{name}");

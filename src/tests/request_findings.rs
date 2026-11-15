@@ -417,6 +417,87 @@ fn overlapping(pairs: u64, shared: f64, together: u64, wait: u64, limit: Option<
     run
 }
 
+/// A session whose first tokens lost time every way the session summary
+/// counts: two requests at once that gained nothing (each of ten started
+/// beside another waited 4 s beyond the usual 2 s), a 31k prompt read in
+/// full at 250 tok/s right after a 30k one 96% cached (2m 4s), and a model
+/// load of 6.5 s. What the JSON snapshot's golden file is written from.
+pub(crate) fn every_finding() -> Findings {
+    let mut run = overlapping(10, 58.0, 20, 6, Some(1));
+    let then = 1_000;
+    let writing = |id, prompt, cached, at| {
+        sample(
+            then + at,
+            vec![request(
+                id,
+                prompt,
+                Some(cached),
+                Phase::Writing(50.0),
+                then + at,
+            )],
+        )
+    };
+    for at in 0..3 {
+        run.step(writing("a", 30_000, 29_000, at));
+    }
+    for at in 3..5 {
+        let mut reading = sample(
+            then + at,
+            vec![request("b", 31_000, Some(0), Phase::Reading, then + at)],
+        );
+        reading.llm_prefill_tps = Some(250.0);
+        reading.llm_prefill_tps_live = true;
+        run.step(reading);
+    }
+    for at in 5..7 {
+        run.step(writing("b", 31_000, 0, at));
+    }
+    for at in 7..11 {
+        run.step(sample(then + at, Vec::new()));
+    }
+    let mut cold = sample(
+        then + 11,
+        vec![request("cold", 900, Some(0), Phase::Reported, then + 11)],
+    );
+    cold.llm_request_timings = vec![RequestTiming {
+        provider: "oMLX".into(),
+        model: MODEL.into(),
+        id: "cold".into(),
+        prefill_tps: None,
+        load_ms: Some(6_500),
+    }];
+    run.step(cold);
+    let told: Vec<&str> = run.rows.iter().map(|(state, _)| *state).collect();
+    assert_eq!(told, [OVERLAP, CACHE_MISS, MODEL_LOAD]);
+    assert_eq!(
+        run.findings.lost(),
+        [
+            ("cache misses", 124.0),
+            ("model loads", 6.5),
+            ("overlap", 40.0)
+        ]
+    );
+    assert!(run.findings.overlap_told());
+    run.findings
+}
+
+#[test]
+fn every_finding_is_tallied_under_its_state_with_what_it_cost() {
+    let findings = every_finding();
+    assert_eq!(findings.lost_to(CACHE_MISS), Some(124.0));
+    assert_eq!(findings.lost_to(MODEL_LOAD), Some(6.5));
+    assert_eq!(findings.lost_to(OVERLAP), Some(40.0));
+    // A full KV cache's cost is not counted: unknown, not nothing.
+    assert_eq!(findings.lost_to(KV_CACHE_FULL), None);
+    // Until the overlap is told, its time does not count.
+    let quiet = overlapping(10, 100.0, 20, 6, None).findings;
+    assert!(!quiet.overlap_told());
+    assert_eq!(quiet.lost_to(OVERLAP), Some(0.0));
+    // Each state the findings tell is one a tally names.
+    let states: Vec<&str> = STATES.iter().map(|(state, _)| *state).collect();
+    assert_eq!(states, [CACHE_MISS, MODEL_LOAD, KV_CACHE_FULL, OVERLAP]);
+}
+
 #[test]
 fn two_requests_at_once_that_gain_nothing_and_delay_first_tokens_are_told_once() {
     let run = overlapping(10, 58.0, 20, 6, Some(1));

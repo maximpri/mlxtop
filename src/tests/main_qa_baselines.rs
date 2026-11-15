@@ -12,9 +12,22 @@ use std::time::SystemTime;
 
 const SENTENCE: &str = "This model now generates 31% below its usual from earlier sessions at this depth, since oMLX 0.7.3 became 0.8.0";
 
+/// The finding `SENTENCE` says.
+fn below_31() -> crate::baseline_store::BelowEarlier {
+    crate::baseline_store::BelowEarlier {
+        percent: 31.0,
+        then: Some("oMLX 0.7.3".into()),
+        now: Some("oMLX 0.8.0".into()),
+    }
+}
+
 /// The dashboard fixture slowed `cause`, as the engine leaves a slowdown:
 /// its insight, and its samples marked on the generation chart.
-fn slowed(cause: CorrelationCause, lead: &str, earlier: &str) -> App {
+fn slowed(
+    cause: CorrelationCause,
+    lead: &str,
+    earlier: Option<crate::baseline_store::BelowEarlier>,
+) -> App {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     let reasons = if cause == CorrelationCause::EarlierSessions {
@@ -39,7 +52,7 @@ fn slowed(cause: CorrelationCause, lead: &str, earlier: &str) -> App {
         }),
         usual_speed: Some((58.0, 46.4)),
         usual_for: "1 request · 33.9k context".into(),
-        earlier: earlier.into(),
+        earlier,
         ..CorrelationInsight::default()
     };
     for point in app.collector.generation_history.iter_mut().rev().take(3) {
@@ -54,7 +67,7 @@ fn below_earlier() -> App {
     slowed(
         CorrelationCause::EarlierSessions,
         "below earlier sessions",
-        SENTENCE,
+        Some(below_31()),
     )
 }
 
@@ -70,7 +83,7 @@ fn first_below() -> App {
         notes: vec![SENTENCE.into()],
         usual_speed: Some((58.0, 46.4)),
         usual_for: "1 request · 33.9k context".into(),
-        earlier: SENTENCE.into(),
+        earlier: Some(below_31()),
         ..CorrelationInsight::default()
     };
     app

@@ -11,7 +11,7 @@
 //! is judged against earlier sessions' from its first sample, until it has
 //! a usual speed of its own.
 use crate::anomaly::{median, Usual, LEARN_SAMPLES, WINDOW};
-use crate::baseline_store::{Band, Baselines, Follow, Kind, Per, Seed};
+use crate::baseline_store::{Band, Baselines, BelowEarlier, Follow, Kind, Per, Seed};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
@@ -1025,35 +1025,36 @@ impl CorrelationEngine {
         let against = sessions
             .as_ref()
             .zip(low.filter(|level| *level > 0.0))
-            .map(|(then, level)| self.earlier_sentence((level - speed) / level * 100.0, then));
+            .map(|(then, level)| self.below_earlier((level - speed) / level * 100.0, then));
         // Outside a slowdown a sample still says what is unusual in it: its
         // own speed, and any reading of the host.
-        let steady = |usual: Option<(f64, f64)>, watched: Vec<Finding>, against: Option<String>| {
-            let mut unusual: Vec<CorrelationCause> =
-                watched.iter().map(|found| found.signal.cause()).collect();
-            let mut notes: Vec<String> = watched.into_iter().map(|found| found.text).collect();
-            if let Some(sentence) = &against {
-                unusual.insert(0, CorrelationCause::EarlierSessions);
-                notes.insert(0, sentence.clone());
-            }
-            CorrelationInsight {
-                direction: if usual.is_some() {
-                    ThroughputDirection::Flat
-                } else {
-                    ThroughputDirection::Unknown
-                },
-                delta_percent: usual
-                    .filter(|(usual, _)| *usual > 0.0)
-                    .map(|(usual, _)| (speed - usual) / usual * 100.0),
-                usual_speed: usual,
-                usual_for: usual_for.clone(),
-                slow: low.is_some(),
-                unusual,
-                notes,
-                earlier: against.unwrap_or_default(),
-                ..CorrelationInsight::default()
-            }
-        };
+        let steady =
+            |usual: Option<(f64, f64)>, watched: Vec<Finding>, against: Option<BelowEarlier>| {
+                let mut unusual: Vec<CorrelationCause> =
+                    watched.iter().map(|found| found.signal.cause()).collect();
+                let mut notes: Vec<String> = watched.into_iter().map(|found| found.text).collect();
+                if let Some(below) = &against {
+                    unusual.insert(0, CorrelationCause::EarlierSessions);
+                    notes.insert(0, below.sentence());
+                }
+                CorrelationInsight {
+                    direction: if usual.is_some() {
+                        ThroughputDirection::Flat
+                    } else {
+                        ThroughputDirection::Unknown
+                    },
+                    delta_percent: usual
+                        .filter(|(usual, _)| *usual > 0.0)
+                        .map(|(usual, _)| (speed - usual) / usual * 100.0),
+                    usual_speed: usual,
+                    usual_for: usual_for.clone(),
+                    slow: low.is_some(),
+                    unusual,
+                    notes,
+                    earlier: against,
+                    ..CorrelationInsight::default()
+                }
+            };
         let watched = self.watched(&current, thresholds);
 
         let mut open = match (self.episode.take(), low) {
@@ -1203,13 +1204,13 @@ impl CorrelationEngine {
         }
         // Judged against earlier sessions alone, with nothing else unusual:
         // that this work now runs below them is the finding.
-        let sentence = match &sessions {
+        let below = match &sessions {
             Some(then) if cause == CorrelationCause::None => {
                 cause = CorrelationCause::EarlierSessions;
                 open.earlier = true;
-                self.earlier_sentence(-percent, then)
+                Some(self.below_earlier(-percent, then))
             }
-            _ => String::new(),
+            _ => None,
         };
         // One Journal row per reason in a slowdown, and none for a slowdown
         // that repeats the last one's reason within a minute.
@@ -1261,7 +1262,7 @@ impl CorrelationEngine {
                 .first()
                 .map(|text| (*text).to_owned())
                 .or_else(|| earlier.as_ref().map(|(_, text)| text.clone()))
-                .or_else(|| (!sentence.is_empty()).then(|| cause.label().to_owned()))
+                .or_else(|| below.is_some().then(|| cause.label().to_owned()))
                 .unwrap_or_default(),
             stall_seconds: None,
             event_key: Some(CorrelationKey {
@@ -1282,21 +1283,24 @@ impl CorrelationEngine {
             notes: texts.iter().map(|text| (*text).to_owned()).collect(),
             usual_speed: usual,
             usual_for,
-            earlier: sentence,
+            earlier: below,
         };
         self.episode = Some(open);
         insight
     }
 
-    /// The finding against earlier sessions' usual, `percent` below it:
-    /// with the update between where the runtime's version then and now
-    /// are known and differ.
-    fn earlier_sentence(&self, percent: f64, then: &Option<String>) -> String {
-        let now = self
-            .baselines
-            .as_deref()
-            .and_then(|baselines| baselines.runtime());
-        crate::baseline_store::sentence(percent, then.as_deref(), now)
+    /// The finding against earlier sessions' usual, `percent` below it,
+    /// with the runtime's version `then`, when they were measured, and now.
+    fn below_earlier(&self, percent: f64, then: &Option<String>) -> BelowEarlier {
+        BelowEarlier {
+            percent,
+            then: then.clone(),
+            now: self
+                .baselines
+                .as_deref()
+                .and_then(|baselines| baselines.runtime())
+                .map(str::to_owned),
+        }
     }
 
     /// The signals that are unusual in this sample, the most telling first.
@@ -1495,7 +1499,7 @@ impl CorrelationEngine {
             notes: Vec::new(),
             usual_speed: slow_range(&self.speed.usual(self.work)),
             usual_for: self.work.label(),
-            earlier: String::new(),
+            earlier: None,
         }
     }
 

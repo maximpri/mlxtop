@@ -120,7 +120,11 @@ fn a_model_that_now_runs_below_earlier_sessions_says_so_from_its_first_judged_sa
         "GEN ↓31.0% (58.0→40.0 tok/s) · below earlier sessions"
     );
     assert_eq!(slowed.lead, "below earlier sessions");
-    assert_eq!(slowed.earlier, SENTENCE);
+    let below = slowed.earlier.as_ref().unwrap();
+    assert_eq!(below.sentence(), SENTENCE);
+    // The finding's figures: 31% below, since 0.7.3 became 0.8.0.
+    assert!((below.percent - 31.0).abs() < 0.1, "{below:?}");
+    assert_eq!(below.update(), Some(("oMLX 0.7.3", "oMLX 0.8.0")));
     assert_eq!(slowed.tone(), Tone::Red, "31% is a severe drop");
     assert_eq!(slowed.marked_samples(), SLOW_SAMPLES);
     // Told once in the Journal, with the sentence as what to know.
@@ -184,13 +188,18 @@ fn below_earlier_sessions_on_the_same_version_names_no_update() {
     let sentence =
         "This model now generates 31% below its usual from earlier sessions at this depth";
     assert_eq!(samples[1].correlation.notes, vec![sentence]);
-    assert_eq!(samples[4].correlation.earlier, sentence);
+    let below = samples[4].correlation.earlier.as_ref().unwrap();
+    assert_eq!(below.sentence(), sentence);
+    // Measured on this version too: the versions are known, no update.
+    assert_eq!(below.then.as_deref(), Some("oMLX 0.8.0"));
+    assert_eq!(below.now.as_deref(), Some("oMLX 0.8.0"));
+    assert_eq!(below.update(), None);
     assert_eq!(
         crate::diagnosis::slowdown_next_step(&samples[4]),
         format!("{sentence}.")
     );
     let mut unworded = samples[4].clone();
-    unworded.correlation.earlier.clear();
+    unworded.correlation.earlier = None;
     assert_eq!(
         crate::diagnosis::slowdown_next_step(&unworded),
         "This model now generates below its usual from earlier sessions at this depth."

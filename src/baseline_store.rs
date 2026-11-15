@@ -880,17 +880,38 @@ impl Baselines {
     }
 }
 
-/// The finding against earlier sessions, in one sentence: `percent` below
-/// their usual, and the update between, where the runtime's version is
-/// known then and now and differs.
-pub(crate) fn sentence(percent: f64, then: Option<&str>, now: Option<&str>) -> String {
-    let mut text = format!(
-        "This model now generates {percent:.0}% below its usual from earlier sessions at this depth"
-    );
-    if let Some((then, now)) = then.zip(now).filter(|(then, now)| then != now) {
-        text.push_str(&format!(", since {}", version_change(then, now)));
+/// The finding against earlier sessions: how far below their usual this
+/// work runs, and the runtime's version their usual was measured on and
+/// the one now, each where known.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BelowEarlier {
+    pub(crate) percent: f64,
+    pub(crate) then: Option<String>,
+    pub(crate) now: Option<String>,
+}
+
+impl BelowEarlier {
+    /// The finding in one sentence, with the update between where there
+    /// was one.
+    pub(crate) fn sentence(&self) -> String {
+        let mut text = format!(
+            "This model now generates {:.0}% below its usual from earlier sessions at this depth",
+            self.percent
+        );
+        if let Some((then, now)) = self.update() {
+            text.push_str(&format!(", since {}", version_change(then, now)));
+        }
+        text
     }
-    text
+
+    /// The update between, where the runtime's version is known then and
+    /// now and differs.
+    pub(crate) fn update(&self) -> Option<(&str, &str)> {
+        self.then
+            .as_deref()
+            .zip(self.now.as_deref())
+            .filter(|(then, now)| then != now)
+    }
 }
 
 /// How the runtime went from `old` to `new`: `oMLX 0.7.3 became 0.8.0`

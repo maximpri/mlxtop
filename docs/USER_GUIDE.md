@@ -345,7 +345,11 @@ SLOWDOWN   GEN ↓31.0% (58.0→40.0 tok/s) · below earlier sessions → This m
 Anything else unusual at the time is named instead, as for any slowdown.
 Once it ends, whether speed came back, settled or the request finished while
 slow, the session is judged against itself from then on: the finding is told
-once a session. After an
+once a session. The [JSON snapshot](#json-output) gives the finding as
+`earlier_sessions` (how far below, and the update it names), and
+[`/metrics`](#prometheus-endpoint) as
+`mlxtop_llm_below_earlier_sessions_ratio` and
+`mlxtop_llm_runtime_update_info`. After an
 update, the old version's speeds judge the new one until it has its own,
 which are kept as they are learned. `r` asks before it resets the session;
 `f` at its prompt also forgets the usual speeds kept for this machine.
@@ -1094,6 +1098,11 @@ Time lost before first tokens: 3m 43s
   overlap                    40s
 ```
 
+`mlxtop stream` and `mlxtop serve` give the same seconds, by cause, with
+whether the overlap has been told, in the [JSON
+snapshot](#json-output) (`lost_before_first_tokens`) and in
+[`/metrics`](#prometheus-endpoint).
+
 Decode by context is the [decode efficiency](#decode-efficiency) estimate
 over the session, for the model being served: for each band of context with
 twenty samples of usual-speed decode, the usual share of the chip's peak, the
@@ -1248,18 +1257,20 @@ rates are measured. `mlxtop stream` takes a first sample to start the rates,
 then writes a line every `--interval` seconds, or at the configured interval,
 as the dashboard does, until it is stopped. It ends with exit status 0 and
 says nothing when whatever reads it goes away (`mlxtop stream | head -3`) and
-on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.7–4.2 KB: about 3.2 KB for
-a machine serving a model whose facts are known, about 3.8 KB while a slowdown
-and its request are named, and about 4.2 KB when the runtime also counts its
-KV room and draft, so decode efficiency and the context left are known too.
+on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.8–4.3 KB: about 3.3 KB for
+a machine serving a model whose facts are known, about 3.9 KB while a slowdown
+and its request are named, and about 4.3 KB when the runtime also counts its
+KV room and draft, so decode efficiency and the context left are known too,
+and a session says what first tokens lost.
 Standard output carries only JSON; a config file that was ignored is
 said on standard error.
 
 `mlxtop stream` and [`mlxtop serve`](#prometheus-endpoint) watch the session
 as the dashboard does, so their snapshots carry what only a session knows:
-the best decode reached here (`efficiency.best_bandwidth_share_ratio`), and
-the note a healthy verdict gains near it (`verdict.next`). `--once --json`
-watches no session, so it has neither.
+the best decode reached here (`efficiency.best_bandwidth_share_ratio`), the
+note a healthy verdict gains near it (`verdict.next`), and what first tokens
+lost (`lost_before_first_tokens`). `--once --json` watches no session, so it
+has none of them.
 
 The layout carries a `schema_version`, now 1, and is **experimental through
 3.4**: until then a field may still change without a new number. After that,
@@ -1283,9 +1294,10 @@ Every field follows the same rules:
   which covers everything inside it: `host` (measured by mlxtop from the
   operating system), `runtime` (reported by the runtime, through its API, its
   log or a usage file) or `estimate` (mlxtop's own judgement from other
-  readings: the usual speed and what is slow against it, which chip this is
-  and so its published bandwidth, what the model costs, how much of that
-  bandwidth decode reads, and how much more context fits). A figure whose
+  readings: the usual speed and what is slow against it, how far below
+  earlier sessions' usual this work runs, which chip this is and so its
+  published bandwidth, what the model costs, how much of that bandwidth decode
+  reads, how much more context fits, and what first tokens lost). A figure whose
   source is not its object's names its own beside it: the GPU memory limit,
   which can come from either side, in `limit_source`; the published bandwidth
   in `published_bandwidth_source`; KV bytes per token, which the runtime may
@@ -1458,6 +1470,11 @@ Every field follows the same rules:
 | `usual_speed.slow_below_tok_per_s` | Below this, this work is slow |
 | `usual_speed.work` | The work it is for: `1 request · 41.0k context` |
 | `usual_speed.relative_change` | This sample's speed against it as a relative change: -0.5 is half as fast, 0 the usual; in a slowdown, against the speed it fell from |
+| `earlier_sessions` | Generation clearly below its [usual from earlier sessions](#usual-speeds-across-sessions) at this depth, while this session has no usual of its own for the work; else `null` |
+| `earlier_sessions.source` | `estimate` |
+| `earlier_sessions.below_ratio` | How far below that usual, as a share of it: 0.31 is 31% below |
+| `earlier_sessions.runtime_from` | The runtime's version earlier sessions' usual was measured on (`oMLX 0.7.3`), where the finding names an update: `null` unless the version then and now are both known and differ |
+| `earlier_sessions.runtime_to` | The runtime's version now (`oMLX 0.8.0`), under the same rule |
 | `unusual` | What else is unusual in this sample, the most telling first: an estimate against each signal's usual value |
 | `unusual[].cause` | The signal, by the names `slowdown.cause` uses |
 | `unusual[].note` | It beside its usual value, in words |
@@ -1465,7 +1482,7 @@ Every field follows the same rules:
 | `slowdown.source` | `estimate` |
 | `slowdown.phase` | `generation` or `prefill` |
 | `slowdown.stalled` | An answer has stopped producing tokens |
-| `slowdown.cause` | The reason it is given: `none` (nothing else unusual), `stall`, `paging`, `compression`, `memory_pressure`, `thermal`, `metal_memory`, `queueing`, `concurrent_prefill`, `model_memory`, `disk_io`, `cpu`, `gpu_idle` or `draft_acceptance` |
+| `slowdown.cause` | The reason it is given: `none` (nothing else unusual), `stall`, `paging`, `compression`, `memory_pressure`, `thermal`, `metal_memory`, `queueing`, `concurrent_prefill`, `model_memory`, `disk_io`, `cpu`, `gpu_idle`, `draft_acceptance`, `kv_preemption` (the KV cache was full, so requests were recomputed) or `earlier_sessions` (below earlier sessions' usual, with nothing else unusual) |
 | `slowdown.reason` | The reason in words, with its usual value |
 | `slowdown.usual_tok_per_s` | The speed it fell from |
 | `slowdown.lowest_tok_per_s` | The slowest it has been |
@@ -1480,6 +1497,12 @@ Every field follows the same rules:
 | `slowdown_ended.lowest_tok_per_s` | The slowest it was |
 | `slowdown_ended.tok_per_s` | The speed it ended at |
 | `slowdown_ended.usual_tok_per_s` | The speed it had fallen from |
+| `lost_before_first_tokens` | What first tokens lost this session, as the [session summary](#session-summary) counts it (see [Time lost before the first token](#time-lost-before-the-first-token)): only from `stream` and `serve`, and only while a runtime is found; else `null` |
+| `lost_before_first_tokens.source` | `estimate` |
+| `lost_before_first_tokens.cache_misses_s` | The reading time of long prompts read in full right after cached ones, at this machine's usual prefill speed |
+| `lost_before_first_tokens.model_loads_s` | The model loads the runtime reported first tokens waiting for |
+| `lost_before_first_tokens.overlap_s` | How much longer requests that started beside another writing waited for their first token than the median request that started alone; 0 until the overlap is told |
+| `lost_before_first_tokens.overlap_told` | The session has told the overlap: two requests at once gained no throughput and made first tokens wait longer |
 
 ## Prometheus endpoint
 
@@ -1543,8 +1566,9 @@ Like the JSON, the names are **experimental through 3.4**. Each begins
 `_watts`, `_per_second`; `_ratio` is a share from 0 to 1), and the counters
 end in `_total`. A reading that is unknown is left out, never written as 0.
 Labels are few and bounded: `provider` and `model` on
-`mlxtop_llm_model_info`, `limiter` on `mlxtop_bottleneck` and a GPU's index
-in `gpu`; never a request id or a process name. Help that begins
+`mlxtop_llm_model_info`, `from` and `to` on `mlxtop_llm_runtime_update_info`,
+`limiter` on `mlxtop_bottleneck` and a GPU's index in `gpu`; never a request
+id or a process name. Help that begins
 `Estimate:` is mlxtop's own judgement, as `source` `estimate` is in the
 JSON. A runtime's speed is written under the name of its kind: measured over
 the last interval, the runtime's own average, or the last finished
@@ -1558,6 +1582,7 @@ the model it was measured for, join the info metric:
 | `mlxtop_sample_age_seconds` | gauge | Seconds since the newest sample was taken |
 | `mlxtop_bottleneck` | gauge | The verdict as a state set: one series for each state `verdict.state` names in the JSON, labelled `limiter`; 1 for the verdict's state, 0 for every other |
 | `mlxtop_llm_model_info` | gauge | 1, labelled with the runtime found (`provider`) and the model it serves (`model`) |
+| `mlxtop_llm_runtime_update_info` | gauge | Estimate: 1, while generation runs below its usual from earlier sessions, labelled with the runtime version their usual was measured on (`from`) and the one now (`to`); left out unless both are known and differ |
 | `mlxtop_interval_seconds` | gauge | Seconds between samples: the span each rate is measured over |
 | `mlxtop_ram_total_bytes` | gauge | All of RAM |
 | `mlxtop_ram_available_ratio` | gauge | The share of RAM the operating system reports available |
@@ -1654,8 +1679,13 @@ the model it was measured for, join the info metric:
 | `mlxtop_llm_generation_slow_below_tokens_per_second` | gauge | Estimate: below this speed, this generation is slow |
 | `mlxtop_llm_usual_prefill_tokens_per_second` | gauge | Estimate: the speed earlier samples of similar prompt reading ran at |
 | `mlxtop_llm_prefill_slow_below_tokens_per_second` | gauge | Estimate: below this speed, this prompt reading is slow |
+| `mlxtop_llm_below_earlier_sessions_ratio` | gauge | Estimate: how far generation runs below its usual from earlier sessions at this depth, as a share of it, while this session has no usual of its own for the work |
 | `mlxtop_llm_slowdown_seconds` | gauge | Estimate: how long the slowdown under way has lasted |
 | `mlxtop_llm_stall_seconds` | gauge | Estimate: how long a stalled answer has gone without a token |
+| `mlxtop_llm_first_tokens_lost_to_cache_misses_seconds` | gauge | Estimate: seconds first tokens lost this session to long prompts read in full right after cached ones, at the usual prefill speed |
+| `mlxtop_llm_first_tokens_lost_to_model_loads_seconds` | gauge | Estimate: seconds first tokens waited this session for model loads the runtime reported |
+| `mlxtop_llm_first_tokens_lost_to_overlap_seconds` | gauge | Estimate: seconds requests that started beside another writing waited for their first token beyond the median of those that started alone, once the overlap is told; 0 until then |
+| `mlxtop_llm_overlap_told` | gauge | Estimate: 1 once this session found that two requests at once gained no throughput and made first tokens wait longer; 0 until then |
 
 Each GPU (the Apple GPU of a Mac, or each NVIDIA and AMD card) is labelled
 with its index, `gpu`:
