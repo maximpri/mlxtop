@@ -372,8 +372,9 @@ colour means a change in generation speed: each is a Journal row, the
   ends, and mlxtop reads the request's count from that rise.
 - **The first token waited for the model to load** (`MODEL LOAD`): a load
   of a second or more that a runtime reported for the request: Ollama's
-  `load_duration`, LM Studio's `model_load_time_seconds`, or `model_load_ms`
-  in a [usage record](#client-reported-usage-file).
+  `load_duration`, LM Studio's `model_load_time_seconds`, oMLX's
+  `model_load_duration`, or `model_load_ms` in a [usage
+  record](#client-reported-usage-file).
 - **Running two requests at once gained no throughput on this machine and
   raised the wait for the first token N-fold** (`OVERLAP`, at most once a
   session). It is judged once the session holds a minute of two requests
@@ -2325,6 +2326,7 @@ Copy only usage counters from the response, with the required envelope above:
 | Responses-style usage | `usage.input_tokens`, `usage.output_tokens`, optional `usage.input_tokens_details.cached_tokens` |
 | Ollama native | `prompt_eval_count`, `eval_count`, optional `prompt_eval_cached_count`; decode speed from `eval_count / eval_duration`, prompt speed from the uncached prompt tokens over `prompt_eval_duration`, model load from `load_duration` (all nanoseconds) |
 | LM Studio native | `stats.input_tokens`, `stats.total_output_tokens`, `stats.tokens_per_second`, `stats.time_to_first_token_seconds`, `stats.model_load_time_seconds` (sent only after a load); `model_instance_id` is accepted as the model |
+| oMLX usage extension | `usage.prompt_tokens`, `usage.completion_tokens`, `usage.prompt_tokens_details.cached_tokens`; prompt speed from `usage.prompt_tokens_per_second` (over the tokens oMLX computed, cached ones left out), model load from `usage.model_load_duration` (seconds, sent only for a load over a second) |
 | llama-server `timings`, from any runtime | `predicted_per_second`, `prompt_per_second`, `cache_n` |
 
 For MLX-LM streaming, request `stream_options: {"include_usage": true}` and copy
