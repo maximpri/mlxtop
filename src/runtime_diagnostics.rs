@@ -237,6 +237,8 @@ impl RuntimeReport {
         lines.extend(crate::providers::llama::lines(sample));
         // How much more context fits, worked out from those facts.
         lines.extend(crate::context_left::lines(sample));
+        // What requests lost before their first tokens, and the evidence.
+        lines.extend(crate::request_findings::lines(&sample.request_findings));
         for probe in &self.probes {
             lines.push(format!(
                 "{}: {}",

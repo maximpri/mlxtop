@@ -322,6 +322,12 @@ colors in time-series history instead of recoloring old samples on refresh.
   prefilling and generating are those requests' own work and get no rows;
   conditions worth inspecting still do. Wrap advice instead of
   truncating it. Avoid generic tuning advice when no problem is established.
+- What a request loses before its first token is said in words, never in
+  colour, which is for generation speed: a long prompt read in full right
+  after a cached one of similar length, a model load, two requests at once
+  that bought no throughput (once a session), and a full KV cache each get
+  a Journal row; the session summary adds the time first tokens lost, and
+  Diagnostics the evidence.
 - Ring the terminal bell once when critical memory pressure or severe paging
   begins. Keep a visible, acknowledgeable banner. High GPU utilization alone
   must never trigger an alarm. Missing counters do not establish recovery.

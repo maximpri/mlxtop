@@ -298,6 +298,7 @@ impl LlmTelemetryClient {
         );
         telemetry.model_facts =
             self.model_facts(telemetry.model.as_deref(), stats.as_ref(), refresh);
+        telemetry.max_concurrent = self.models.settings.max_concurrent_requests;
         telemetry.details = telemetry.model.as_deref().and_then(|id| {
             let splash = self
                 .models
@@ -1262,13 +1263,15 @@ impl OmlxModels {
 }
 
 /// What oMLX's global settings say about serving: its base directory,
-/// which holds `model_settings.json`, and the Splash engine's KV format
-/// and version. Nothing else is kept, the API key least of all.
+/// which holds `model_settings.json`, the Splash engine's KV format and
+/// version, and how many requests it is set to run at once. Nothing else
+/// is kept, the API key least of all.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct OmlxSettings {
     pub(crate) base_path: Option<PathBuf>,
     pub(crate) splash_kv_format: Option<String>,
     pub(crate) splash_version: Option<String>,
+    pub(crate) max_concurrent_requests: Option<u64>,
 }
 
 impl OmlxSettings {
@@ -1279,6 +1282,8 @@ impl OmlxSettings {
             base_path: json_string(settings, &["base_path"]).map(PathBuf::from),
             splash_kv_format: text(&["integrations", "splash_kv_format"]),
             splash_version: text(&["external_engines", "splash", "version"]),
+            max_concurrent_requests: json_u64(settings, &["scheduler", "max_concurrent_requests"])
+                .filter(|limit| *limit > 0),
         }
     }
 }

@@ -47,6 +47,7 @@ mod providers;
 mod recording;
 mod report;
 mod request_dashboard;
+mod request_findings;
 mod request_history;
 mod runtime_diagnostics;
 mod sampler;

@@ -652,6 +652,7 @@ impl Collector {
         sample.llm_kv_free_tokens = llm_stats.and_then(|stats| stats.kv_free_tokens);
         sample.llm_kv_free_bytes = llm_stats.and_then(|stats| stats.kv_free_bytes);
         sample.llm_preemptions_total = llm_stats.and_then(|stats| stats.preemptions_total);
+        sample.llm_max_concurrent = llm_stats.and_then(|stats| stats.max_concurrent);
         sample.ssd_cache = llm_stats.and_then(|stats| stats.ssd_cache);
         sample.disk = disk_activity(
             sample.process_memory.as_ref(),
@@ -827,6 +828,7 @@ impl Collector {
 
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
+        sample.request_findings = self.view.session.request_findings.evidence();
         self.view.session.observe(&sample);
         crate::recording::write(&sample);
         diagnostics_log(
@@ -927,6 +929,14 @@ impl Collector {
         self.view
             .operator_history
             .observe(sample, self.history_limit);
+        // What requests lost before their first tokens: cache misses, model
+        // loads, overlap that bought nothing, a full KV cache. Told after
+        // the requests' own rows; none of it colours anything.
+        let view = &mut self.view;
+        let found = view
+            .session
+            .request_findings
+            .observe(previous, sample, &view.request_history);
         for request in &sample.llm_requests {
             if let Some(summary) = providers::new_request_summary(&mut self.seen_requests, request)
             {
@@ -1038,6 +1048,9 @@ impl Collector {
                     summary.push_str(&format!(" · {}", timing_label(&timing)));
                 }
                 add("DONE", summary, Tone::Cyan);
+            }
+            for (state, summary) in found {
+                add(state, summary, Tone::Cyan);
             }
             let lists_requests = lists_requests || !previous.llm_requests.is_empty();
             if (previous_active == 0) != (active == 0) && !lists_requests {
