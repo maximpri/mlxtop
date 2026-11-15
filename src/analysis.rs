@@ -3,7 +3,10 @@
 //!
 //! A slowdown is found by anomaly detection (`crate::anomaly`): generation
 //! speed unusually far below its usual value, three samples running. Its
-//! reason is whatever else is unusual at the same time.
+//! reason is whatever else is unusual at the same time. The usual value is
+//! that of similar work, compared like with like: per verify pass when a
+//! draft's tokens per pass are counted, and at the same depth when the
+//! model's facts say what a pass reads.
 use crate::anomaly::{median, Usual, WINDOW};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
@@ -74,6 +77,16 @@ pub(crate) struct CorrelationObservation {
     pub(crate) cpu: Option<f64>,
     /// The share of draft tokens accepted since the last poll.
     pub(crate) draft_acceptance: Option<f64>,
+    /// Tokens a verify pass emitted since the last poll, when a draft
+    /// proposes them and the runtime counts them: the text's share of the
+    /// speed.
+    pub(crate) tokens_per_pass: Option<f64>,
+    /// What a pass of the model reads, from its facts: its weights, and the
+    /// KV cache each token of context adds. Unknown for an MoE model with a
+    /// draft: a pass that verifies several tokens reads the experts each of
+    /// them routes to.
+    pub(crate) pass_weights: Option<u64>,
+    pub(crate) kv_per_token: Option<u64>,
     /// Tokens held by the requests writing an answer (prompt and output so
     /// far, together), when the runtime lists its requests.
     pub(crate) context: Option<u64>,
@@ -559,11 +572,20 @@ const MANY_REQUESTS: u64 = 4;
 /// The work a speed was measured on. Speed depends on it: on one server's
 /// week of requests a lone answer ran at 83 tok/s with under 1k tokens of
 /// context and 54 tok/s with 64k–128k, and each answer ran at 73, 55, 43
-/// and 31 tok/s with one to four requests writing at once.
+/// and 31 tok/s with one to four requests writing at once. With a draft it
+/// depends on the text as well: on another server a lone short answer ran
+/// at 123 tok/s when the draft landed 7.8 tokens a verify pass and at 88
+/// when it landed 5.55: 15.8 and 15.9 passes a second.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Work {
     pub(crate) requests: u64,
     pub(crate) context: Option<u64>,
+    /// Tokens a verify pass emitted, when the runtime counts them: speed
+    /// over them is the machine's verify passes a second.
+    pub(crate) tokens_per_pass: Option<f64>,
+    /// Bytes a pass read at this context: the model's weights and the KV
+    /// cache of the context, when the model's facts give both.
+    pub(crate) pass_bytes: Option<f64>,
 }
 
 impl Work {
@@ -576,6 +598,14 @@ impl Work {
         Self {
             requests: requests.clamp(1, MANY_REQUESTS),
             context: o.context,
+            tokens_per_pass: o.tokens_per_pass,
+            // A batch reads the weights once and each sequence's cache, so
+            // the requests' context together is what its passes read.
+            pass_bytes: o
+                .pass_weights
+                .zip(o.kv_per_token)
+                .zip(o.context)
+                .map(|((weights, kv), context)| weights as f64 + kv as f64 * context as f64),
         }
     }
 
@@ -588,6 +618,24 @@ impl Work {
                 (None, None) => true,
                 _ => false,
             }
+    }
+
+    /// `speed`, measured on this work, as it would read on `to`: at `to`'s
+    /// tokens per pass when both are counted, so the verify passes a second
+    /// are what is compared, and at `to`'s depth when the bytes a pass reads
+    /// are known for both, since a pass takes as long as its reads. `None`
+    /// when `to` is judged per pass and this work's passes are not known.
+    fn speed_at(self, speed: f64, to: Self) -> Option<f64> {
+        let text = match (self.tokens_per_pass, to.tokens_per_pass) {
+            (Some(from), Some(to)) => to / from,
+            (None, Some(_)) => return None,
+            _ => 1.0,
+        };
+        let depth = match (self.pass_bytes, to.pass_bytes) {
+            (Some(from), Some(to)) => from / to,
+            _ => 1.0,
+        };
+        Some(speed * text * depth)
     }
 
     /// What it is, in words: `1 request · 40k context`.
@@ -628,8 +676,9 @@ impl Speeds {
     }
 
     /// The usual speed for `work`: from its latest earlier samples of
-    /// similar work. Work not seen before has no usual speed until it has
-    /// been seen: it is learned, never judged against different work.
+    /// similar work, each taken at `work`'s tokens per pass and depth. Work
+    /// not seen before has no usual speed until it has been seen: it is
+    /// learned, never judged against different work.
     pub(crate) fn usual(&self, work: Work) -> Usual {
         let mut usual = Usual::default();
         usual.relearn(
@@ -637,8 +686,8 @@ impl Speeds {
                 .iter()
                 .rev()
                 .filter(|(_, earlier)| earlier.like(work))
+                .filter_map(|(speed, earlier)| earlier.speed_at(*speed, work))
                 .take(WINDOW)
-                .map(|(speed, _)| *speed)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev(),
@@ -919,7 +968,7 @@ impl CorrelationEngine {
 
         // The number of requests and their context are not reasons: the
         // usual speed is already the one for this work.
-        let findings = self.findings(&current, thresholds);
+        let findings = self.reasons(&current, thresholds);
         // With no reason at all, a slower speed that holds becomes usual.
         if !findings.is_empty() {
             open.quiet.clear();
@@ -1074,6 +1123,18 @@ impl CorrelationEngine {
     fn watched(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
         let mut findings = self.findings(current, thresholds);
         findings.retain(|found| found.signal.host());
+        findings
+    }
+
+    /// What can explain a slowdown in this sample. Judged per verify pass,
+    /// fewer draft tokens accepted cannot: they make each pass emit fewer
+    /// tokens, not the machine run fewer passes. That is the text, and the
+    /// usual speed already allows for it.
+    fn reasons(&self, current: &CorrelationObservation, thresholds: Thresholds) -> Vec<Finding> {
+        let mut findings = self.findings(current, thresholds);
+        if current.tokens_per_pass.is_some() {
+            findings.retain(|found| found.signal != Signal::DraftRejection);
+        }
         findings
     }
 
@@ -1276,6 +1337,11 @@ impl CorrelationObservation {
             prefill_prompt: None,
             stalled_for: None,
             output_tokens: None,
+            // Reading a prompt is compute work: no draft verifies it, and
+            // what a decode pass reads does not time it.
+            tokens_per_pass: None,
+            pass_weights: None,
+            kv_per_token: None,
             context: (!readers.is_empty()).then(|| readers.iter().map(|r| r.prompt).sum()),
             writers: if readers.is_empty() {
                 self.writers.clone()
@@ -1295,6 +1361,14 @@ impl CorrelationObservation {
             .collect();
         let prefilling: Vec<_> = running.iter().filter(|r| r.prefilled.is_some()).collect();
         let generating: Vec<_> = running.iter().filter(|r| r.prefilled.is_none()).collect();
+        // A pass emits at least the token the model adds itself.
+        let tokens_per_pass = sample
+            .llm_tokens_per_pass
+            .filter(|tokens| tokens.is_finite() && *tokens >= 1.0);
+        let facts = &sample.model;
+        let drafting = facts.draft == Some(true)
+            || sample.llm_draft_acceptance.is_some()
+            || tokens_per_pass.is_some_and(|tokens| tokens > 1.0);
         Self {
             provider: sample.llm_provider.clone(),
             model: sample.llm_model.clone(),
@@ -1340,6 +1414,11 @@ impl CorrelationObservation {
             ssd_full: sample.ssd_cache.is_some_and(|cache| cache.full()),
             cpu: (sample.llm_count > 0).then_some(sample.llm_cpu),
             draft_acceptance: sample.llm_draft_acceptance,
+            tokens_per_pass,
+            pass_weights: facts
+                .bytes_per_pass
+                .filter(|bytes| *bytes > 0 && !(drafting && facts.experts.is_some())),
+            kv_per_token: facts.kv_bytes_per_token().filter(|bytes| *bytes > 0),
             context: (!generating.is_empty()).then(|| {
                 generating
                     .iter()

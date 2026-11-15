@@ -20,6 +20,7 @@ impl crate::analysis::Speeds {
         let lone = crate::analysis::Work {
             requests: 1,
             context: Some(70_000),
+            ..crate::analysis::Work::default()
         };
         self.usual(lone).level()
     }
@@ -721,6 +722,8 @@ mod config;
 mod dashboards;
 #[path = "main_detection.rs"]
 mod detection;
+#[path = "main_detection_per_pass.rs"]
+mod detection_per_pass;
 #[path = "main_journal.rs"]
 mod journal;
 #[path = "main_other.rs"]
