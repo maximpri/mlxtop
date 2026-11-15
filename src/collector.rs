@@ -664,6 +664,14 @@ impl Collector {
         }
         (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref(), self.platform);
         sample.ts = epoch_millis(SystemTime::now());
+        self.conclude(sample, sample_started)
+    }
+
+    /// What becomes of a sample once it is read: it is judged against
+    /// earlier ones, drawn, told in the Journal, counted in the session,
+    /// recorded and logged, and becomes the current sample. Nothing here
+    /// reads the machine, so a sample taken elsewhere goes the same way.
+    pub(crate) fn conclude(&mut self, mut sample: Sample, sample_started: Instant) -> Sample {
         let previous = if self.current.updated == "waiting" {
             None
         } else {

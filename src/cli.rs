@@ -73,7 +73,7 @@ pub(crate) fn help_text(platform: Platform) -> String {
     format!(
         "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
          update installs the latest release in place; --rc includes release candidates\n\
-         replay reads a recording back through the detection rules and reports what fires\n\
+         replay reads a recording back through the detection rules and counts what fires\n\
          Options:\n\
          \x20 -i, --interval N  refresh interval in seconds, 1–60 (default 1)\n\
          \x20 -n, --history N   chart and journal history, 20–3600 samples\n\
