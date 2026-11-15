@@ -92,6 +92,7 @@ cargo install --path . --locked
 ```sh
 mlxtop            # open the dashboard
 mlxtop --once     # print a text report and exit (works over SSH)
+mlxtop stream     # one line of JSON per sample, for scripts (--once --json for one)
 mlxtop doctor     # check the runtime connection and which readings are available
 ```
 

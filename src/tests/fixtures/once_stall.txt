@@ -1,0 +1,21 @@
+mlxtop · static report (1s sample)
+
+SIGNAL       LLM READY · HEALTHY
+PRESSURE     normal
+MEMORY       27.0 / 36.0 GiB · 9.0 GiB left (free and file cache)
+PAGING       1.5 GiB / 2.0 GiB · 75% used · in 512.0 KiB/s · out 0 B/s · file in 512.0 KiB/s · out 0 B/s · memory not tight
+METAL        Apple M4 Max · 32 cores · GPU 3% · renderer 96% · tiler 41%
+RUNTIME      thermal nominal · LLM 1 · footprint — · Metal limit 27.3 GiB
+LLM          oMLX · Splash · generating · LIVE · Qwen3.8-27B-oQ4e-mtp
+PROVIDER     context capacity 262144 tokens · server TTFT 1.8s
+SERVING      GEN 0.0 tok/s · AVG PREFILL 298.4 tok/s · active 1 · cache 91.5%
+TOKENS       PROMPT 40.2k · OUT 812
+REQUEST      observed prompt 40211 · out 812 · oMLX · Qwen3.8-27B-oQ4e-mtp · req-7f3a · cached 39936 · output 61.8 tok/s (sampled) · first token 1840 ms (reported)
+PROCESS OS   pid 4242 · footprint 19.0 GiB · lifetime peak 20.0 GiB · RSS 2.0 GiB · growth +1.0 MiB/s
+ENGINE       Splash under oMLX · engine status is private to oMLX
+SLOWDOWN      GEN stalled · no new token for 4s at 812 out · GPU idle
+UNUSUAL       generation stalled · no new token for 4s at 812 out · GPU idle
+USUAL SPEED   123.0 tok/s for 1 request · 41.0k context · slow below 98.4
+DIAGNOSIS    Generation stalled
+EVIDENCE     GEN stalled · WITH no new token for 4s at 812 out · GPU idle
+CHECK         The runtime paused with the GPU idle and nothing on this machine out of the ordinary: the cause is inside it; check its log at this time.

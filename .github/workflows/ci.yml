@@ -29,11 +29,12 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --locked --all-targets
-      - name: Test client usage helper
-        if: runner.os != 'Windows'
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Build release
         run: cargo build --release --locked
+      # After the build: the JSON output checks run the release binary.
+      - name: Test scripts and the JSON output
+        if: runner.os != 'Windows'
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
   coverage:
     strategy:

@@ -5,13 +5,48 @@ use crate::formatting::{
     bytes, count, llm_generation_rate_label, percent_u8, pressure_state_label, rate,
 };
 
-pub(super) struct Finding {
+pub(crate) struct Finding {
+    /// What the verdict is, by name; `title` says it in words.
+    pub verdict: Verdict,
     pub title: String,
     pub evidence: String,
     pub context: String,
     pub next: String,
     pub actionable: bool,
     pub tone: Tone,
+}
+
+/// The verdict by name, for a program to match where a person reads the
+/// title. One name per kind of headline; the title can carry more (which
+/// GPU, how many requests, whether the runtime is remote).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Verdict {
+    /// Nothing limits the work and memory pressure is normal.
+    Healthy,
+    /// Nothing measured limits the work, but pressure is not reported normal.
+    NoBottleneck,
+    /// The first sample: rates need a second one.
+    CollectingBaseline,
+    /// Some of the host's counters could not be read.
+    CountersIncomplete,
+    GenerationSlowed,
+    PrefillSlowed,
+    GenerationStalled,
+    RequestsWaiting,
+    MemoryBottleneck,
+    MemoryStress,
+    SwapThrashing,
+    HeavyPaging,
+    PageInRecovery,
+    PagingActive,
+    WatchPaging,
+    CompressionActive,
+    ThermalLimit,
+    /// Part or all of the model runs on the CPU although a GPU is present.
+    CpuOffload,
+    VramFull,
+    GpuThrottled,
 }
 
 /// What to change for a measured slowdown, by its cause, with the readings
@@ -109,7 +144,10 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
     }
 }
 
-pub(super) fn assess(sample: &Sample) -> Finding {
+/// The verdict the screen shows for `sample`: its headline, evidence and
+/// next step, as the Overview strip, Diagnostics, `--once` and the JSON
+/// snapshot all say it.
+pub(crate) fn assess(sample: &Sample) -> Finding {
     let mut finding = assess_observation(sample);
     if sample.llm_remote {
         if finding.title.ends_with(" waiting") {
@@ -142,12 +180,12 @@ fn live_rate(sample: &Sample) -> bool {
 fn measured_slowdown(sample: &Sample, finding: &mut Finding) -> bool {
     let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
     if live_rate(sample) && !sample.llm_remote && sample.correlation.is_material_drop() {
-        finding.title = if sample.correlation.cause == CorrelationCause::Stall {
-            "Generation stalled".into()
+        (finding.verdict, finding.title) = if sample.correlation.cause == CorrelationCause::Stall {
+            (Verdict::GenerationStalled, "Generation stalled".into())
         } else if prefill {
-            "Prefill slowed".into()
+            (Verdict::PrefillSlowed, "Prefill slowed".into())
         } else {
-            "Generation slowed".into()
+            (Verdict::GenerationSlowed, "Generation slowed".into())
         };
         finding.evidence = sample
             .correlation
@@ -190,6 +228,7 @@ fn assess_observation(sample: &Sample) -> Finding {
         "GPU"
     };
     let mut finding = Finding {
+        verdict: Verdict::NoBottleneck,
         title: "No bottleneck established".into(),
         evidence: format!("{gpu} {} · paging {paging}", percent_u8(sample.gpu_util)),
         context: format!(
@@ -208,13 +247,28 @@ fn assess_observation(sample: &Sample) -> Finding {
     } else {
         sample.impact.as_str()
     };
+    let free_memory = "Free memory; stop unused models or apps.";
+    let reduce_models = "Reduce active models; recheck swap-out.";
+    let reduce_concurrency = "If paging persists, reduce concurrency.";
     let action = match impact {
-        "MEMORY BOTTLENECK" | "MEMORY STRESS" => Some("Free memory; stop unused models or apps."),
-        "SWAP THRASHING" | "HEAVY PAGING" => Some("Reduce active models; recheck swap-out."),
-        "PAGE-IN RECOVERY" => Some("Let page-ins settle before adding work."),
-        "PAGING ACTIVE" | "WATCH PAGING" => Some("If paging persists, reduce concurrency."),
-        "COMPRESSION ACTIVE" => Some("Check whether paging also rises."),
-        "THERMAL LIMIT" => Some("Reduce concurrency; recheck thermals."),
+        "MEMORY BOTTLENECK" => Some((Verdict::MemoryBottleneck, free_memory)),
+        "MEMORY STRESS" => Some((Verdict::MemoryStress, free_memory)),
+        "SWAP THRASHING" => Some((Verdict::SwapThrashing, reduce_models)),
+        "HEAVY PAGING" => Some((Verdict::HeavyPaging, reduce_models)),
+        "PAGE-IN RECOVERY" => Some((
+            Verdict::PageInRecovery,
+            "Let page-ins settle before adding work.",
+        )),
+        "PAGING ACTIVE" => Some((Verdict::PagingActive, reduce_concurrency)),
+        "WATCH PAGING" => Some((Verdict::WatchPaging, reduce_concurrency)),
+        "COMPRESSION ACTIVE" => Some((
+            Verdict::CompressionActive,
+            "Check whether paging also rises.",
+        )),
+        "THERMAL LIMIT" => Some((
+            Verdict::ThermalLimit,
+            "Reduce concurrency; recheck thermals.",
+        )),
         _ => None,
     };
     let critical = matches!(
@@ -224,7 +278,8 @@ fn assess_observation(sample: &Sample) -> Finding {
     if !critical && measured_slowdown(sample, &mut finding) {
         return finding;
     }
-    if let Some(action) = action {
+    if let Some((verdict, action)) = action {
+        finding.verdict = verdict;
         finding.title = sentence_case(impact);
         finding.next = action.into();
         finding.actionable = true;
@@ -242,6 +297,11 @@ fn assess_observation(sample: &Sample) -> Finding {
         return finding;
     }
     if let Some(issue) = &sample.gpu_issue {
+        finding.verdict = match issue {
+            crate::gpu_findings::GpuIssue::Offload { .. } => Verdict::CpuOffload,
+            crate::gpu_findings::GpuIssue::VramFull { .. } => Verdict::VramFull,
+            crate::gpu_findings::GpuIssue::Throttled { .. } => Verdict::GpuThrottled,
+        };
         finding.title = issue.title();
         finding.evidence = issue.evidence();
         finding.next = issue.next().into();
@@ -250,11 +310,13 @@ fn assess_observation(sample: &Sample) -> Finding {
         return finding;
     }
     if sample.impact == "SAMPLING" || !sample.rate_ready {
+        finding.verdict = Verdict::CollectingBaseline;
         finding.title = "Collecting system baseline".into();
         finding.next = "Wait for the next sample.".into();
         return finding;
     }
     if sample.impact == "DATA LIMITED" {
+        finding.verdict = Verdict::CountersIncomplete;
         finding.title = "System counters incomplete".into();
         finding.next = "Restore missing counters before tuning.".into();
         finding.actionable = true;
@@ -270,6 +332,7 @@ fn assess_observation(sample: &Sample) -> Finding {
             .is_some_and(|waiting| waiting > 0)
     {
         let waiting = sample.llm_waiting_requests.unwrap_or_default();
+        finding.verdict = Verdict::RequestsWaiting;
         finding.title = format!(
             "{} request{} waiting",
             count(sample.llm_waiting_requests),
@@ -287,6 +350,7 @@ fn assess_observation(sample: &Sample) -> Finding {
     }
     // Lead with the verdict. High GPU use stays evidence, never the headline.
     if pressure_state_label(sample) == "normal" {
+        finding.verdict = Verdict::Healthy;
         finding.title = "Healthy · no bottleneck".into();
         finding.tone = Tone::Green;
     }
