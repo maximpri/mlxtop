@@ -959,12 +959,12 @@ impl Sample {
         }
     }
 
-    /// An Apple GPU was read. Its memory is the machine's RAM wherever the
-    /// sample is shown, so a Mac's recording keeps its one pool on Linux.
+    /// An Apple GPU was read (`ioreg` named it or counted its cores; Linux
+    /// and Windows fill only the CPU architecture). Its memory is the
+    /// machine's RAM wherever the sample is shown, so a Mac's recording
+    /// keeps its one pool on Linux.
     pub(crate) fn apple_gpu(&self) -> bool {
-        self.metal.device_name.is_some()
-            || self.metal.gpu_cores.is_some()
-            || self.metal.architecture.is_some()
+        self.metal.device_name.is_some() || self.metal.gpu_cores.is_some()
     }
 }
 

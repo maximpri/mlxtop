@@ -723,6 +723,8 @@ fn linux_workstation() -> Sample {
                 total: Some(24 * GIB),
                 temperature: Some(71),
                 throttle_reasons: Some(0x20),
+                unified: false,
+                limits: Default::default(),
             },
             crate::gpu::Device {
                 index: 1,
@@ -734,6 +736,8 @@ fn linux_workstation() -> Sample {
                 total: Some(48 * GIB),
                 temperature: None,
                 throttle_reasons: None,
+                unified: false,
+                limits: Default::default(),
             },
         ],
         metal: MetalTelemetry {
@@ -803,6 +807,7 @@ fn memory_follows_the_hardware() {
     spark.gpus.truncate(1);
     spark.gpus[0].used = None;
     spark.gpus[0].total = None;
+    spark.gpus[0].unified = true;
     let spark = json(&spark, Platform::Linux);
     assert_eq!(spark["host"]["memory"]["layout"], "unified");
     assert_eq!(spark["host"]["memory"]["gpu"]["used_bytes"], Value::Null);

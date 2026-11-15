@@ -4,7 +4,7 @@ SIGNAL       LLM READY · HEALTHY
 PRESSURE     normal
 MEMORY       27.0 / 36.0 GiB · 9.0 GiB left (free and file cache)
 PAGING       1.5 GiB / 2.0 GiB · 75% used · in 512.0 KiB/s · out 0 B/s · file in 512.0 KiB/s · out 0 B/s · memory not tight
-METAL        Apple M4 Max · 32 cores · GPU 0% · renderer 96% · tiler 41%
+METAL        Apple M4 Max · 32 cores · 410 GB/s · GPU 0% · renderer 96% · tiler 41%
 RUNTIME      thermal nominal · LLM 1 · footprint — · Metal limit 27.3 GiB
 LLM          vLLM · generating · LIVE · Qwen/Qwen3-32B
 PROVIDER     remote API · throughput: server token deltas
