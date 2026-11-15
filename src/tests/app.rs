@@ -1524,7 +1524,7 @@ fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
         "pressure is a measurement, not a doctor failure"
     );
     let text = String::from_utf8(text).unwrap();
-    for line in diagnostic_lines(&sample) {
+    for line in diagnostic_lines(&sample, None) {
         assert!(text.contains(&line));
     }
     sample.runtime.provider = Some("Ollama".into());

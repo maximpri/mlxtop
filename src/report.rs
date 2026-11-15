@@ -222,6 +222,17 @@ pub(crate) fn write_static(
             usual_for(&sample.correlation)
         )?;
     }
+    // Decode per verify pass, an estimate, and what a draft pays.
+    if let Some(estimate) = crate::efficiency::of_sample(sample) {
+        writeln!(
+            out,
+            "DECODE       estimate {}",
+            crate::efficiency::share_text(&estimate, None)
+        )?;
+        if let Some(draft) = crate::efficiency::draft_text(&estimate) {
+            writeln!(out, "DRAFT        {draft}")?;
+        }
+    }
     let finding = diagnosis::assess(sample);
     writeln!(out, "DIAGNOSIS    {}", finding.title)?;
     writeln!(
@@ -249,9 +260,16 @@ fn usual_for(insight: &crate::domain::CorrelationInsight) -> String {
     }
 }
 
-/// The expanded panel and doctor report share facts and wording.
-pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
-    let finding = diagnosis::assess(sample);
+/// The expanded panel and doctor report share facts and wording. The panel
+/// passes the session's `decode` record, for the best decode reached here.
+pub(crate) fn diagnostic_lines(
+    sample: &Sample,
+    decode: Option<&crate::efficiency::Record>,
+) -> Vec<String> {
+    let finding = match decode {
+        Some(decode) => diagnosis::assess_session(sample, decode),
+        None => diagnosis::assess(sample),
+    };
     let mut lines = vec![
         "ASSESSMENT".into(),
         finding.title,
@@ -273,6 +291,13 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
             insight.phase.word(),
             usual_for(insight)
         ));
+    }
+    if let Some(estimate) = crate::efficiency::of_sample(sample) {
+        let best = decode.and_then(|decode| decode.best(sample, &estimate));
+        lines.push(crate::efficiency::share_line(&estimate, best));
+        lines.extend(
+            crate::efficiency::draft_text(&estimate).map(|draft| format!("Draft: {draft}.")),
+        );
     }
     lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
     // What holds each card back, in words: never a finding of its own.
@@ -297,7 +322,7 @@ pub(crate) fn write_doctor(out: &mut dyn Write, sample: &Sample) -> io::Result<b
             "incomplete"
         }
     )?;
-    for line in diagnostic_lines(sample) {
+    for line in diagnostic_lines(sample, None) {
         writeln!(out, "{line}")?;
     }
     Ok(host_ready && !sample.runtime.failed())

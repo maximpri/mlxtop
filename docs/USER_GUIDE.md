@@ -41,7 +41,10 @@ to go when the edge runs short; `--once` prints it on the `METAL` line.
 Below it, a one-line **assessment** leads with an icon: ✓ for
 `Healthy · no bottleneck`, ▲ for a condition to inspect, ✖ for a critical one.
 Evidence follows only when something is wrong, and a second line appears only
-for a suggested check (→) or a missing reading worth knowing about.
+for a suggested check (→) or a missing reading worth knowing about, or, while
+a healthy model decodes near the best this machine has reached with it, to say
+that only the model's side can make it faster (see
+[Decode efficiency](#decode-efficiency)).
 
 The **host row** takes the remaining height: **memory**, **KV cache / model
 I/O** and **paging / I/O** on macOS (memory spans two columns on Linux and
@@ -227,6 +230,69 @@ lower speed holds for 30 seconds it becomes the usual speed for that work
 (`SETTLED`). This
 is what happens together, not proof of cause. mlxtop needs eight samples of
 generation before it has a usual speed to compare with.
+
+## Decode efficiency
+
+Writing an answer reads the model's weights for every forward pass, so the
+chip's memory bandwidth bounds generation. mlxtop estimates how much of the
+chip's published peak (the figure on the runtime card) decode reads, counted
+per **verify pass**:
+
+- **Passes per second** are the generation speed divided by the tokens a pass
+  emits. With speculative decoding one pass of the model verifies a block of
+  drafted tokens and emits those it accepts plus one of its own; the runtime
+  reports that count. Without a draft a pass emits one token.
+- **Bytes per pass** are what one pass reads, from the
+  [model's facts](#model-facts): its weights, the KV cache of the context being
+  decoded (KV bytes per token × the prompt and output so far) and the
+  sequence's fixed state, counted once, as it is read.
+- **The share** is passes per second × bytes per pass ÷ the chip's peak.
+
+Counted per token instead, the figure is impossible: a Mac Studio (M4 Max,
+32-core GPU, 410 GB/s) decoding Qwen3.8-27B at 123 tok/s with a draft that
+lands 7.8 tokens a pass would read 450% of its peak. Per verify pass it reads
+59% under 2k context, falling to 50% at 64k–128k, where attention work costs
+time beyond the KV cache it reads. The draft's own reads are left out
+(`draft excluded`): a runtime may hold the draft in another format than its
+files (Splash loads a bf16 draft as 4-bit), so its bytes are not known.
+
+It is an estimate, labelled as one and never coloured. It is shown only while
+one request decodes alone on this machine and every input is known: nothing
+for a remote runtime, a model partly in CPU memory, a chip whose bin mlxtop
+cannot tell, a model whose bytes it does not know, an MoE model with a draft
+(a pass that verifies several tokens reads the experts each of them routes
+to), or a draft whose runtime does not report its tokens per pass. A share
+above 100% means an input is wrong, and is not shown either.
+
+No chip reaches its published peak, and how close it gets depends on the
+chip, the quantization and the runtime (from about 40% to 95% in llama.cpp's
+measurements), so mlxtop judges decode against the best it has reached on
+this machine with this model in this session, while generation ran at its
+usual speed: the share nine samples in ten of similar work (a context within
+a factor of two) stayed under, once there are twenty. While the middle of the
+last five samples is within a tenth of that best, a healthy assessment says
+what would make decode faster:
+
+```text
+ ✓ Healthy · no bottleneck
+   Decode is near its estimated limit: fewer bytes/token or a better draft.
+```
+
+Fewer bytes per token means a smaller quantization, a quantized KV cache, a
+shorter context or a model with fewer active parameters; a better-matched
+draft lands more tokens a pass. Without a draft, the line ends `or a draft
+model`. Diagnostics (`d`) gives the share and the best, and with a draft what
+the draft pays: its tokens per pass, and the speed this machine could not
+exceed without it (one token a pass at the full peak):
+
+```text
+Decode estimate: 59% of 410 GB/s per verify pass, draft excluded; best 61%.
+Draft: 7.8 tokens per pass; without it, at most an estimated 27 tok/s.
+```
+
+`--once` prints the same on `DECODE` and `DRAFT` lines beside the usual speed,
+without a best, and the [session summary](#session-summary) gives decode by
+context.
 
 ## oMLX telemetry
 
@@ -505,6 +571,8 @@ Press `d` from any main view to open **Diagnostics**. During process-filter entr
 `d` remains a filter character; finish the filter first. The panel shows the full
 assessment and what else was unusual when generation slowed. Local hardware findings are explicitly labeled when the selected
 API is remote; they do not establish a remote inference bottleneck.
+Beside the usual speed it gives the [decode efficiency](#decode-efficiency)
+estimate, when one is known, and with a draft what the draft pays.
 
 The connection section shows selection provenance, the resolved endpoint, hidden
 credential status, polling ages, endpoint failures and capability sources. A
@@ -667,13 +735,26 @@ that a corresponding process exists on the machine running mlxtop.
 ### Session summary
 
 `u` opens what the session amounted to: how long the model was watched and
-worked, the speed each cause cost, where requests' time went (queue, prompt,
-answer) with the slowest answers, the time the prompt cache saved and the
-energy per token. The same summary is printed when mlxtop exits, if the model
-did any work. Energy is the whole machine's power where macOS reports it;
+worked, the speed each cause cost, decode by context, where requests' time
+went (queue, prompt, answer) with the slowest answers, the time the prompt
+cache saved and the energy per token. The same summary is printed when mlxtop
+exits, if the model did any work. Energy is the whole machine's power where
+macOS reports it;
 on Linux and Windows it is the power every GPU reports (none if one card
 gives no reading), labelled `GPU power only`, or `APU power only` for an AMD
 APU, whose reading covers its CPU cores too.
+
+Decode by context is the [decode efficiency](#decode-efficiency) estimate
+over the session, for the model being served: for each band of context with
+twenty samples of usual-speed decode, the usual share of the chip's peak, the
+usual speed and, with a draft, the usual tokens per pass. The bands are under
+4k tokens, then by factors of four:
+
+```text
+Decode per verify pass by context (estimate, draft excluded):
+  under 4k  58% of 410 GB/s · usual 123 tok/s · 7.8 tokens per pass
+  64k–256k  50% of 410 GB/s · usual 52 tok/s · 4.5 tokens per pass
+```
 
 ### Journal
 
