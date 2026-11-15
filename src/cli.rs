@@ -67,6 +67,14 @@ pub(crate) enum CliAction {
         history: usize,
         record: Option<std::path::PathBuf>,
     },
+    /// Sample with no screen and answer `/metrics`, `/snapshot` and
+    /// `/health` on a loopback address.
+    Serve {
+        interval: u64,
+        history: usize,
+        record: Option<std::path::PathBuf>,
+        listen: std::net::SocketAddr,
+    },
     /// Read a recording back through today's rules and report what fires.
     Replay {
         path: std::path::PathBuf,
@@ -79,8 +87,10 @@ pub(crate) enum CliAction {
 
 pub(crate) fn help_text(platform: Platform) -> String {
     format!(
-        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop stream [--interval N] [--schema 1]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
+        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop stream [--interval N] [--schema 1]\n       mlxtop serve [--listen ADDR] [--interval N]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
          stream writes the --json snapshot of every sample, a line each, until stopped\n\
+         serve answers /metrics (Prometheus), /snapshot and /health on loopback only;\n\
+         \x20 another machine reaches it with ssh -L {port}:127.0.0.1:{port} HOST\n\
          update installs the latest release in place; --rc includes release candidates\n\
          replay reads a recording back through the detection rules and counts what fires\n\
          Options:\n\
@@ -90,6 +100,7 @@ pub(crate) fn help_text(platform: Platform) -> String {
          \x20 --json            static report as one line of JSON (schema {}, experimental)\n\
          \x20 --schema N        with --json or stream: stop unless the schema written is N\n\
          \x20 --record FILE     append every sample to FILE (one JSON line, about 3 KB, each)\n\
+         \x20 --listen ADDR     serve's loopback address:port (default {listen})\n\
          \x20 -V, --version     show version\n\
          \x20 -h, --help        show help\n\
          Runtime selection: MLXTOP_PROVIDER, MLXTOP_PROVIDER_PORT, MLXTOP_PROVIDER_URL,\n\
@@ -103,7 +114,9 @@ pub(crate) fn help_text(platform: Platform) -> String {
         } else {
             "~/.config/mlxtop/config.json"
         },
-        diagnostics_default_hint(platform)
+        diagnostics_default_hint(platform),
+        port = crate::exporter::DEFAULT_LISTEN.port(),
+        listen = crate::exporter::DEFAULT_LISTEN,
     )
 }
 
@@ -169,6 +182,8 @@ pub(crate) fn parse_args(
     let mut once = false;
     let mut doctor = false;
     let mut stream = false;
+    let mut serve = false;
+    let mut listen = None;
     let mut json = false;
     let mut schema = None;
     let mut record = None;
@@ -177,6 +192,12 @@ pub(crate) fn parse_args(
         match args[i].as_str() {
             "doctor" if i == 0 => doctor = true,
             "stream" if i == 0 => stream = true,
+            "serve" if i == 0 => serve = true,
+            "--listen" => {
+                i += 1;
+                let value = args.get(i).ok_or("missing listen address")?;
+                listen = Some(crate::exporter::listen_address(value)?);
+            }
             "--json" => json = true,
             "--schema" => {
                 i += 1;
@@ -236,6 +257,9 @@ pub(crate) fn parse_args(
             .into());
         }
     }
+    if listen.is_some() && !serve {
+        return Err("--listen goes with serve".into());
+    }
     if doctor {
         if once {
             return Err("doctor cannot be combined with --once".into());
@@ -257,6 +281,18 @@ pub(crate) fn parse_args(
             interval,
             history,
             record,
+        });
+    }
+    if serve {
+        // The JSON is at /snapshot; a single report is --once --json.
+        if once || json {
+            return Err("serve cannot be combined with --once or --json".into());
+        }
+        return Ok(CliAction::Serve {
+            interval,
+            history,
+            record,
+            listen: listen.unwrap_or(crate::exporter::DEFAULT_LISTEN),
         });
     }
     Ok(CliAction::Run {
@@ -362,6 +398,43 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &mut collector,
                 Duration::from_secs(interval),
                 &mut PlainText(stdout().lock()),
+                &crate::terminal::stop_requested,
+            )?;
+            return Ok(());
+        }
+        CliAction::Serve {
+            interval,
+            history,
+            record,
+            listen,
+        } => {
+            if let Some(path) = record {
+                crate::recording::start(&path)
+                    .map_err(|error| format!("cannot record to {}: {error}", path.display()))?;
+            }
+            diagnostics_log(
+                "INFO",
+                "configuration",
+                format!(
+                    "interval_seconds={interval} history_limit={history} serve=true config_path={}",
+                    config_path().display()
+                ),
+            );
+            let listener = crate::exporter::bind(listen)
+                .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
+            let address = listener.local_addr()?;
+            if let Some(reason) = crate::config::config_ignored() {
+                eprintln!("mlxtop: config.json ignored, defaults used: {reason}");
+            }
+            eprintln!(
+                "mlxtop: serving http://{address}/metrics, /snapshot and /health on loopback; Ctrl-C stops"
+            );
+            // A signal ends serving between requests, never inside one.
+            crate::terminal::stop_on_signals();
+            crate::exporter::serve(
+                listener,
+                Duration::from_secs(interval),
+                move || Collector::new(history, config),
                 &crate::terminal::stop_requested,
             )?;
             return Ok(());
