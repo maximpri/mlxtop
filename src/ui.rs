@@ -62,6 +62,20 @@ fn window_columns<T: Copy>(
         .collect()
 }
 
+/// `text` with trailing ` · ` fields dropped until it fits `room`: a field
+/// goes whole, never cut mid-word. A single field longer than the room is
+/// left for the frame to clip.
+pub(crate) fn whole_fields(text: &str, room: usize) -> String {
+    let mut kept = text;
+    while kept.chars().count() > room {
+        match kept.rsplit_once(" · ") {
+            Some((rest, _)) => kept = rest,
+            None => break,
+        }
+    }
+    kept.to_owned()
+}
+
 /// A bar that always stands on the baseline: a measured zero is the thinnest
 /// sliver in its grade (a missing sample draws nothing), and any rate at all
 /// is taller than that. Zero and a trickle then sit on one line instead of
@@ -875,7 +889,14 @@ impl App {
             "{} · {zoom}×",
             chart_window_label(history.len().min(visible_count), self.interval)
         );
-        let name = if metric == ChartMetric::Memory && area.width < 20 {
+        // The name gives way to the reading: " name " and " reading "
+        // inside the corners, with a dash between.
+        let crowded = |name: &str| {
+            name.chars().count() + current_label.chars().count() + 7 > usize::from(area.width)
+        };
+        let name = if metric == ChartMetric::Disk && crowded(name) {
+            "KV cache"
+        } else if metric == ChartMetric::Memory && area.width < 20 {
             "RAM"
         } else if metric == ChartMetric::Swap && area.width < 34 {
             "paging"
@@ -898,7 +919,11 @@ impl App {
         // Whole metadata fields fit or disappear. Never clip a token rate,
         // unit, time window or PID to squeeze in lower-priority statistics.
         let mut details = vec![window.clone()];
-        if average.is_some() {
+        // Memory's history is RAM by kind: a share "resident" over it reads
+        // 98% beside a panel that says 31.7 of 36.0 GiB.
+        let by_kind =
+            metric == ChartMetric::Memory && crate::memory_composition::segments(sample).is_some();
+        if average.is_some() && !by_kind {
             details.extend([
                 format!("avg {}", chart_stat_label(metric, average)),
                 format!("peak {}", chart_stat_label(metric, peak)),
@@ -919,7 +944,8 @@ impl App {
         // expanded chart, which zooms on its own, names its window here.
         if self.charts.expanded && area.width >= 38 {
             for detail in details {
-                let span = Span::styled(format!(" · {detail}"), Style::default().fg(MUTED));
+                // The name ends in a space of its own.
+                let span = Span::styled(format!("· {detail} "), Style::default().fg(MUTED));
                 if title.width() + span.width() + reading.width() + 2
                     <= usize::from(area.width.saturating_sub(2))
                 {
@@ -933,7 +959,9 @@ impl App {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(DIM))
             .style(Style::default().bg(PANEL));
-        let summary = self.chart_summary(area, history, metric);
+        let summary = self
+            .chart_summary(area, history, metric)
+            .map(|summary| whole_fields(&summary, usize::from(area.width.saturating_sub(4))));
         if let Some(summary) = summary {
             let summary = if rate_chart {
                 if area.width < 38 {
@@ -1056,9 +1084,14 @@ impl App {
                 {
                     "No prompts read in this window"
                 }
-                // The badge and the panel's title already say idle.
+                // The badge and the panel's title already say idle. A panel
+                // too narrow for the sentence gets a shorter one, whole.
                 _ if history.iter().any(|point| point.value.is_some()) => {
-                    "No samples in this window"
+                    if inner.width >= 25 {
+                        "No samples in this window"
+                    } else {
+                        "No samples in window"
+                    }
                 }
                 ChartMetric::Cache if inner.width < 20 => "No cache samples",
                 ChartMetric::Cache => "No cache samples yet",

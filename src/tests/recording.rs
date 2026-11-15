@@ -151,6 +151,7 @@ fn recordings_hold_no_process_command_lines() {
         state: "R".into(),
         pageins: None,
         pagein_rate: None,
+        footprint: None,
     }];
     let line = serde_json::to_string(&sample).unwrap();
     assert!(!line.contains("SECRET"), "{line}");

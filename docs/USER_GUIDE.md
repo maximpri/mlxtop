@@ -504,7 +504,10 @@ placement says nothing about local cards.
 ### Processes
 
 The process table fills the view, with the process count and aggregate
-CPU/RSS for the current filter in its title.
+CPU/RSS for the current filter in its title. On macOS a **FOOTPRINT** column
+and total give what the OS charges each process for, GPU memory included: a
+runtime holding a 23 GiB model can show 7 GiB of RSS, which leaves the
+model out.
 Select a row to see its full command, OS state, CPU, RAM share, RSS and page-ins
 per second. OS footprint/peak/growth appear only for their measured PID.
 Provider-wide model/state telemetry is labeled **RUNTIME** in the details;
@@ -744,12 +747,13 @@ in the runtime's queue reads `QUEUED` and its bar is hatched. Once absent or
 stale, an incomplete request reads `LAST SEEN`; completed request counts read
 `REPORTED`.
 
-On a panel tall enough to keep at least four rows of bars, a row under the
-size labels shows the speed each request generated at (`24.5/s`, or `24.5
-tok/s` where the bars are wide enough), so prompts can be compared by what
-they cost; a request that has generated nothing yet shows none. With one
-more row to spare, the tokens each request has generated go under that, so
-the count needs no subtraction. Both rows depend on the panel's height
+On a panel that keeps at least two rows of bars, which the Overview's does
+at 167×42, a row under the size labels shows the speed each request
+generated at (`24.5/s`, or `24.5 tok/s` where the bars are wide enough), so
+prompts can be compared by what they cost; a request that has generated
+nothing yet shows none. On a panel that keeps four rows of bars besides, the
+tokens each request has generated go under that, so the count needs no
+subtraction. At 80×24 the panel is too short for either; Enter expands it. Both rows depend on the panel's height
 alone, so the bars don't shrink when a request first generates output.
 
 While the selected live request is still prefilling, its output line becomes

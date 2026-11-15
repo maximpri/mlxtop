@@ -317,6 +317,17 @@ fn assess_observation(sample: &Sample) -> Finding {
     } else if !live && omlx_key_missing(sample) {
         // Connected, but the admin statistics need a key nobody gave.
         finding.next = "No live rates: oMLX admin key not set · 4 for Settings".into();
+    } else if let Some(need) = sample.runtime.key_need().filter(|_| !live) {
+        // The runtime wants a key, or refused the one it was sent.
+        let engine = sample.runtime.provider.as_deref().unwrap_or("the runtime");
+        finding.next = match need {
+            crate::runtime_diagnostics::KeyNeed::Missing => {
+                format!("No live rates: {engine} asks for an API key · 4 for Settings")
+            }
+            crate::runtime_diagnostics::KeyNeed::Rejected => {
+                format!("No live rates: {engine} refused the API key · 4 for Settings")
+            }
+        };
     } else if !live {
         finding.next = "Live generation rate unavailable.".into();
     }

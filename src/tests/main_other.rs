@@ -197,6 +197,7 @@ fn process_pagein_rates_are_pid_scoped() {
         state: "S".into(),
         pageins: Some(30),
         pagein_rate: None,
+        footprint: None,
     }];
     let previous = vec![LlmProcess {
         pid: 123,
@@ -208,6 +209,7 @@ fn process_pagein_rates_are_pid_scoped() {
         state: "S".into(),
         pageins: Some(10),
         pagein_rate: None,
+        footprint: None,
     }];
     annotate_process_pagein_rates(&mut current, &previous, Duration::from_secs(2));
     assert_eq!(current[0].pagein_rate, Some(10.0));

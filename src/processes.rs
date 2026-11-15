@@ -148,6 +148,7 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
                 state,
                 pageins,
                 pagein_rate: None,
+                footprint: None,
             });
         }
 

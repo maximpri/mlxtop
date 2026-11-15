@@ -152,6 +152,10 @@ pub(crate) struct LlmProcess {
     pub(crate) state: String,
     pub(crate) pageins: Option<u64>,
     pub(crate) pagein_rate: Option<f64>,
+    /// What the OS charges the process for, GPU memory included; resident
+    /// size leaves that out. `None` where the OS gives no such figure.
+    #[serde(default)]
+    pub(crate) footprint: Option<u64>,
 }
 
 #[derive(Clone)]

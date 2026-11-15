@@ -124,9 +124,12 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
-/// Plot rows the bars keep before a row of generation speeds goes under
-/// them, and one more before a row of generated tokens does.
+/// Plot rows the bars keep before a row of generated tokens goes under them.
 const OUTPUT_ROW_MIN_PLOT: u16 = 4;
+
+/// Plot rows the bars keep before a row of generation speeds does: fewer,
+/// so the Overview's panel shows each prompt's speed without being expanded.
+const SPEED_ROW_MIN_PLOT: u16 = 2;
 
 /// The speed a bar's request generated at, so prompts can be compared by
 /// what they cost: the fullest wording that leaves a gap to the next bar.
@@ -598,7 +601,7 @@ pub(super) fn draw(
     // generated, each when the plot keeps enough rows without it. That
     // depends on the panel's height alone, so the bars never shrink when
     // output first arrives. Size labels outrank both, speed outranks counts.
-    let show_speeds = inner.height >= metadata_height + 2 + OUTPUT_ROW_MIN_PLOT;
+    let show_speeds = inner.height >= metadata_height + 2 + SPEED_ROW_MIN_PLOT;
     let show_outputs = inner.height >= metadata_height + 3 + OUTPUT_ROW_MIN_PLOT;
     let footer = 1 + u16::from(show_speeds) + u16::from(show_outputs);
     if inner.height < metadata_height + footer + 1 {

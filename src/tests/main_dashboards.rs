@@ -2144,11 +2144,28 @@ fn meters_fill_in_eighths_and_the_wide_process_table_shows_one_per_share() {
         state: "S".into(),
         pageins: None,
         pagein_rate: None,
+        footprint: None,
     }];
     let rendered = render_app(&app, 180, 40);
     assert!(rendered.contains("MEM%"), "{rendered}");
     // 40% of three cells is 9.6 eighths: one full cell and a quarter.
     assert!(rendered.contains("█▎  40.0%"), "{rendered}");
+    // No footprint from the OS: no column of dashes.
+    assert!(!rendered.contains("FOOTPRINT"), "{rendered}");
+    // A runtime's resident size leaves its GPU memory out; the footprint
+    // has it, per process and in the title's total.
+    app.collector.current.llm_processes[0].footprint = Some(23 << 30);
+    for width in [180, 100] {
+        let rendered = render_app(&app, width, 40);
+        assert!(
+            rendered.contains("FOOTPRINT") && rendered.contains("23.0 GiB"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("footprint 23.0 GiB · RSS 14.0 GiB"),
+            "{rendered}"
+        );
+    }
 }
 
 #[test]
@@ -3213,5 +3230,131 @@ fn a_short_compression_panel_keeps_a_trickle_small() {
     assert!(
         !flicker.lines().nth(2).unwrap_or_default().contains('─'),
         "{flicker}"
+    );
+}
+
+#[test]
+fn what_the_acceptance_run_found_stays_fixed() {
+    // The KV bar's two shares add up to the title's rate as printed: 88.6%
+    // and 1.5% under "KV hit 90%" read 88 and 2, not 89 and 2.
+    let tiers = |memory, disk| crate::cache_impact::Tiers {
+        prompt: 10_000,
+        memory,
+        disk,
+    };
+    let row = |tiers| {
+        render_view(60, 1, |frame| {
+            crate::cache_impact::draw_tiers(frame, frame.area(), tiers)
+        })
+    };
+    assert!(
+        row(tiers(8_860, 150)).contains("RAM 88% · SSD 2%"),
+        "{}",
+        row(tiers(8_860, 150))
+    );
+    assert!(
+        row(tiers(8_960, 50)).contains("RAM 90% · SSD <1%"),
+        "{}",
+        row(tiers(8_960, 50))
+    );
+
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    // An expanded memory chart's title carries no share "resident" over a
+    // panel that gives RAM by kind, and no doubled space.
+    app.charts.expanded = true;
+    let load = app.collector.load_history.clone();
+    let screen = render_view(120, 20, |frame| {
+        app.render_indicator_chart(frame, frame.area(), "memory", &load, ChartMetric::Memory)
+    });
+    let title = screen.lines().next().unwrap_or_default();
+    assert!(title.contains(" memory · "), "{title}");
+    assert!(!title.contains("avg") && !title.contains("peak"), "{title}");
+    app.charts.expanded = false;
+
+    // A narrow KV panel shortens its name, not its reading.
+    for _ in 0..30 {
+        push_history_with_tone(&mut app.collector.disk_history, Some(0), Tone::Green, 60);
+    }
+    let (name, _, metric) = app.cache_panel();
+    assert_eq!(name, "KV cache / model I/O");
+    let disk = app.collector.disk_history.clone();
+    let draw = |width| {
+        render_view(width, 8, |frame| {
+            app.render_indicator_chart(frame, frame.area(), name, &disk, metric)
+        })
+    };
+    let narrow = draw(26);
+    let title = narrow.lines().next().unwrap_or_default();
+    assert!(
+        title.contains("┌ KV cache ─") && title.contains("KV hit 62% ┐"),
+        "{title}"
+    );
+    assert!(draw(60).contains("KV cache / model I/O"), "{}", draw(60));
+
+    // The paging footer is a whole wording that fits, never a cut word.
+    {
+        let sample = &mut app.collector.current;
+        sample.rate_ready = true;
+        sample.paging_unavailable = false;
+        sample.swap_in = 0;
+        sample.swap_out = 0;
+        sample.page_in = 4096;
+    }
+    let swap = app.collector.swap_history.clone();
+    let footer = |width| {
+        render_view(width, 8, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "paging / I/O",
+                &swap,
+                ChartMetric::Swap,
+            )
+        })
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_owned()
+    };
+    assert!(footer(26).contains("└ reading files ─"), "{}", footer(26));
+    assert!(
+        footer(60).contains("reading files · memory not tight"),
+        "{}",
+        footer(60)
+    );
+    assert_eq!(crate::ui::whole_fields("a · bb · ccc", 6), "a · bb");
+    assert_eq!(crate::ui::whole_fields("abcdef", 3), "abcdef");
+
+    // A window with nothing plotted carries no unit on its edge.
+    let mut history = VecDeque::from([ChartPoint::new(Some(400), Tone::Green)]);
+    history.extend(std::iter::repeat_n(ChartPoint::new(None, Tone::Muted), 200));
+    let screen = render_view(40, 6, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "generation",
+            &history,
+            ChartMetric::Generation,
+        )
+    });
+    assert!(screen.contains("No samples in this window"), "{screen}");
+    assert!(
+        !screen.lines().last().unwrap_or_default().contains("tok/s"),
+        "{screen}"
+    );
+    // A panel narrower than that sentence says it shorter, never cut.
+    let screen = render_view(26, 6, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &history,
+            ChartMetric::Prefill,
+        )
+    });
+    assert!(
+        screen.contains("No samples in window") && !screen.contains("windo│"),
+        "{screen}"
     );
 }

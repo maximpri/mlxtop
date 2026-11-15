@@ -500,6 +500,14 @@ impl Collector {
         if let Some(elapsed) = process_elapsed {
             annotate_process_pagein_rates(&mut llm_processes, &self.current.llm_processes, elapsed);
         }
+        // Each process's footprint, read from the OS per process. Tests
+        // name process ids that are not theirs to read.
+        if !cfg!(test) {
+            for process in &mut llm_processes {
+                process.footprint =
+                    process_memory::read(process.pid).map(|reading| reading.footprint);
+            }
+        }
         sample.llm_processes = llm_processes;
         let live_stats = self.llm_client.poll(detected_provider.as_deref());
         sample.runtime = self.llm_client.report();

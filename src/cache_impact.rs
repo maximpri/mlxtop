@@ -251,16 +251,23 @@ pub(crate) fn draw_tiers(frame: &mut Frame, row: Rect, tiers: Tiers) {
     }
     let share = |tokens: u64| tokens as f64 / tiers.prompt as f64 * 100.0;
     let (memory, disk) = (share(tiers.memory), share(tiers.disk));
-    let disk_label = if tiers.disk > 0 && disk < 1.0 {
+    // Whole percentages as the title prints them. The RAM share is what is
+    // left of the title's rate after the SSD share, so the two never add up
+    // to a point more or less than it (89% and 2% under "KV hit 90%").
+    let whole = |percent: f64| format!("{percent:.0}").parse::<f64>().unwrap_or(percent);
+    let small_disk = tiers.disk > 0 && disk < 1.0;
+    let disk_whole = if small_disk { 0.0 } else { whole(disk) };
+    let memory_whole = (whole(share(tiers.memory + tiers.disk)) - disk_whole).max(0.0);
+    let disk_label = if small_disk {
         "<1%".to_owned()
     } else {
-        format!("{disk:.0}%")
+        format!("{disk_whole:.0}%")
     };
     let width = usize::from(row.width);
     let prefix = format!("{:<8}", "reused");
     let note = [
-        format!("RAM {memory:.0}% · SSD {disk_label}"),
-        format!("{memory:.0}% · {disk_label}"),
+        format!("RAM {memory_whole:.0}% · SSD {disk_label}"),
+        format!("{memory_whole:.0}% · {disk_label}"),
     ]
     .into_iter()
     .find(|note| prefix.len() + Line::from(note.as_str()).width() + 10 <= width)

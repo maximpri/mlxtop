@@ -153,8 +153,15 @@ impl App {
         let sample = &self.collector.current;
         let insight = &sample.correlation;
         let current = history.back().and_then(|point| point.value);
-        // Whether the panel has anything plotted at all.
-        let sampled = history.iter().any(|point| point.value.is_some());
+        // Whether the panel has anything plotted in its window: the count
+        // the chart itself draws (its axis labels take six columns).
+        let plot_width = usize::from(area.width.saturating_sub(2)).saturating_sub(6);
+        let visible = self.charts.visible_samples(Chart::from(metric), plot_width);
+        let sampled = history
+            .iter()
+            .rev()
+            .take(visible)
+            .any(|point| point.value.is_some());
         match metric {
             ChartMetric::Generation
                 if self.charts.expanded
@@ -276,16 +283,22 @@ impl App {
                 let swapping = swap >= self.thresholds.swap_warn_rate;
                 let light_swap = swap > 0 && !swapping;
                 let files = sample.page_in.saturating_add(sample.page_out) > 0;
-                Some(
-                    match (swapping, files, sample.memory_tight()) {
-                        (true, _, _) => "swapping: memory is short",
-                        (false, _, _) if light_swap => "light swapping",
-                        (false, true, true) => "reading files back: memory is tight",
-                        (false, true, false) => "reading files · memory not tight",
-                        (false, false, _) => "no paging",
+                // The fullest wording the edge holds whole.
+                let wordings: &[&str] = match (swapping, files, sample.memory_tight()) {
+                    (true, _, _) => &["swapping: memory is short", "memory is short"],
+                    (false, _, _) if light_swap => &["light swapping"],
+                    (false, true, true) => {
+                        &["reading files back: memory is tight", "memory is tight"]
                     }
-                    .into(),
-                )
+                    (false, true, false) => &["reading files · memory not tight", "reading files"],
+                    (false, false, _) => &["no paging"],
+                };
+                let room = usize::from(area.width.saturating_sub(4));
+                wordings
+                    .iter()
+                    .find(|text| text.chars().count() <= room)
+                    .or(wordings.last())
+                    .map(|text| (*text).to_owned())
             }
             // What the SSD tier is doing, in words; the chart shows how much.
             ChartMetric::Disk => cache_impact::activity(sample).map(|(state, _)| state.to_owned()),

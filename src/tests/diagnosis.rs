@@ -367,4 +367,24 @@ fn a_connected_omlx_without_a_key_says_what_is_missing() {
         assess(&sample).next,
         "No live rates: oMLX admin key not set · 4 for Settings"
     );
+    // A key that was sent and refused is named too, for any runtime.
+    sample.runtime.probes.clear();
+    sample.runtime.provider = Some("llama.cpp".into());
+    sample.runtime.credentials_present = true;
+    sample
+        .runtime
+        .probes
+        .push(crate::runtime_diagnostics::Probe {
+            path: "/metrics".into(),
+            issue: Some(crate::runtime_diagnostics::ProbeIssue::Http(401)),
+        });
+    assert_eq!(
+        assess(&sample).next,
+        "No live rates: llama.cpp refused the API key · 4 for Settings"
+    );
+    sample.runtime.credentials_present = false;
+    assert_eq!(
+        assess(&sample).next,
+        "No live rates: llama.cpp asks for an API key · 4 for Settings"
+    );
 }

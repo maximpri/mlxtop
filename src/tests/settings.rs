@@ -337,6 +337,22 @@ fn the_api_key_is_typed_as_dots_saved_privately_and_applied() {
             0o600
         );
     }
+    // A refusal from the engine shows with the confirmation, not instead
+    // of it.
+    {
+        use crate::runtime_diagnostics::ProbeIssue;
+        let runtime = &mut app.collector.current.runtime;
+        runtime.provider = Some("oMLX".into());
+        runtime.credentials_present = true;
+        runtime.record::<()>("/admin/api/login", Err(ProbeIssue::Http(401)));
+    }
+    let refused = render_app(&app, 120, 40);
+    assert!(
+        refused.contains("oMLX refused the key it was sent")
+            && refused.contains("saved and applied"),
+        "{refused}"
+    );
+    app.collector.current.runtime.probes.clear();
     // Editing again starts empty: the stored key is replaced, not shown.
     press(&mut app, &[KeyCode::Enter]);
     assert_eq!(app.settings.editing.as_deref(), Some(""));

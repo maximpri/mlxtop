@@ -54,7 +54,11 @@ impl App {
         } else {
             0
         };
-        let (headers, widths): (Vec<&str>, Vec<Constraint>) = match table_mode {
+        // What each process is charged for, GPU memory included, where the
+        // OS gives it: a runtime's resident size leaves its model out.
+        let footprints = table_mode > 0 && filtered.iter().any(|p| p.footprint.is_some());
+        let total_footprint = filtered.iter().filter_map(|p| p.footprint).sum::<u64>();
+        let (mut headers, mut widths): (Vec<&str>, Vec<Constraint>) = match table_mode {
             2 => (
                 vec![
                     "PID", "PROCESS", "CPU", "MEM%", "RSS", "PAGEIN/s", "OS STATE", "PROVIDER",
@@ -97,6 +101,15 @@ impl App {
                 ],
             ),
         };
+        if footprints {
+            // After RSS, which it is read against.
+            let at = headers
+                .iter()
+                .position(|h| *h == "RSS")
+                .map_or(0, |i| i + 1);
+            headers.insert(at, "FOOTPRINT");
+            widths.insert(at, Constraint::Length(12));
+        }
         let table_rows = filtered
             .iter()
             .skip(start)
@@ -129,6 +142,11 @@ impl App {
                     }));
                 }
                 cells.push(Cell::from(bytes(process.rss)));
+                if footprints {
+                    cells.push(Cell::from(
+                        process.footprint.map(bytes).unwrap_or_else(|| "—".into()),
+                    ));
+                }
                 if table_mode > 0 {
                     cells.push(Cell::from(pagein));
                 }
@@ -143,8 +161,13 @@ impl App {
             })
             .collect::<Vec<_>>();
         let mut title = format!(
-            "LLM PROCESSES · {} · RSS {} · CPU {:.1}% · sort {}",
+            "LLM PROCESSES · {} · {}RSS {} · CPU {:.1}% · sort {}",
             filtered.len(),
+            if footprints {
+                format!("footprint {} · ", bytes(total_footprint))
+            } else {
+                String::new()
+            },
             bytes(total_rss),
             total_cpu,
             self.top_sort.label()

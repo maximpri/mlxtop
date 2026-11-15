@@ -102,20 +102,31 @@ release replaces.
   VRAM and RAM each get a meter and a chart. The trace of what was left and
   the sentence repeating the GPU meter are gone.
 - **Each prompt shows the speed it generated at.** Under every bar of the
-  prompt-load chart, below its size: `24.5/s`. The count of generated
-  tokens moves one row down, on panels tall enough for both.
+  prompt-load chart, below its size: `24.5/s`. The Overview's panel shows
+  it without being expanded; the count of generated tokens moves one row
+  down, on panels tall enough for both.
+- **Processes show each process's footprint** on macOS, beside its RSS and
+  in the title's total: a runtime's resident size leaves its GPU memory
+  out (7.0 GiB of RSS for a process holding 23.4 GiB).
+- **Nothing is cut mid-word at 80 columns.** The KV panel shortens its name
+  and keeps its reading (it read `KV cache / model I/O %`), the paging
+  footer and the empty-window message use a shorter wording that fits, and
+  any other bottom-edge summary drops whole fields.
 - **Settings holds the inference engine's API key.** It is typed and shown
   as dots, saved to a `config.json` readable by you only, and used at once.
   `MLXTOP_PROVIDER_API_KEY` still overrides it. The first time in a session
   that the engine asks for a key mlxtop does not have, or refuses the one in
   the file, mlxtop opens Settings on the key, ready to type; Esc carries on
-  without it.
+  without it. The Overview names a missing or refused key (`No live rates:
+  llama.cpp refused the API key · 4 for Settings`).
 - **One figure per fact.** The header's `LLM` and the memory panel's `by
   app` both give the runtime's footprint (the header gave its resident
   size: 7.2 GiB beside 23.4 GiB). The Journal's first row, `--once` and the
   critical-pressure line give RAM in use and what is left, as the panel
   does. The KV bar's `RAM` and `SSD` shares add up to the title's hit rate
-  (92% and 2% under `KV hit 90%`).
+  as printed (92% and 2% under `KV hit 90%`). An expanded memory chart's
+  title no longer gives a share "resident" over a panel that gives RAM by
+  kind (`avg 98%` over `31.7 / 36.0 GiB`).
 - **Zero and a trickle stand on one baseline.** A zero rate drew a dash
   through the middle of its row and a tiny rate a sliver at the bottom, so
   compression that came and went looked like a dashed line. Byte-rate axes

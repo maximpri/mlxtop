@@ -621,6 +621,7 @@ fn process(pid: u32, name: &str, rss: u64, cpu: f64) -> LlmProcess {
         state: "S".into(),
         pageins: None,
         pagein_rate: None,
+        footprint: None,
     }
 }
 

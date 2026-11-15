@@ -138,6 +138,13 @@ fn each_bar_shows_the_speed_its_request_generated_at() {
         shorter.contains("24.5/s") && !shorter.contains("│ 160"),
         "{shorter}"
     );
+    // The Overview's panel, seven rows inside its border, keeps the speeds
+    // over two rows of bars.
+    let overview = render(9, 1);
+    assert!(
+        overview.contains("24.5/s") && overview.contains("138/s"),
+        "{overview}"
+    );
     let short = render(7, 1);
     assert!(short.contains("20.0k") && !short.contains("/s"), "{short}");
 }

@@ -708,18 +708,6 @@ impl App {
                 None => {}
             }
         }
-        detail.push(Line::from(Span::styled(
-            if settings.editing.is_some() && field.kind == Kind::Secret {
-                "Type or paste the key · Enter save · Esc cancel"
-            } else if settings.editing.is_some() {
-                "Enter save · Esc cancel"
-            } else if matches!(field.kind, Kind::Toggle { .. }) {
-                "Enter / Space toggle · x reset to default · changes apply now and are saved"
-            } else {
-                "Enter edit · x reset to default · changes apply now and are saved"
-            },
-            Style::default().fg(MUTED),
-        )));
         if let Some(reason) = &settings.broken {
             detail.push(Line::from(Span::styled(
                 format!("{reason}. Fix it by hand; Settings won't overwrite it."),
@@ -739,9 +727,22 @@ impl App {
                 }
             });
         }
+        detail.push(Line::from(Span::styled(
+            if settings.editing.is_some() && field.kind == Kind::Secret {
+                "Type or paste the key · Enter save · Esc cancel"
+            } else if settings.editing.is_some() {
+                "Enter save · Esc cancel"
+            } else if matches!(field.kind, Kind::Toggle { .. }) {
+                "Enter / Space toggle · x reset to default · changes apply now and are saved"
+            } else {
+                "Enter edit · x reset to default · changes apply now and are saved"
+            },
+            Style::default().fg(MUTED),
+        )));
         // What the view asks for comes first: it must not wrap out of sight.
         if asking {
-            detail.rotate_right(1);
+            let last = detail.len() - 1;
+            detail[..last].rotate_right(1);
         }
         frame.render_widget(
             Paragraph::new(detail).wrap(Wrap { trim: true }).block(

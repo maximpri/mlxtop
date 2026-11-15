@@ -235,6 +235,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
                 state: "S".into(),
                 pageins: Some(25),
                 pagein_rate: Some(0.0),
+                footprint: None,
             },
             LlmProcess {
                 pid: 42002,
@@ -246,6 +247,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
                 state: "R".into(),
                 pageins: Some(10),
                 pagein_rate: Some(2.0),
+                footprint: None,
             },
         ],
         llm_pid: 41441,
