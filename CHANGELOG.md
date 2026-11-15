@@ -7,8 +7,11 @@ model reads per forward pass and what the chip can move, and estimates how
 close decode runs to that limit; it judges usual speed per verify pass and at
 the same context depth, keeps it across sessions, says how much more context
 fits, and names what first tokens lose to cache misses, model loads and
-overlapping requests. The detection changes wait for the owner's review of
-their tallies on real server logs before a release.
+overlapping requests. It also carries every fix from the review of 3.3.0
+(3.3.1 was never released; its fixes ship here). **Update with the install
+script or Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS
+crates this release replaces. The detection changes wait for the owner's
+review of their tallies on real server logs before a release.
 
 ### Is this speed normal?
 
@@ -149,15 +152,14 @@ their tallies on real server logs before a release.
 ### Fixes
 
 - **A Mac's memory is one pool wherever it is shown.** The memory panel chose
-  its layout from the build target, so four tests failed on Linux at
-  3.3.1-rc.6 (and would in CI there), and a Mac's recording replayed on Linux
+  its layout from the build target, so four tests failed on Linux in the
+  3.3.1 test builds (and would in CI there), and a Mac's recording replayed on Linux
   drew the wrong panel. An Apple GPU reading now decides.
 
-## 3.3.1-rc.6 — 2026-11-15
+### Fixes from the review of 3.3.0
 
-Fixes from a full review of 3.3.0. **Update with the install script or
-Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS crates this
-release replaces.
+The rest of this release's notes are the fixes made after a full review of
+3.3.0, tried as 3.3.1 test builds and never released on their own.
 
 ### Security and privacy
 
