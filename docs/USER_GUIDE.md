@@ -324,7 +324,8 @@ login, under the same rules; the per-model settings come from
 `config.json` and the shard headers, never the weights; it reads them once per
 model and again only when a file changes, which it checks once a minute. A
 file it cannot read leaves its facts unknown, and a remote oMLX's files are not
-read at all.
+read at all. The JSON snapshot carries the same facts under
+`runtime.model_facts`, and `mlxtop serve` writes them as metrics.
 
 ## MLX and Metal telemetry
 
@@ -729,13 +730,15 @@ again each time Settings opens, so edits made by hand show up.
 -h, --help         show help
 
 mlxtop stream [--interval N]   write the JSON snapshot of every sample, one line each
+mlxtop serve [--listen ADDR]   answer /metrics, /snapshot and /health on loopback
 mlxtop doctor [--interval N]   diagnose the connection and readings, then exit
 mlxtop update [--rc]           install the latest release (--rc: or release candidate)
 mlxtop replay FILE             read a recording back through the detection rules
 ```
 
 `--once --json` and `mlxtop stream` are described under
-[JSON output](#json-output).
+[JSON output](#json-output), and `mlxtop serve` under
+[Prometheus endpoint](#prometheus-endpoint).
 
 A recording keeps every sample as mlxtop saw it: the machine's readings and
 the runtime's, request by request, each with the moment it was taken (`ts`,
@@ -996,6 +999,182 @@ Every field follows the same rules:
 | `slowdown_ended.lowest_tok_per_s` | The slowest it was |
 | `slowdown_ended.tok_per_s` | The speed it ended at |
 | `slowdown_ended.usual_tok_per_s` | The speed it had fallen from |
+
+## Prometheus endpoint
+
+`mlxtop serve` samples without the dashboard and answers HTTP requests on
+this machine's loopback interface, for Prometheus, Grafana, the
+OpenTelemetry Collector's Prometheus receiver or a script:
+
+```sh
+mlxtop serve                                # http://127.0.0.1:10063
+mlxtop serve --listen 127.0.0.1:19063 -i 2  # another port, a sample every 2 s
+curl -s localhost:10063/metrics | grep tokens_per_second
+curl -s localhost:10063/snapshot | jq .verdict
+```
+
+| Path | Answer |
+| --- | --- |
+| `/metrics` | The newest sample in Prometheus's text format (`text/plain; version=0.0.4`, which Prometheus 3 requires) |
+| `/snapshot` | The JSON snapshot `--once --json` prints, as one line; 503 before the first sample |
+| `/health` | `ok` while sampling is current; 503 and how long there has been no sample otherwise |
+
+Every answer comes from the newest sample, taken every `--interval` seconds
+as the dashboard takes them: a request never starts a sample or waits for
+one, so a runtime that hangs never holds up a scrape. Sampling is current
+while the newest sample is at most three intervals old, and 5 s at least, the
+dashboard's rule for NO SAMPLE. Otherwise `mlxtop_up` is 0 and no reading is
+written, because Prometheus would store an old reading as the present one.
+Rates (`_per_second`) cover the last interval alone, so at the default 1 s
+interval a scrape every 15 s sees one second in fifteen; the runtime's
+counters (`_total`) count everything.
+`--record FILE` works as with the dashboard. `mlxtop serve` stops on Ctrl-C,
+SIGTERM or SIGHUP, and ends with an error if sampling stops, which the log
+explains.
+
+It listens on loopback only. `--listen` takes a loopback address and a port
+(`127.0.0.1:PORT`, `[::1]:PORT` or `localhost:PORT`) and refuses any other,
+`0.0.0.0` included. A request must name a loopback host (`localhost`,
+`127.0.0.1` or `[::1]`, with any port), so a web page whose name a DNS server
+points at 127.0.0.1 (DNS rebinding) gets 403. Only GET and HEAD are answered,
+one request at a time; a request head may take 8 KiB and 2 seconds at most;
+and there are no CORS headers and no HTML. Any local user or process can
+still read the answers, which name the runtime and its model.
+
+To read it from another machine, forward the port over SSH from that machine
+and point Prometheus at the near end:
+
+```sh
+ssh -N -L 10063:127.0.0.1:10063 you@mac-studio.local
+```
+
+```yaml
+scrape_configs:
+  - job_name: mlxtop
+    static_configs:
+      - targets: ["127.0.0.1:10063"]
+```
+
+### Metrics
+
+Like the JSON, the names are **experimental through 3.4**. Each begins
+`mlxtop_` and ends in its base unit (`_bytes`, `_seconds`, `_celsius`,
+`_watts`, `_per_second`; `_ratio` is a share from 0 to 1), and the counters
+end in `_total`. A reading that is unknown is left out, never written as 0.
+Labels are few and bounded: `provider` and `model` on
+`mlxtop_llm_model_info`, `limiter` on `mlxtop_bottleneck` and a GPU's index
+in `gpu`; never a request id or a process name. Help that begins
+`Estimate:` is mlxtop's own judgement, as `source` `estimate` is in the
+JSON. A runtime's speed is written under the name of its kind: measured over
+the last interval, the runtime's own average, or the last finished
+request's, as the screen's GEN, AVG GEN and LAST GEN. To see a figure beside
+the model it was measured for, join the info metric:
+`mlxtop_llm_generation_tokens_per_second * on(instance) group_left(model) mlxtop_llm_model_info`.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `mlxtop_up` | gauge | 1 while sampling is current (the newest sample at most three intervals old, 5 s at least); 0 otherwise, and then no reading is written |
+| `mlxtop_sample_age_seconds` | gauge | Seconds since the newest sample was taken |
+| `mlxtop_bottleneck` | gauge | The verdict as a state set: one series for each state `verdict.state` names in the JSON, labelled `limiter`; 1 for the verdict's state, 0 for every other |
+| `mlxtop_llm_model_info` | gauge | 1, labelled with the runtime found (`provider`) and the model it serves (`model`) |
+| `mlxtop_interval_seconds` | gauge | Seconds between samples: the span each rate is measured over |
+| `mlxtop_ram_total_bytes` | gauge | All of RAM |
+| `mlxtop_ram_available_ratio` | gauge | The share of RAM the operating system reports available |
+| `mlxtop_memory_pressure_level` | gauge | The operating system's memory pressure: 0 normal, 1 warning, 2 critical |
+| `mlxtop_memory_tight` | gauge | 1 while pressure is raised or little memory is free, so file paging counts against the machine |
+| `mlxtop_ram_used_bytes` | gauge | Wired, app and compressed memory: what the RAM meter fills |
+| `mlxtop_ram_left_bytes` | gauge | Free memory and file cache: what a model can still grow into |
+| `mlxtop_ram_wired_bytes` | gauge | Memory that cannot be paged out |
+| `mlxtop_ram_app_bytes` | gauge | Apps' memory |
+| `mlxtop_ram_compressed_bytes` | gauge | What the memory compressor holds (macOS) |
+| `mlxtop_ram_file_cache_bytes` | gauge | File cache |
+| `mlxtop_ram_free_bytes` | gauge | Free memory |
+| `mlxtop_gpu_memory_used_bytes` | gauge | What the GPU holds of RAM, where it has no memory of its own |
+| `mlxtop_gpu_memory_limit_bytes` | gauge | The GPU's wired-memory limit, where it shares RAM |
+| `mlxtop_gpu_memory_left_bytes` | gauge | The room left under that limit; 0 once over it |
+| `mlxtop_vram_used_bytes` | gauge | The cards' own memory in use, all cards together |
+| `mlxtop_vram_total_bytes` | gauge | The cards' own memory, all cards together |
+| `mlxtop_vram_left_bytes` | gauge | The cards' own memory left, all cards together |
+| `mlxtop_swap_total_bytes` | gauge | Swap allocated |
+| `mlxtop_swap_used_bytes` | gauge | Swap in use |
+| `mlxtop_swap_in_bytes_per_second` | gauge | Swapped in, over the last interval |
+| `mlxtop_swap_out_bytes_per_second` | gauge | Swapped out, over the last interval |
+| `mlxtop_swap_growth_bytes_per_second` | gauge | How fast swap use grows; negative while it shrinks |
+| `mlxtop_file_paging_in_bytes_per_second` | gauge | Pages read from disk outside swap (macOS): model loads, and a full Mac's paging with swap off |
+| `mlxtop_file_paging_out_bytes_per_second` | gauge | Pages written to disk outside swap (macOS) |
+| `mlxtop_memory_compressed_bytes_per_second` | gauge | Memory compressed, over the last interval (macOS) |
+| `mlxtop_memory_decompressed_bytes_per_second` | gauge | Memory decompressed, over the last interval (macOS) |
+| `mlxtop_published_bandwidth_bytes_per_second` | gauge | Estimate: the peak memory bandwidth the maker publishes for this chip (the Mac's, or the one card) |
+| `mlxtop_thermal_pressure_level` | gauge | macOS's thermal pressure: 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping |
+| `mlxtop_thermal_limited` | gauge | 1 while macOS holds the machine back for heat |
+| `mlxtop_cpu_speed_limit_ratio` | gauge | The share of full CPU speed macOS allows (Intel Macs) |
+| `mlxtop_hottest_temperature_celsius` | gauge | The hottest temperature measured: thermal zones and GPUs on Linux, GPUs on Windows |
+| `mlxtop_system_power_watts` | gauge | What the whole machine draws (macOS) |
+| `mlxtop_runtime_processes` | gauge | The runtime's processes |
+| `mlxtop_runtime_process_memory_bytes` | gauge | What the runtime holds: its largest process's footprint or all its processes' resident size, whichever is more |
+| `mlxtop_runtime_process_peak_bytes` | gauge | Its largest process's lifetime peak footprint (macOS) |
+| `mlxtop_runtime_process_growth_bytes_per_second` | gauge | How fast that footprint grows |
+| `mlxtop_runtime_process_cpu_cores` | gauge | CPU the runtime's processes use, in cores |
+| `mlxtop_runtime_process_disk_read_bytes_per_second` | gauge | The runtime's storage reads (macOS) |
+| `mlxtop_runtime_process_disk_write_bytes_per_second` | gauge | The runtime's storage writes (macOS) |
+| `mlxtop_llm_up` | gauge | 1 while the runtime's API answers, 0 when it does not |
+| `mlxtop_llm_remote` | gauge | 1 when the runtime runs on another machine: the host readings are not its own |
+| `mlxtop_llm_telemetry_age_seconds` | gauge | How old the runtime's readings were when the sample was taken |
+| `mlxtop_llm_generation_tokens_per_second` | gauge | Generation speed over the last interval |
+| `mlxtop_llm_generation_average_tokens_per_second` | gauge | The runtime's own average generation speed, while it reports no live one |
+| `mlxtop_llm_last_request_generation_tokens_per_second` | gauge | The last finished request's generation speed, from a completion log or a usage file |
+| `mlxtop_llm_prefill_tokens_per_second` | gauge | Prompt reading speed over the last interval |
+| `mlxtop_llm_prefill_average_tokens_per_second` | gauge | The runtime's own average prompt reading speed, while it reports no live one |
+| `mlxtop_llm_last_request_prefill_tokens_per_second` | gauge | The last finished request's prompt reading speed |
+| `mlxtop_llm_prefill_done_tokens` | gauge | Prompt tokens the prefill in flight has read |
+| `mlxtop_llm_prefill_expected_tokens` | gauge | Prompt tokens the prefill in flight will read |
+| `mlxtop_llm_requests_active` | gauge | Requests running |
+| `mlxtop_llm_requests_waiting` | gauge | Requests queued |
+| `mlxtop_llm_requests_prefilling` | gauge | Running requests reading their prompt, where the runtime lists its requests |
+| `mlxtop_llm_requests_generating` | gauge | Running requests writing their answer, where the runtime lists its requests |
+| `mlxtop_llm_context_tokens` | gauge | Tokens the requests writing an answer hold, prompt and output together |
+| `mlxtop_llm_model_memory_bytes` | gauge | Memory the runtime's models take |
+| `mlxtop_llm_model_memory_ceiling_bytes` | gauge | The most memory the runtime lets its models take |
+| `mlxtop_llm_model_size_bytes` | gauge | The loaded model's size (Ollama) |
+| `mlxtop_llm_model_offloaded_bytes` | gauge | The part of the model placed outside GPU memory (Ollama) |
+| `mlxtop_llm_context_allowed_tokens` | gauge | The context the runtime allows for the model |
+| `mlxtop_llm_weight_bytes_per_pass` | gauge | Estimate: weight bytes one forward pass reads for a token |
+| `mlxtop_llm_bits_per_weight` | gauge | Estimate: bits per parameter a pass reads, scales and biases included |
+| `mlxtop_llm_kv_bytes_per_token` | gauge | KV-cache bytes one more token of context costs: the runtime's figure where it reports one, else an estimate from the model's layers |
+| `mlxtop_llm_state_bytes_per_sequence` | gauge | Estimate: what a sequence holds whatever its length (linear-attention state, sliding windows, a draft's window) |
+| `mlxtop_llm_context_trained_tokens` | gauge | Estimate: the context the model was trained for, as its config.json declares it |
+| `mlxtop_llm_draft_weight_bytes` | gauge | Estimate: the draft model's weight bytes as stored, where speculative decoding drafts |
+| `mlxtop_llm_mlx_active_bytes` | gauge | MLX's active memory in the runtime |
+| `mlxtop_llm_mlx_cache_bytes` | gauge | MLX's cache |
+| `mlxtop_llm_mlx_peak_bytes` | gauge | MLX's peak memory |
+| `mlxtop_llm_mlx_process_footprint_bytes` | gauge | The serving process's footprint, as the runtime reports it |
+| `mlxtop_llm_cache_reuse_ratio` | gauge | The share of prompt tokens served from cache since the runtime started |
+| `mlxtop_llm_cache_recent_reuse_ratio` | gauge | The share of prompt tokens served from cache over the last interval |
+| `mlxtop_llm_prefix_cache_hit_ratio` | gauge | Prefix-cache hits |
+| `mlxtop_llm_prompt_tokens_total` | counter | Prompt tokens the runtime was sent, by its own count since it started |
+| `mlxtop_llm_cached_prompt_tokens_total` | counter | Of those, the ones served from its cache |
+| `mlxtop_llm_ssd_cache_used_bytes` | gauge | The runtime's prompt cache on disk (oMLX) |
+| `mlxtop_llm_ssd_cache_capacity_bytes` | gauge | The size of that cache |
+| `mlxtop_llm_draft_acceptance_ratio` | gauge | The share of drafted tokens accepted since the last poll (speculative decoding) |
+| `mlxtop_llm_usual_generation_tokens_per_second` | gauge | Estimate: the speed earlier samples of similar generation ran at |
+| `mlxtop_llm_generation_slow_below_tokens_per_second` | gauge | Estimate: below this speed, this generation is slow |
+| `mlxtop_llm_usual_prefill_tokens_per_second` | gauge | Estimate: the speed earlier samples of similar prompt reading ran at |
+| `mlxtop_llm_prefill_slow_below_tokens_per_second` | gauge | Estimate: below this speed, this prompt reading is slow |
+| `mlxtop_llm_slowdown_seconds` | gauge | Estimate: how long the slowdown under way has lasted |
+| `mlxtop_llm_stall_seconds` | gauge | Estimate: how long a stalled answer has gone without a token |
+
+Each GPU (the Apple GPU of a Mac, or each NVIDIA and AMD card) is labelled
+with its index, `gpu`:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `mlxtop_gpu_busy_ratio` | gauge | How busy the GPU is |
+| `mlxtop_gpu_renderer_busy_ratio` | gauge | How busy the Apple GPU's renderer is |
+| `mlxtop_gpu_tiler_busy_ratio` | gauge | How busy the Apple GPU's tiler is |
+| `mlxtop_gpu_vram_used_bytes` | gauge | A card's own memory in use |
+| `mlxtop_gpu_vram_total_bytes` | gauge | A card's own memory |
+| `mlxtop_gpu_temperature_celsius` | gauge | A card's temperature |
+| `mlxtop_gpu_throttled` | gauge | 1 while the driver holds a card's clocks down: heat, power brake, hardware slowdown or power cap |
 
 ## Configuration
 
@@ -1631,8 +1810,10 @@ supported adapters. For a model oMLX serves on this machine it reads the
 model's `config.json`, the headers of its safetensors shards (never the
 weights) and oMLX's `model_settings.json`, once per model and change. The application does not track how it is used, upload
 collected metrics, modify model state or send synthetic inference requests.
-`--once --json` and `mlxtop stream` write only to standard output, and hold
-no process names, command lines or process ids.
+`--once --json` and `mlxtop stream` write only to standard output, and
+`mlxtop serve` answers only on the loopback interface, though any local user or
+process can read what it answers; none of them holds process names, command
+lines or process ids.
 
 Provider credentials are read only when needed and are never displayed. See
 [SECURITY.md](../SECURITY.md) for responsible vulnerability reporting and the

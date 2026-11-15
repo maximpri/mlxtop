@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 //! Background collection and commands; the input/render thread never polls providers.
+//! Under `mlxtop serve` there is no screen: each sample's snapshot goes to
+//! the exporter's slot instead, and a request never waits for a sample.
 use crate::collector::{Collector, CollectorView};
 use crate::config::Config;
+use crate::exporter::Latest;
 use crate::logging::{diagnostics_log, log_field, panic_payload};
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
 use std::time::{Duration, Instant};
 use std::{panic, thread};
 pub(crate) enum SamplerCommand {
@@ -23,6 +26,16 @@ pub(crate) struct Sampler {
     pub(crate) commands: Sender<SamplerCommand>,
     pub(crate) views: Receiver<CollectorView>,
     pub(crate) handle: Option<thread::JoinHandle<()>>,
+}
+
+/// Where each sample goes.
+enum Output {
+    /// The dashboard's one-slot channel: the collector and every history,
+    /// for the screen to draw.
+    Views(SyncSender<CollectorView>),
+    /// `mlxtop serve`'s slot: the sample's JSON snapshot alone, for the
+    /// exporter to answer from.
+    Latest(Latest),
 }
 
 impl Sampler {
@@ -44,10 +57,31 @@ impl Sampler {
         interval: Duration,
         build: impl FnOnce() -> Collector + Send + 'static,
     ) -> Self {
-        let (command_tx, command_rx) = mpsc::channel();
         // Only the newest snapshot is ever used: a terminal that stops
         // reading must not queue them without limit.
         let (view_tx, view_rx) = mpsc::sync_channel(1);
+        Self::run(interval, build, Output::Views(view_tx), view_rx)
+    }
+
+    /// Sample with no screen, for `mlxtop serve`: each sample's snapshot
+    /// replaces the one in `latest`, and no view is built.
+    pub(crate) fn headless(
+        interval: Duration,
+        build: impl FnOnce() -> Collector + Send + 'static,
+        latest: Latest,
+    ) -> Self {
+        // Nothing draws, so nothing is ever sent on the view channel.
+        let (_, views) = mpsc::sync_channel(1);
+        Self::run(interval, build, Output::Latest(latest), views)
+    }
+
+    fn run(
+        interval: Duration,
+        build: impl FnOnce() -> Collector + Send + 'static,
+        output: Output,
+        views: Receiver<CollectorView>,
+    ) -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
             let mut collector = build();
             let mut interval = interval;
@@ -58,25 +92,37 @@ impl Sampler {
             loop {
                 if !paused && Instant::now() >= next_sample {
                     let started = Instant::now();
-                    let sampled = panic::catch_unwind(AssertUnwindSafe(|| collector.sample()));
-                    if let Err(payload) = sampled.as_ref() {
-                        diagnostics_log(
-                            "ERROR",
-                            "sampler_panic",
-                            format!("message={}", log_field(&panic_payload(payload.as_ref()))),
-                        );
-                    }
-                    if sampled.is_err() {
-                        break;
-                    }
-                    match view_tx.try_send(collector.view()) {
-                        // The interface has not taken the last one yet; the
-                        // next snapshot is complete, so skipping loses nothing.
-                        Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            diagnostics_log("INFO", "sampler_stop", "reason=view_receiver_closed");
+                    let sample = match panic::catch_unwind(AssertUnwindSafe(|| collector.sample()))
+                    {
+                        Ok(sample) => sample,
+                        Err(payload) => {
+                            diagnostics_log(
+                                "ERROR",
+                                "sampler_panic",
+                                format!("message={}", log_field(&panic_payload(payload.as_ref()))),
+                            );
                             break;
                         }
+                    };
+                    match &output {
+                        Output::Views(view_tx) => match view_tx.try_send(collector.view()) {
+                            // The interface has not taken the last one yet; the
+                            // next snapshot is complete, so skipping loses nothing.
+                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                            Err(mpsc::TrySendError::Disconnected(_)) => {
+                                diagnostics_log(
+                                    "INFO",
+                                    "sampler_stop",
+                                    "reason=view_receiver_closed",
+                                );
+                                break;
+                            }
+                        },
+                        Output::Latest(latest) => latest.publish(crate::export::snapshot(
+                            &sample,
+                            collector.platform,
+                            interval.as_secs(),
+                        )),
                     }
                     // A fixed rate: "every 1s" means a sample each second,
                     // not a second after the last one finished.
@@ -139,7 +185,7 @@ impl Sampler {
         });
         Self {
             commands: command_tx,
-            views: view_rx,
+            views,
             handle: Some(handle),
         }
     }

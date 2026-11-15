@@ -25,6 +25,15 @@ unless `MLXTOP_ALLOW_REMOTE_AUTH=1` is explicitly set. Native provider adapters 
 environment proxies. Plain HTTP, including the existing oMLX transport, is not
 encrypted; use HTTPS, a trusted tunnel or a protected network for remote access.
 
+`mlxtop serve`, the only mode that listens on a socket, is opt-in and binds
+loopback addresses only; it refuses any other `--listen` address. It answers
+only requests whose Host header names a loopback host (against DNS
+rebinding), only GET and HEAD, with request heads of at most 8 KiB within
+2 seconds, and with no CORS headers. It accepts no input beyond the request
+line and headers and changes nothing. Any local user or process can read its
+answers, which name the runtime and model; reach it from another machine
+through an SSH tunnel.
+
 mlxtop writes local diagnostic logs to `~/Library/Logs/mlxtop/mlxtop.log` on
 macOS, `~/.local/state/mlxtop/mlxtop.log` on Linux and
 `%LOCALAPPDATA%\mlxtop\mlxtop.log` on Windows. These logs may contain system counters and model/provider names, but
