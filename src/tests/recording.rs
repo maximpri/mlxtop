@@ -142,7 +142,7 @@ fn recording_writes_one_line_per_sample_and_replay_needs_samples() {
     );
     let thresholds = Thresholds::from_config(&Config::default());
     let mut out = Vec::new();
-    run(&path, thresholds, &mut out).unwrap();
+    run(&path, thresholds, None, &mut out).unwrap();
     let report = String::from_utf8(out).unwrap();
     let samples: usize = report
         .lines()
@@ -153,9 +153,15 @@ fn recording_writes_one_line_per_sample_and_replay_needs_samples() {
 
     let empty = dir.join("empty.jsonl");
     std::fs::write(&empty, "").unwrap();
-    let error = run(&empty, thresholds, &mut Vec::new()).unwrap_err();
+    let error = run(&empty, thresholds, None, &mut Vec::new()).unwrap_err();
     assert!(error.to_string().contains("--record"), "{error}");
-    assert!(run(&dir.join("missing.jsonl"), thresholds, &mut Vec::new()).is_err());
+    assert!(run(
+        &dir.join("missing.jsonl"),
+        thresholds,
+        None,
+        &mut Vec::new()
+    )
+    .is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

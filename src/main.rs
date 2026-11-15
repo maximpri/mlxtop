@@ -4,6 +4,7 @@
 mod analysis;
 mod anomaly;
 mod app;
+mod baseline_store;
 mod cache_impact;
 mod chart_navigation;
 mod chart_panels;

@@ -64,6 +64,7 @@ pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "compression_warn_rate": 100663296,
     "compression_warn_exit": 50331648,
     "alarms": false,
+    "baselines": false,
     "journal": {
         "prompts": false, "llm": false, "queue": false, "memory": false,
         "paging": false, "gpu": false, "thermal": false
@@ -114,6 +115,8 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         compact: Default::default(),
         quit: false,
         quit_prompt: false,
+        reset_prompt: false,
+        baselines: true,
         sampler_disconnected: false,
         last_view_at: Instant::now(),
         alert: None,
@@ -722,6 +725,10 @@ mod config;
 mod dashboards;
 #[path = "main_detection.rs"]
 mod detection;
+#[path = "main_detection_baselines.rs"]
+mod detection_baselines;
+#[path = "main_detection_kv.rs"]
+mod detection_kv;
 #[path = "main_detection_per_pass.rs"]
 mod detection_per_pass;
 #[path = "main_journal.rs"]
@@ -730,6 +737,8 @@ mod journal;
 mod other;
 #[path = "main_qa.rs"]
 mod qa;
+#[path = "main_qa_baselines.rs"]
+mod qa_baselines;
 #[path = "main_qa_chip_facts.rs"]
 mod qa_chip_facts;
 #[path = "main_qa_context_left.rs"]
@@ -740,5 +749,7 @@ mod qa_efficiency;
 mod qa_native_runtimes;
 #[path = "main_qa_request_findings.rs"]
 mod qa_request_findings;
+#[path = "main_qa_slowdown_reasons.rs"]
+mod qa_slowdown_reasons;
 #[path = "main_runtimes.rs"]
 mod runtimes;

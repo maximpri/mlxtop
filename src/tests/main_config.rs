@@ -113,6 +113,7 @@ fn every_config_field_reaches_the_resolved_settings() {
         compression_warn_exit,
         gpu_warn_exit,
         alarms,
+        baselines,
         journal,
     } = config.clone();
     let OmxConfig { host, port } = omx.expect("the fixture sets omx");
@@ -174,6 +175,10 @@ fn every_config_field_reaches_the_resolved_settings() {
         },
     );
     assert_eq!(app.alarms, alarms.expect("the fixture sets alarms"));
+    assert_eq!(
+        app.baselines,
+        baselines.expect("the fixture sets baselines")
+    );
 
     let journal = journal.expect("the fixture sets journal");
     let JournalConfig {

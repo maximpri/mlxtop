@@ -19,6 +19,8 @@ pub(crate) enum SamplerCommand {
     /// Settings saved a new config: new thresholds, and a new endpoint if `omx` changed.
     SetConfig(Box<Config>),
     Reset,
+    /// Reset, and forget the usual speeds kept across sessions for this machine.
+    Forget,
     Stop,
 }
 
@@ -104,6 +106,16 @@ impl Sampler {
                             break;
                         }
                     };
+                    // Without a screen the Journal is not read: the notice
+                    // goes where `serve` says where it listens.
+                    match &output {
+                        Output::Views(_) => collector.journal_baselines(),
+                        Output::Latest(_) => {
+                            if let Some(notice) = collector.baselines_notice() {
+                                eprintln!("mlxtop: {notice}");
+                            }
+                        }
+                    }
                     match &output {
                         Output::Views(view_tx) => match view_tx.try_send(collector.view()) {
                             // The interface has not taken the last one yet; the
@@ -115,6 +127,7 @@ impl Sampler {
                                     "sampler_stop",
                                     "reason=view_receiver_closed",
                                 );
+                                collector.save_baselines();
                                 break;
                             }
                         },
@@ -164,6 +177,7 @@ impl Sampler {
                     }
                     Ok(SamplerCommand::SetConfig(config)) => {
                         collector.apply_config(&config);
+                        collector.apply_baselines(&config);
                         diagnostics_log("INFO", "sampler_config_changed", "source=settings");
                     }
                     Ok(SamplerCommand::Reset) => {
@@ -171,12 +185,23 @@ impl Sampler {
                         diagnostics_log("INFO", "sampler_reset", "history_and_baselines_cleared");
                         next_sample = Instant::now();
                     }
+                    Ok(SamplerCommand::Forget) => {
+                        collector.forget_baselines();
+                        collector.reset();
+                        diagnostics_log("INFO", "sampler_reset", "kept_usual_speeds_forgotten");
+                        next_sample = Instant::now();
+                    }
+                    // Quitting waits only briefly for this thread: the
+                    // periodic saves are what keep usual speeds, this one
+                    // only what came since the last.
                     Ok(SamplerCommand::Stop) => {
+                        collector.save_baselines();
                         diagnostics_log("INFO", "sampler_stop", "reason=shutdown");
                         break;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        collector.save_baselines();
                         diagnostics_log("WARN", "sampler_stop", "reason=command_channel_closed");
                         break;
                     }

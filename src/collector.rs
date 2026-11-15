@@ -196,6 +196,7 @@ const GPU_SATURATED_EXIT_GAP: u64 = 10;
 
 impl Collector {
     pub(crate) fn new(history_limit: usize, config: Config) -> Self {
+        let baselines = config.baselines != Some(false);
         let mut collector = Self::with_host(
             history_limit,
             config,
@@ -204,6 +205,7 @@ impl Collector {
             crate::config::home_dir(),
         );
         collector.config_ignored = crate::config::config_ignored();
+        collector.keep_baselines(crate::baseline_store::default_path(), baselines);
         collector
     }
 

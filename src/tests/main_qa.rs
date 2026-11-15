@@ -289,8 +289,13 @@ fn judge_screen(case: &Case, buffer: &Buffer, width: u16, height: u16) -> Vec<St
             problems.push(format!("broken value on screen: {broken:?}"));
         }
     }
-    // Every panel the Overview promises is there, with its border whole.
-    let overlay = case.app.summary_open || case.app.diagnostics_open || case.app.help;
+    // Every panel the Overview promises is there, with its border whole,
+    // unless something drawn over it covers them: a prompt covers by design.
+    let overlay = case.app.summary_open
+        || case.app.diagnostics_open
+        || case.app.help
+        || case.app.quit_prompt
+        || case.app.reset_prompt;
     if case.app.tab == 0 && !overlay && width >= 100 {
         let mut titles = vec![
             "memory",

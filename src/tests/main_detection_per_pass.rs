@@ -397,3 +397,36 @@ fn a_usual_speed_judged_per_pass_passes_the_qa_judge_at_every_size() {
     );
     assert!(failures.is_empty(), "QA judge:\n{}", failures.join("\n"));
 }
+
+/// With nothing else unusual, the next step names what is left. Judged per
+/// verify pass, how well the draft guesses is already allowed for, so the
+/// text is ruled out; judged per token, it is not.
+#[test]
+fn nothing_else_unusual_rules_out_the_text_only_when_judged_per_pass() {
+    let facts = server_facts();
+    let poll = |second: u64, tps: f64, tokens: Option<f64>| {
+        writing("a", second, tps, 1_500, &facts, tokens)
+    };
+    let slowdown = |tokens: Option<f64>| {
+        let mut samples: Vec<Sample> = (0..15).map(|s| poll(s, 123.0, tokens)).collect();
+        samples.extend((15..20).map(|s| poll(s, 50.0, tokens)));
+        observe_all(&mut CorrelationEngine::default(), &mut samples);
+        samples.swap_remove(17)
+    };
+    let per_pass = slowdown(Some(7.8));
+    assert_eq!(per_pass.correlation.cause, CorrelationCause::None);
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&per_pass),
+        "Nothing on the machine explains it, and it is slower per verify pass, so not the text: the runtime or its draft model; check the runtime's log at this time."
+    );
+    let per_token = slowdown(None);
+    assert_eq!(per_token.correlation.cause, CorrelationCause::None);
+    assert_eq!(
+        crate::diagnosis::slowdown_next_step(&per_token),
+        "Nothing on the machine explains it: the text, the draft model or the runtime itself; check the runtime's log at this time."
+    );
+    // A prompt is not read per verify pass.
+    let mut prefill = per_pass.clone();
+    prefill.correlation.phase = Phase::Prefill;
+    assert!(crate::diagnosis::slowdown_next_step(&prefill).contains("the text, the draft model"));
+}

@@ -188,6 +188,11 @@ pub(crate) struct App {
     pub(crate) quit: bool,
     /// Esc at the top level asks before quitting, because quitting discards the session's history.
     pub(crate) quit_prompt: bool,
+    /// `r` asks before clearing the session, and offers to forget the usual
+    /// speeds kept across sessions too.
+    pub(crate) reset_prompt: bool,
+    /// Whether usual speeds are kept across sessions (`baselines` in the config).
+    pub(crate) baselines: bool,
     pub(crate) sampler_disconnected: bool,
     /// When the last sample arrived from the sampler.
     pub(crate) last_view_at: Instant,
@@ -246,6 +251,8 @@ impl App {
             diagnostics_max_scroll: Default::default(),
             quit: false,
             quit_prompt: false,
+            reset_prompt: false,
+            baselines: config.baselines.unwrap_or(true),
             sampler_disconnected: false,
             last_view_at: Instant::now(),
             alert: None,
@@ -276,6 +283,7 @@ impl App {
         let busy = self.help
             || self.summary_open
             || self.quit_prompt
+            || self.reset_prompt
             || self.diagnostics_open
             || self.top_filtering
             || self.settings.editing.is_some();
@@ -423,7 +431,7 @@ impl App {
         }
         // Below the dashboard's size only quitting acts: a key whose effect
         // cannot be seen (r clears the session's history) must not act.
-        if self.compact.get() && !self.quit_prompt {
+        if self.compact.get() && !self.quit_prompt && !self.reset_prompt {
             let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
                 || (key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL));
@@ -431,12 +439,23 @@ impl App {
                 return;
             }
         }
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         if self.quit_prompt {
             self.quit_prompt = false;
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
             if ctrl_c || matches!(key.code, KeyCode::Char('y' | 'Y' | 'q') | KeyCode::Enter) {
                 self.quit = true;
+            }
+            return;
+        }
+        // Any key answers the reset prompt; only y (or Enter) and f act.
+        if self.reset_prompt {
+            self.reset_prompt = false;
+            match key.code {
+                _ if ctrl_c => self.quit = true,
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.reset(false),
+                KeyCode::Char('f' | 'F') if self.baselines => self.reset(true),
+                _ => {}
             }
             return;
         }
@@ -679,7 +698,8 @@ impl App {
             return;
         }
         // The charts under an overlay are not what the pointer is on.
-        if self.help || self.summary_open || self.quit_prompt || self.tab != 0 {
+        if self.help || self.summary_open || self.quit_prompt || self.reset_prompt || self.tab != 0
+        {
             return;
         }
         let Some(chart) = self.charts.at(mouse.column, mouse.row) else {
@@ -740,6 +760,7 @@ impl App {
                     self.critical_episode = false;
                 }
             }
+            "baselines" => self.baselines = config.baselines.unwrap_or(true),
             _ => {}
         }
         self.thresholds = Thresholds::from_config(config);
@@ -770,16 +791,8 @@ impl App {
                 self.paused = !self.paused;
                 self.sampler.send(SamplerCommand::SetPaused(self.paused));
             }
-            KeyCode::Char('r') => {
-                self.sampler.send(SamplerCommand::Reset);
-                self.journal_scroll = 0;
-                self.request_scroll = 0;
-                self.charts = chart_navigation::Navigation::default();
-                self.gpu_selected = 0;
-                self.journal_filter = JournalFilter::All;
-                self.alert = None;
-                self.critical_episode = false;
-            }
+            // Clearing the session cannot be undone: it asks first (F-069).
+            KeyCode::Char('r') => self.reset_prompt = true,
             KeyCode::Char('t') | KeyCode::Char('2') => {
                 self.tab = 1;
                 self.top_selected = 0;
@@ -807,6 +820,24 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Start the session over, as the reset prompt was answered: charts,
+    /// Journal, session totals and alarm go, and with `forget` the usual
+    /// speeds kept across sessions for this machine too.
+    fn reset(&mut self, forget: bool) {
+        self.sampler.send(if forget {
+            SamplerCommand::Forget
+        } else {
+            SamplerCommand::Reset
+        });
+        self.journal_scroll = 0;
+        self.request_scroll = 0;
+        self.charts = chart_navigation::Navigation::default();
+        self.gpu_selected = 0;
+        self.journal_filter = JournalFilter::All;
+        self.alert = None;
+        self.critical_episode = false;
     }
 
     pub(crate) fn filtered_llm_processes(&self) -> Vec<LlmProcess> {

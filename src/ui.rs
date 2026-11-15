@@ -124,6 +124,9 @@ impl App {
             if self.quit_prompt {
                 self.draw_quit_prompt(frame, area);
             }
+            if self.reset_prompt {
+                self.draw_reset_prompt(frame, area);
+            }
             return;
         }
         frame.render_widget(
@@ -174,6 +177,54 @@ impl App {
         if self.quit_prompt {
             self.draw_quit_prompt(frame, area);
         }
+        if self.reset_prompt {
+            self.draw_reset_prompt(frame, area);
+        }
+    }
+
+    /// `r`: a reset clears what the session drew and counted, and `f`
+    /// forgets the usual speeds kept across sessions as well.
+    pub(crate) fn draw_reset_prompt(&self, frame: &mut Frame, area: Rect) {
+        let key = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(MUTED);
+        let mut text = vec![
+            Line::from("Clears charts, the Journal and session totals."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key),
+                Span::styled(" reset · any other key keeps everything", muted),
+            ]),
+        ];
+        if self.baselines {
+            text.push(Line::from(vec![
+                Span::styled("f", key),
+                Span::styled(" also forgets usual speeds kept across sessions", muted),
+            ]));
+        }
+        let width = area.width.min(54);
+        let height = area.height.min(text.len() as u16 + 2);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .title(" RESET? ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(YELLOW))
+                        .style(Style::default().bg(PANEL)),
+                ),
+            popup,
+        );
     }
 
     /// Esc with nothing open: quitting discards the session's charts, prompts and Journal.

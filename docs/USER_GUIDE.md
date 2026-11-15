@@ -214,11 +214,21 @@ similar prompts, and a slow one reads `PREFILL ↓61% (180.0→70.0 tok/s)`. A
 sample in which a request started or ended is not judged: its tokens are
 divided over an interval it worked for only part of. The reason given is
 whatever else is unusual at the same time: thermal limiting, memory pressure,
-paging, the runtime's disk work, a prompt prefilling beside the answer,
-compression, the queue, model or Metal memory, the runtime's CPU, or a GPU
-left idle. Request count and prompt size are never the reason: the usual
-speed already allows for them. A signal at its usual level is never the
-reason, however high that level is.
+paging, requests the runtime recomputed because its KV cache was full, the
+runtime's disk work, a prompt prefilling beside the answer, compression, the
+queue, model or Metal memory, the runtime's CPU, or a GPU left idle. Request
+count and prompt size are never the reason: the usual speed already allows
+for them. A signal at its usual level is never the reason, however high that
+level is.
+
+A full KV cache is read from the runtime's own count of the requests it
+preempted to make room (vLLM and TensorFold preempt, SGLang retracts, Splash
+suspends) and recomputes later: a rise in that count during a slowdown is its
+reason, `KV cache full · 2 requests recomputed (usual 0)`, with the next step
+"The KV cache was full, so requests were recomputed: give the runtime more KV
+memory, or run fewer requests at once." It comes after the host's memory
+limits and before the disk work and prompt reading that a recomputed request
+causes. A count that goes back (the runtime restarted) is no rise.
 
 The generation chart's bottom edge says what speed it judges against, for
 the work being done, for example `usual 30.0 for 2 requests · 131.2k
@@ -263,9 +273,82 @@ RECOVERED  generation back to 50.0 tok/s after 42s · low 25.0 tok/s
 
 When nothing else is unusual the row says `nothing else unusual`, and if the
 lower speed holds for 30 seconds it becomes the usual speed for that work
-(`SETTLED`). This
+(`SETTLED`). Its next step names what is left: the text, the draft model or
+the runtime itself; judged per verify pass, how well the draft guesses is
+already allowed for, so the text is ruled out and the runtime or its draft
+model remain. This
 is what happens together, not proof of cause. mlxtop needs eight samples of
-generation before it has a usual speed to compare with.
+generation before it has a usual speed to compare with, unless it keeps
+usual speeds from earlier sessions.
+
+### Usual speeds across sessions
+
+mlxtop keeps the usual generation speed of each kind of work across sessions,
+so a new session judges its first request against what the model ran at
+before instead of learning eight samples first, and a runtime or macOS update
+that slowed the model is named. Earlier sessions' speeds stand in only until
+the session has eight samples of its own of that kind of work; from then on
+it is judged against itself, as it would be without them. It is on by
+default; **Keep usual speeds** in
+[Settings](#settings) (`"baselines": false`) turns it off, and then the file
+is neither read nor written.
+
+What is kept, for each machine (its model identifier such as `Mac16,9`, its
+chip and its RAM), runtime, model with its quantization, runtime version,
+whether a draft runs, band of context (under 1k, 1k–4k, 4k–16k, 16k–64k and
+64k or more) and number of requests writing at once, is the latest 300
+speeds generation held outside slowdowns, in the quantity the detector
+judges: verify passes a second where the runtime counts tokens per pass,
+else tokens a second, each taken to the middle of its band by the bytes
+model above. With a draft, only verify passes are kept and compared: tokens
+a second then also measure how well the draft guesses that session's text,
+and another session is another text. Behind oMLX, which does not pass
+Splash's count on, nothing is kept for a model with a draft. A speed
+measured during a slowdown, or adopted by the 30-second settle rule, is never
+kept. A kind of work not seen for 180 days is forgotten. Fifty kinds take
+about 150 KB.
+
+The file is `~/Library/Application Support/mlxtop/baselines.json` on macOS,
+`$XDG_STATE_HOME/mlxtop/baselines.json` (by default
+`~/.local/state/mlxtop/baselines.json`) on Linux and
+`%LOCALAPPDATA%\mlxtop\baselines.json` on Windows: the places those systems
+keep an application's own state for this machine. It is readable by you only,
+in a folder only you can open, and holds numbers and names only, never a
+prompt, output, request id, command line or process name; a model loaded from
+a path keeps only its file name. It is saved at once the first time, then
+when the model changes, every five minutes while generation runs and when
+sampling stops, each time written whole to a temporary file and
+renamed into place, so an interrupted save leaves the last good file. The
+first time it is created, the Journal says so in one `SYSTEM` row. A file
+mlxtop cannot use (damaged, or written by a newer version) is ignored, said
+once in the diagnostics log, and set aside as `baselines.json.unread` when it
+is replaced.
+
+When work the session has no usual speed for yet runs clearly below its
+usual from earlier sessions, by the same rule as any slowdown, Diagnostics
+says so from the first judged sample:
+
+```text
+Unusual: This model now generates 31% below its usual from earlier sessions at this depth, since oMLX 0.7.3 became 0.8.0
+```
+
+The update is named only when the runtime's version then and now are both
+known and differ; otherwise the sentence ends at "from earlier sessions at
+this depth". Held for three samples it is a slowdown like any other: its
+samples turn yellow, it leads the assessment with the sentence as its next
+step, and the Journal tells it once:
+
+```text
+SLOWDOWN   GEN ↓31.0% (58.0→40.0 tok/s) · below earlier sessions → This model now generates 31% below its usual from earlier sessions at this depth, since oMLX 0.7.3 became 0.8.0.
+```
+
+Anything else unusual at the time is named instead, as for any slowdown.
+Once it ends, whether speed came back, settled or the request finished while
+slow, the session is judged against itself from then on: the finding is told
+once a session. After an
+update, the old version's speeds judge the new one until it has its own,
+which are kept as they are learned. `r` asks before it resets the session;
+`f` at its prompt also forgets the usual speeds kept for this machine.
 
 ## Time lost before the first token
 
@@ -716,7 +799,7 @@ none; neither do several cards.
 | `4` | Settings |
 | `Tab` / `Shift-Tab` | Next / previous view, including while filtering processes |
 | `p` / `Space` | Pause or resume sampling |
-| `r` | Reset rates, charts and journal |
+| `r` | Reset rates, charts, the Journal and session totals, after asking: `y` or `Enter` resets, `f` also forgets the [usual speeds kept across sessions](#usual-speeds-across-sessions) for this machine, any other key keeps everything |
 | `{` / `}` | Change refresh interval (1–60 seconds) |
 | `a` | Acknowledge the current critical system alarm |
 | `?` / `h` | Help |
@@ -1054,6 +1137,11 @@ one in the file, mlxtop opens Settings on this field with the cursor in it:
 type or paste the key and press Enter. Esc carries on without it; host
 readings do not need a key.
 
+**Keep usual speeds** keeps each model's usual generation speed by context
+across sessions (see [Usual speeds across sessions](#usual-speeds-across-sessions));
+off, the file is neither read nor written, and what was learned and not yet
+saved is dropped.
+
 A saved change takes effect at once and is written to `config.json`, so the
 next start uses it too. Keys the view doesn't know are kept. A file that
 doesn't parse is shown with the error and never overwritten; fix it by hand.
@@ -1077,7 +1165,8 @@ mlxtop stream [--interval N]   write the JSON snapshot of every sample, one line
 mlxtop serve [--listen ADDR]   answer /metrics, /snapshot and /health on loopback
 mlxtop doctor [--interval N]   diagnose the connection and readings, then exit
 mlxtop update [--rc]           install the latest release (--rc: or release candidate)
-mlxtop replay FILE             read a recording back through the detection rules
+mlxtop replay FILE [--baselines KEPT]
+                               read a recording back through the detection rules
 ```
 
 `--once --json` and `mlxtop stream` are described under
@@ -1106,7 +1195,10 @@ given for, `EPISODES` the slowdowns and stalls the Journal began with it, and
 `PER HOUR` those episodes per hour of generation; the reason told most often
 comes first. That count is how a change to the rules is checked: record a
 session in which the model slowed, replay it before and after the change, and
-compare. A recording also goes with a bug report. A recording holds the
+compare. A replay starts with nothing learned, as a session without kept
+speeds does; `--baselines KEPT` judges it against the
+[usual speeds kept](#usual-speeds-across-sessions) in the file KEPT instead,
+which it reads and never writes. A recording also goes with a bug report. A recording holds the
 machine's readings, hardware names, the name of the process using the most
 memory, and the runtime's request ids, model names and token counts. It never
 holds prompts, output or process command lines, and it is created readable by
@@ -1610,6 +1702,7 @@ you leave out keeps its built-in default.
 | `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
 | `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
 | `alarms` | boolean | true | `false` turns off the critical-condition bell and banner; charts, the assessment and the Journal still show the condition |
+| `baselines` | boolean | true | `false` keeps no [usual speeds across sessions](#usual-speeds-across-sessions): the file is neither read nor written |
 | `journal.prompts` | boolean | true | Record a row for each new request |
 | `journal.llm` | boolean | true | Record model, status, telemetry and request start/finish changes |
 | `journal.queue` | boolean | true | Record requests starting to wait and the queue clearing |
@@ -2323,7 +2416,10 @@ state or send synthetic inference requests.
 `--once --json` and `mlxtop stream` write only to standard output, and
 `mlxtop serve` answers only on the loopback interface, though any local user or
 process can read what it answers; none of them holds process names, command
-lines or process ids.
+lines or process ids. Besides its log, its config and recordings you ask for,
+mlxtop writes one file of its own: the
+[usual speeds it keeps across sessions](#usual-speeds-across-sessions), numbers
+and model names only, readable by you only, which Settings turns off.
 
 Provider credentials are read only when needed and are never displayed. See
 [SECURITY.md](../SECURITY.md) for responsible vulnerability reporting and the

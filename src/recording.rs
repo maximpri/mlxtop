@@ -126,9 +126,18 @@ impl Replay {
     }
 }
 
-/// Run `samples` through the detection engine and Journal.
+/// Run `samples` through a fresh detection engine and the Journal.
 pub(crate) fn replay(samples: &mut [Sample], thresholds: Thresholds) -> Replay {
-    let mut engine = CorrelationEngine::default();
+    replay_with(samples, thresholds, &mut CorrelationEngine::default())
+}
+
+/// Run `samples` through `engine` and the Journal: a fresh engine, or one
+/// that judges against usual speeds kept across sessions.
+pub(crate) fn replay_with(
+    samples: &mut [Sample],
+    thresholds: Thresholds,
+    engine: &mut CorrelationEngine,
+) -> Replay {
     let config = Config::default();
     let mut journal = Collector::with_host(
         samples.len().max(20),
@@ -267,10 +276,22 @@ pub(crate) fn write_report(out: &mut dyn Write, replay: &Replay) -> io::Result<(
     Ok(())
 }
 
-/// `mlxtop replay FILE`.
-pub(crate) fn run(path: &Path, thresholds: Thresholds, out: &mut dyn Write) -> io::Result<()> {
+/// `mlxtop replay FILE [--baselines KEPT]`: with a baseline file, work the
+/// recording has not yet done is judged against the usual speeds kept in
+/// it, as a live session would be; the file is read, never written.
+pub(crate) fn run(
+    path: &Path,
+    thresholds: Thresholds,
+    baselines: Option<&Path>,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     let named =
         |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+    let engine = baselines
+        .map(|kept| {
+            crate::baseline_store::Baselines::read_only(kept).map(CorrelationEngine::with_baselines)
+        })
+        .transpose()?;
     let (mut samples, skipped) =
         read_counted(BufReader::new(File::open(path).map_err(named)?)).map_err(named)?;
     if samples.is_empty() {
@@ -279,7 +300,10 @@ pub(crate) fn run(path: &Path, thresholds: Thresholds, out: &mut dyn Write) -> i
             path.display()
         )));
     }
-    let mut result = replay(&mut samples, thresholds);
+    let mut result = match engine {
+        Some(mut engine) => replay_with(&mut samples, thresholds, &mut engine),
+        None => replay(&mut samples, thresholds),
+    };
     result.skipped = skipped;
     write_report(out, &result)
 }

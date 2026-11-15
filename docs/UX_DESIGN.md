@@ -280,9 +280,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   over after 30 idle seconds.
 - A slowdown's reason is whatever else is unusual at the same time, judged
   by the same rule against its own usual value: thermal limiting, memory
-  pressure, paging, the runtime's disk work, a prompt prefilling beside the
-  answer, compression, the queue, model and Metal memory, the runtime's CPU,
-  and a GPU left idle. The host's limits
+  pressure, paging, requests recomputed because the KV cache was full (a rise
+  in the runtime's count of preempted requests), the runtime's disk work, a
+  prompt prefilling beside the answer, compression, the queue, model and
+  Metal memory, the runtime's CPU, and a GPU left idle. The host's limits
   come first when several are unusual; an idle GPU comes last, because it is
   what a slowdown looks like and a reason only by itself. Each
   is said beside its usual value (`paging 96.0 MiB/s (usual 2.0 MiB/s)`,
@@ -290,6 +291,20 @@ colors in time-series history instead of recoloring old samples on refresh.
   however high that level is. With nothing else unusual, say so
   (`nothing else unusual`): never guess. Such a slowdown becomes the usual
   speed for that work after 30 s (`SETTLED`).
+- Usual speeds are kept across sessions, numbers only, in one private file
+  per user: for each machine, runtime, model and quantization, runtime
+  version, draft, band of context and number of requests writing, the latest
+  speeds held outside slowdowns, never one adopted by the settle rule; with a
+  draft, verify passes only, since tokens a second are also the text. Work a
+  session has not yet done is judged against them from its first sample,
+  until the session has its own usual for it (eight samples). One
+  sentence: "This model now generates N% below its usual from earlier
+  sessions at this depth, since <runtime> <old> became <new>", the update
+  named only when the version is known then and now and differs. It is said
+  in Diagnostics from the first judged sample and becomes a slowdown, with
+  its colour and Journal row, only as any other does; once it ends, the
+  session judges itself and it is not told again. The first time the file is
+  created one `SYSTEM` row says where it is and that Settings turns it off.
 - Journal writes a slowdown's start once, each further reason once, and its
   end. A slowdown that repeats the last one's reason within a minute is the
   same story: no new rows.
@@ -366,7 +381,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   assigning a model/state to every process. Do not repeat Overview charts.
 - Preserve 1/2/3 for views and p for pause. `d` opens read-only Diagnostics
   outside text entry; Esc/d closes it, and view switching dismisses it. Keep
-  quit and alarm acknowledgment available and label retained paused observations. Shift-↑↓ and Home/End inspect prompt
+  quit and alarm acknowledgment available and label retained paused observations.
+  What cannot be undone asks first: Esc before quitting, and `r` before it
+  clears the session (`y`), where `f` also forgets the usual speeds kept
+  across sessions; any other key keeps everything. Shift-↑↓ and Home/End inspect prompt
   history. Use { / } for sampling cadence. Show contextual controls.
 - Review at 80×24, a medium terminal, and a wide terminal. Check empty, live,
   idle/historical, unavailable and large-value states when affected.

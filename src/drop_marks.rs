@@ -21,8 +21,12 @@ pub(crate) fn chart_of(cause: CorrelationCause) -> Option<Chart> {
         CorrelationCause::Queueing => Chart::Queue,
         // The runtime's CPU is a figure in the header, and draft acceptance
         // one on the generation chart's edge: neither has a chart of its own.
+        // Nor do recomputed requests, said in Diagnostics, or earlier
+        // sessions, which are the generation chart's own usual speed.
         CorrelationCause::Cpu
         | CorrelationCause::DraftAcceptance
+        | CorrelationCause::KvPreemption
+        | CorrelationCause::EarlierSessions
         | CorrelationCause::Stall
         | CorrelationCause::None => return None,
     })
