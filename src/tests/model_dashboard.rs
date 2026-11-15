@@ -17,7 +17,11 @@ fn live_sample() -> Sample {
         total_memory: 32 * 1024_u64.pow(3),
         gpu_in_use: Some(8 * 1024_u64.pow(3)),
         gpu_alloc: Some(16 * 1024_u64.pow(3)),
-        thermal: "no warning".into(),
+        thermal: "nominal".into(),
+        thermal_state: ThermalState {
+            level: Some(ThermalLevel::Nominal),
+            cpu_speed_limit: None,
+        },
         metal: MetalTelemetry {
             device_name: Some("Apple M4 Max".into()),
             gpu_cores: Some(32),
@@ -63,7 +67,7 @@ fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
             );
         }
         // No label for the card, no age on a fresh reading, no normal thermals.
-        for noise in ["SYSINFO", "0s old", "THERMAL no warning"] {
+        for noise in ["SYSINFO", "0s old", "THERMAL"] {
             assert!(
                 !screen.contains(noise),
                 "{noise} at {width}x{height}\n{screen}"
@@ -220,12 +224,13 @@ fn the_header_colours_a_reading_that_is_unusual() {
     };
     let mut sample = live_sample();
     sample.llm_cpu = 380.0;
-    sample.thermal = "limited 60%".into();
+    sample.thermal_state.level = Some(ThermalLevel::Heavy);
+    sample.thermal = sample.thermal_state.label();
     // Ordinarily: a quiet CPU figure, and thermal in its warning colour.
     let footer = host_footer(&sample, 160);
     assert!(line_text(&footer).contains("CPU 380%"));
     assert_eq!(colour_of(&footer, "CPU 380%"), Some(MUTED));
-    assert_eq!(colour_of(&footer, "THERMAL limited 60%"), Some(YELLOW));
+    assert_eq!(colour_of(&footer, "THERMAL heavy"), Some(YELLOW));
 
     // Beside a slowdown they were unusual for: the anomaly colour, and the
     // CPU says what is usual.
@@ -234,7 +239,7 @@ fn the_header_colours_a_reading_that_is_unusual() {
         cause: CorrelationCause::Thermal,
         unusual: vec![CorrelationCause::Thermal, CorrelationCause::Cpu],
         notes: vec![
-            "thermal limit".into(),
+            "thermal pressure heavy".into(),
             "runtime CPU 380% (usual 95%)".into(),
         ],
         ..CorrelationInsight::default()
@@ -250,7 +255,7 @@ fn the_header_colours_a_reading_that_is_unusual() {
         Some(Tone::Unusual.color())
     );
     assert_eq!(
-        colour_of(&footer, "THERMAL limited 60%"),
+        colour_of(&footer, "THERMAL heavy"),
         Some(Tone::Unusual.color())
     );
 
@@ -259,7 +264,7 @@ fn the_header_colours_a_reading_that_is_unusual() {
     sample.correlation.direction = ThroughputDirection::Flat;
     let footer = host_footer(&sample, 160);
     assert_eq!(colour_of(&footer, "CPU 380%"), Some(MUTED));
-    assert_eq!(colour_of(&footer, "THERMAL limited 60%"), Some(YELLOW));
+    assert_eq!(colour_of(&footer, "THERMAL heavy"), Some(YELLOW));
 }
 
 #[test]
@@ -278,13 +283,26 @@ fn gpu_memory_reads_against_the_limit_and_thermal_and_power_always_show() {
     let screen = render(&sample, &history, 160, 6);
     assert!(screen.contains("8.0 GiB / 32.0 GiB"), "{screen}");
     assert!(screen.contains("thermal ok · 61 W"), "{screen}");
-    sample.thermal = "unavailable".into();
+    // A level that could not be read is unknown, not ok.
+    sample.thermal_state = ThermalState::default();
+    sample.thermal = sample.thermal_state.label();
     assert!(render(&sample, &history, 160, 6).contains("thermal — · 61 W"));
     sample.system_power_mw = None;
     assert!(!render(&sample, &history, 160, 6).contains("thermal"));
-    sample.thermal = "serious".into();
+    // A raised level is news.
+    sample.thermal_state.level = Some(ThermalLevel::Heavy);
+    sample.thermal = sample.thermal_state.label();
     sample.system_power_mw = Some(90_000);
-    assert!(render(&sample, &history, 160, 6).contains("THERMAL serious · 90 W"));
+    assert!(render(&sample, &history, 160, 6).contains("THERMAL heavy · 90 W"));
+    // An Intel Mac at full CPU speed with no level read: ok, not news.
+    sample.thermal_state = ThermalState {
+        level: None,
+        cpu_speed_limit: Some(100),
+    };
+    sample.thermal = sample.thermal_state.label();
+    let screen = render(&sample, &history, 160, 6);
+    assert!(screen.contains("thermal ok · 90 W"), "{screen}");
+    assert!(!screen.contains("no limit"), "{screen}");
 }
 
 #[test]

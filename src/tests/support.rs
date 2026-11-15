@@ -357,6 +357,14 @@ pub(crate) const MACOS_PS: &str = "\
   101 15728640 85.5 40.0 R 120 omlx-server /opt/omlx/bin/omlx-server --port 8080\n\
   202 204800 1.0 0.5 S 3 Safari /Applications/Safari.app/Contents/MacOS/Safari\n";
 
+/// What an Apple Silicon Mac (an M4 and an M4 Max, macOS 27.0.1) printed:
+/// the thermal pressure level, and a `pmset` that reports no CPU limit.
+pub(crate) const NOTIFYUTIL_THERMAL: &str = "com.apple.system.thermalpressurelevel 0\n";
+pub(crate) const PMSET_APPLE_SILICON: &str = "\
+Note: No thermal warning level has been recorded\n\
+Note: No performance warning level has been recorded\n\
+Note: No CPU power status has been recorded\n";
+
 /// A macOS host with a healthy oMLX process and paging counters that move
 /// between the first and second sample.
 pub(crate) fn macos_host() -> FakeHost {
@@ -387,9 +395,10 @@ pub(crate) fn macos_host() -> FakeHost {
             "total = 2048.00M  used = 512.00M  free = 1536.00M  (encrypted)\n",
         )
         .command(
-            "/usr/bin/pmset -g therm",
-            "Note: No thermal warning level has been recorded\n",
+            "/usr/bin/notifyutil -g com.apple.system.thermalpressurelevel",
+            NOTIFYUTIL_THERMAL,
         )
+        .command("/usr/bin/pmset -g therm", PMSET_APPLE_SILICON)
         .command(
             "/bin/ps -axo pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args=",
             MACOS_PS,

@@ -952,6 +952,7 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     let usual = |second: u64| {
         let mut sample = paging(second, 50.0, 0);
         sample.pressure = "GREEN".into();
+        sample.thermal_state.level = Some(ThermalLevel::Nominal);
         sample.llm_waiting_requests = Some(0);
         sample.llm_model_memory = Some(80);
         sample.llm_model_memory_max = Some(100);
@@ -973,9 +974,17 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     let cases: Vec<(CorrelationCause, String, Change)> = vec![
         (
             CorrelationCause::Thermal,
-            "thermal limit".into(),
+            "thermal pressure heavy".into(),
             Box::new(|mut s| {
-                s.thermal = "limited 60%".into();
+                s.thermal_state.level = Some(ThermalLevel::Heavy);
+                s
+            }),
+        ),
+        (
+            CorrelationCause::Thermal,
+            "CPU speed limit 60%".into(),
+            Box::new(|mut s| {
+                s.thermal_state.cpu_speed_limit = Some(60);
                 s
             }),
         ),
@@ -1095,7 +1104,7 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     // Several at once: the host's limits lead, the summary names two, the
     // details all of them.
     let both = slowed(&|mut s| {
-        s.thermal = "limited 60%".into();
+        s.thermal_state.level = Some(ThermalLevel::Moderate);
         s.llm_waiting_requests = Some(2);
         s
     });
@@ -1121,15 +1130,59 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     assert_eq!(both.cause, CorrelationCause::Thermal);
     assert_eq!(
         both.summary,
-        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal limit + 2 waiting (usual 0)"
+        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal pressure moderate + 2 waiting (usual 0)"
     );
     assert_eq!(
         both.details,
-        "thermal limiting · thermal limit · 2 waiting (usual 0)"
+        "thermal limiting · thermal pressure moderate · 2 waiting (usual 0)"
     );
     assert_eq!(
         both.unusual,
         vec![CorrelationCause::Thermal, CorrelationCause::Queueing]
+    );
+}
+
+#[test]
+fn heat_is_a_slowdowns_reason_only_while_macos_raises_its_thermal_pressure() {
+    use ThermalLevel::{Heavy, Moderate, Nominal};
+    // Ten samples at the usual speed, then three at half of it, with the
+    // pressure level each was read at (`None`: it could not be read).
+    let run = |usual: Option<ThermalLevel>, slow: Option<ThermalLevel>| {
+        let mut samples: Vec<Sample> = (0..13)
+            .map(|second| {
+                let slowed = second >= 10;
+                let mut sample = paging(second, if slowed { 25.0 } else { 50.0 }, 0);
+                sample.thermal_state.level = if slowed { slow } else { usual };
+                sample
+            })
+            .collect();
+        observe_all(&mut CorrelationEngine::default(), &mut samples);
+        samples.pop().unwrap().correlation
+    };
+    // Nominal names nothing, and neither does a level never read.
+    for level in [Some(Nominal), None] {
+        let insight = run(level, level);
+        assert!(insight.is_material_drop(), "{level:?}");
+        assert_eq!(insight.cause, CorrelationCause::None, "{level:?}");
+        assert!(insight.unusual.is_empty(), "{level:?}");
+    }
+    // A raised level names heat.
+    let hot = run(Some(Nominal), Some(Moderate));
+    assert_eq!(hot.cause, CorrelationCause::Thermal);
+    assert_eq!(hot.lead, "thermal pressure moderate");
+    assert_eq!(
+        hot.summary,
+        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal pressure moderate"
+    );
+    // A level that held while speed was usual is not the reason; heat that
+    // rises from it is.
+    assert_eq!(
+        run(Some(Moderate), Some(Moderate)).cause,
+        CorrelationCause::None
+    );
+    assert_eq!(
+        run(Some(Moderate), Some(Heavy)).lead,
+        "thermal pressure heavy"
     );
 }
 

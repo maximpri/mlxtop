@@ -158,6 +158,18 @@ fn cases() -> Vec<Case> {
     );
     paging_slowdown.collector.current.impact = "PAGING ACTIVE".into();
     paging_slowdown.collector.current.impact_tone = Tone::Yellow;
+    // macOS holding the Mac back for heat: news on the card, and yellow
+    // only beside a slowdown it explains.
+    let hot = || {
+        let mut app = healthy();
+        let current = &mut app.collector.current;
+        current.thermal_state.level = Some(ThermalLevel::Heavy);
+        current.thermal = current.thermal_state.label();
+        current.system_power_mw = Some(48_000);
+        current.impact = "THERMAL LIMIT".into();
+        current.impact_tone = Tone::Yellow;
+        app
+    };
     vec![
         Case {
             name: "idle",
@@ -211,6 +223,16 @@ fn cases() -> Vec<Case> {
                 CorrelationCause::Stall,
                 "no new token for 3s · GPU idle",
             ),
+        },
+        Case {
+            name: "thermal-heavy",
+            impact: false,
+            app: hot(),
+        },
+        Case {
+            name: "slowdown-thermal",
+            impact: true,
+            app: slowed(hot(), CorrelationCause::Thermal, "thermal pressure heavy"),
         },
     ]
     .into_iter()

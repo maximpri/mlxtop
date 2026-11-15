@@ -299,6 +299,18 @@ report retains `—` for missing fields. RSS, GPU load and model memory are neve
 substituted for allocator readings. mlxtop reads existing provider interfaces
 and operating-system metrics; it does not patch or restart serving runtimes.
 
+The thermal state on macOS is macOS's own thermal pressure level, read every
+five seconds with `notifyutil -g com.apple.system.thermalpressurelevel`:
+`nominal`, `moderate`, `heavy`, `trapping` or `sleeping`. From `moderate` up,
+macOS is holding the Mac back for heat: the runtime card reads
+`THERMAL heavy`, the assessment `Thermal limit`, and a slowdown at the same
+time is put down to heat (`thermal pressure heavy`) unless the level was
+already that high while speed was usual. `pmset -g therm` reports no CPU speed
+limit on Apple Silicon; on Intel Macs mlxtop reads its `CPU_Speed_Limit` too
+(`limited 70%`). A level that could not be read shows as `thermal —`, never as
+nominal. macOS can keep the level at nominal while the GPU slows for heat, so a
+nominal level does not rule heat out.
+
 On macOS, Processes and the static report show OS process memory. Values come
 directly from `proc_pid_rusage` for the detected LLM process with the largest
 RSS. They describe that one process, not the sum of all model servers; the PID
@@ -1224,7 +1236,7 @@ looks smaller than the whole.
 ## Data sources and privacy
 
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
-`ioreg`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
+`ioreg`, `notifyutil`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
 `/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present),
 the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list

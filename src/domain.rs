@@ -224,6 +224,110 @@ pub(crate) struct MetalTelemetry {
     pub(crate) resource_limit: Option<u64>,
 }
 
+/// macOS's thermal pressure level, as `OSThermalNotification.h` names it.
+/// Nominal is the only level at which macOS holds nothing back for heat;
+/// each one above it is a threshold macOS announces so that work backs off.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub(crate) enum ThermalLevel {
+    Nominal = 0,
+    Moderate = 1,
+    Heavy = 2,
+    Trapping = 3,
+    Sleeping = 4,
+}
+
+impl ThermalLevel {
+    /// The level a notify state stands for. macOS numbers the levels 0–4;
+    /// the header numbers them 0, 10 … 50 on Apple's other systems, where
+    /// Light (10) comes below Moderate: like Nominal, it names nothing.
+    /// Any other number is not a level.
+    pub(crate) fn from_state(state: u64) -> Option<Self> {
+        Some(match state {
+            0 | 10 => Self::Nominal,
+            1 | 20 => Self::Moderate,
+            2 | 30 => Self::Heavy,
+            3 | 40 => Self::Trapping,
+            4 | 50 => Self::Sleeping,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::Moderate => "moderate",
+            Self::Heavy => "heavy",
+            Self::Trapping => "trapping",
+            Self::Sleeping => "sleeping",
+        }
+    }
+}
+
+/// What macOS says about heat, read every few seconds: its thermal pressure
+/// level and, on Intel Macs, the CPU speed limit `pmset` reports. Each is
+/// `None` when it could not be read: unknown is not nominal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct ThermalState {
+    pub(crate) level: Option<ThermalLevel>,
+    /// The share of full CPU speed macOS allows, in percent.
+    pub(crate) cpu_speed_limit: Option<u8>,
+}
+
+impl ThermalState {
+    /// How far macOS holds the machine back for heat, in the pressure
+    /// level's steps (0 nominal … 4 sleeping); a CPU speed limit below full
+    /// speed counts as one step. `None` when nothing was read.
+    pub(crate) fn rank(&self) -> Option<u8> {
+        let level = self.level.map(|level| level as u8);
+        let limited = self.cpu_speed_limit.map(|limit| u8::from(limit < 100));
+        // `None` ranks below any reading.
+        level.max(limited)
+    }
+
+    /// macOS is holding the machine back for heat: a pressure level from
+    /// Moderate up, or a CPU speed limit below full speed.
+    pub(crate) fn limited(&self) -> bool {
+        self.rank().is_some_and(|rank| rank > 0)
+    }
+
+    /// In words, as recorded and shown: `nominal`, `heavy`, `limited 70%`,
+    /// or `unavailable` when nothing was read.
+    pub(crate) fn label(&self) -> String {
+        let limit = self
+            .cpu_speed_limit
+            .filter(|limit| *limit < 100)
+            .map(|limit| format!("limited {limit}%"));
+        match (self.level, limit) {
+            (Some(level), Some(limit)) if level > ThermalLevel::Nominal => {
+                format!("{}, {limit}", level.label())
+            }
+            (_, Some(limit)) => limit,
+            (Some(level), None) => level.label().into(),
+            (None, None) if self.cpu_speed_limit.is_some() => "no limit".into(),
+            (None, None) => "unavailable".into(),
+        }
+    }
+
+    /// What macOS reported, as a slowdown's reason: `thermal pressure heavy`.
+    pub(crate) fn reason(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(level) = self.level.filter(|level| *level > ThermalLevel::Nominal) {
+            parts.push(format!("thermal pressure {}", level.label()));
+        }
+        if let Some(limit) = self.cpu_speed_limit.filter(|limit| *limit < 100) {
+            parts.push(format!("CPU speed limit {limit}%"));
+        }
+        if parts.is_empty() {
+            "thermal limit".into()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ThroughputDirection {
     #[default]
@@ -616,7 +720,13 @@ pub(crate) struct Sample {
     pub(crate) gpus: Vec<gpu::Device>,
     pub(crate) metal: MetalTelemetry,
     pub(crate) mlx: MlxTelemetry,
+    /// The thermal state in words, as recorded and shown: macOS's pressure
+    /// level or CPU speed limit, or a temperature measured elsewhere.
     pub(crate) thermal: String,
+    /// What macOS says about heat. Recordings made before it was read have
+    /// none: unknown, not nominal.
+    #[serde(default)]
+    pub(crate) thermal_state: ThermalState,
     /// Power the whole machine draws, in milliwatts, where macOS reports it.
     pub(crate) system_power_mw: Option<u64>,
     /// The vm_stat counters the memory reading parsed, handed on to the
@@ -729,6 +839,20 @@ impl Sample {
         self.llm_source == TelemetrySource::Live && self.llm_status != "stale"
     }
 
+    /// Whether the thermal state is worth saying: macOS is holding the
+    /// machine back for heat. Without a macOS reading (a temperature
+    /// measured elsewhere, an older recording) the words decide.
+    pub(crate) fn thermal_news(&self) -> bool {
+        if self.thermal_state.rank().is_some() {
+            self.thermal_state.limited()
+        } else {
+            !matches!(
+                self.thermal.as_str(),
+                "no warning" | "nominal" | "unavailable"
+            )
+        }
+    }
+
     /// Paging rates are measured and the rate baseline is ready.
     pub(crate) fn paging_measured(&self) -> bool {
         self.swap_available && self.rate_ready && !self.paging_unavailable
@@ -827,6 +951,7 @@ impl Default for Sample {
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
             thermal: "unavailable".into(),
+            thermal_state: ThermalState::default(),
             system_power_mw: None,
             vm_counters: None,
             llm_count: 0,

@@ -134,11 +134,9 @@ fn rss(sample: &Sample) -> String {
 
 /// Thermal state only when it is news: normal is the default.
 fn thermal_note(sample: &Sample) -> Option<String> {
-    (!matches!(
-        sample.thermal.as_str(),
-        "no warning" | "nominal" | "unavailable"
-    ))
-    .then(|| format!("THERMAL {}", sample.thermal))
+    sample
+        .thermal_news()
+        .then(|| format!("THERMAL {}", sample.thermal))
 }
 
 /// Thermal state, always, with the power the machine draws beside it.
