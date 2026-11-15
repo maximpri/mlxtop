@@ -101,7 +101,8 @@ their tallies on real server logs before a release.
   decoding.
 - **Prompt speed and model load for finished requests.** The usage recorder
   reads llama-server `timings` from any runtime, Ollama's prompt and load
-  durations, and LM Studio's model load time. Prompt load shows `MODEL LOAD`
+  durations, LM Studio's model load time, and oMLX's prompt speed and model
+  load. Prompt load shows `MODEL LOAD`
   and `PREFILL` beside a reported request's speed.
 - **SGLang and TensorFold speeds are live.** Decode rates come from counters
   that move every step, so slowdowns are judged while they generate. vLLM,
@@ -131,10 +132,16 @@ their tallies on real server logs before a release.
   left, the runtime's KV room, preemptions and tokens per verify pass, each
   tagged or described as an estimate where it is one.
 
+- **For scripts and Prometheus:** `stream` and `serve` add the session's time
+  lost before first tokens; every snapshot adds the finding against earlier
+  sessions (how far below, and the update), and `/metrics` carries both.
+
 ### Evidence
 
 - **`mlxtop replay` tallies each reason:** its slow samples, the episodes the
-  Journal began with it and episodes per hour of generation.
+  Journal began with it and episodes per hour of generation. It also lists
+  cache misses, model loads, full KV caches and overlap with the slowdowns,
+  tallied with their rows per hour and the time each cost.
 - **Each sample keeps more evidence.** Log lines end with `pressure=`,
   `thermal=`, `power_mw=`, `draft=` and `ts=` (`na` if not read), and recorded
   samples carry `ts`; older recordings replay as before.
