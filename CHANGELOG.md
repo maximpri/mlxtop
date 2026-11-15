@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (next/3.4)
+## 3.4.0-rc.1 — 2026-11-15
 
 mlxtop learns what fast means for the machine it watches. It reads what the
 model reads per forward pass and what the chip can move, and estimates how
