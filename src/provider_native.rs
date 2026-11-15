@@ -1,16 +1,65 @@
 // SPDX-License-Identifier: MIT
-//! Native model inventories and Prometheus telemetry. No inference requests.
-use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
-use crate::formatting::bytes;
+//! Native model inventories and Prometheus telemetry. No inference requests:
+//! every request here is a GET but Ollama's read-only `POST /api/show`, sent
+//! once per model.
+use crate::domain::{LlmTelemetry, RequestUsage, Sample, TelemetrySource};
+use crate::formatting::{bytes, compact_tokens};
+use crate::json::json_value;
+use crate::logging::{diagnostics_log, log_field};
+use crate::model_facts::ModelFacts;
 use crate::omlx::is_loopback_host;
 use crate::providers::{counter, identifier};
 use crate::runtime_diagnostics::ProbeIssue;
 use crate::transport::MAX_HTTP_RESPONSE_BYTES;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::env;
 use std::time::{Duration, Instant, SystemTime};
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+/// Routes mlxtop asks no runtime for, whatever answers on the port: GETs
+/// that change state (SGLang's cache flush and its profiler, garbage
+/// collector, slow-down, memory and session routes; llama-swap's unload and
+/// its pass-through, which loads the model it names; KoboldCpp's shutdown;
+/// Foundry Local's load, unload and device choice; exo's benchmark) and
+/// SGLang's health check that generates a token. A route ending in `/` covers
+/// every path under it. SGLang's plain `/health` generates a token too, but
+/// llama.cpp and oMLX answer `/health` without one, so it is not listed: the
+/// SGLang adapter asks for `/metrics` alone.
+pub(super) const NEVER_ASKED: [&str; 18] = [
+    "/health_generate",
+    "/flush_cache",
+    "/start_profile",
+    "/stop_profile",
+    "/freeze_gc",
+    "/slow_down",
+    "/release_memory_occupation",
+    "/resume_memory_occupation",
+    "/open_session",
+    "/close_session",
+    "/unload",
+    "/upstream/",
+    "/api/extra/shutdown",
+    "/openai/load/",
+    "/openai/unload/",
+    "/openai/unloadall",
+    "/openai/setgpudevice/",
+    "/bench/",
+];
+
+/// Whether `path`, its query aside, is one of [`NEVER_ASKED`].
+pub(super) fn never_asked(path: &str) -> bool {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    NEVER_ASKED.iter().any(|route| {
+        if route.ends_with('/') {
+            path.starts_with(route)
+        } else {
+            path.strip_prefix(route)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        }
+    })
+}
 
 #[derive(Default)]
 pub(super) struct Endpoint {
@@ -52,10 +101,31 @@ impl Endpoint {
     }
 
     pub fn get(&self, port: u16, path: &str) -> Result<String, ProbeIssue> {
+        let body = self.request(port, path, None)?;
+        if path == OLLAMA_RUNNING {
+            // The poll asks only for the models Ollama runs; what each one is
+            // comes from `/api/show`, asked here on the same endpoint.
+            ShownModels::learn(self, port, &body);
+        }
+        Ok(body)
+    }
+
+    /// A GET, or with `json` a POST of that body; refused for a route in
+    /// [`NEVER_ASKED`].
+    fn request(&self, port: u16, path: &str, json: Option<&str>) -> Result<String, ProbeIssue> {
+        if never_asked(path) {
+            return Err(ProbeIssue::InvalidEndpoint);
+        }
         let base = self.base_url(port)?;
         if self.api_key.is_some() && self.is_remote() && !self.allow_remote_auth {
             return Err(ProbeIssue::RemoteAuthBlocked);
         }
+        let authorization = match &self.api_key {
+            Some(key) if key.is_empty() || key.chars().any(char::is_control) => {
+                return Err(ProbeIssue::InvalidCredential)
+            }
+            key => key.as_ref().map(|key| format!("Bearer {key}")),
+        };
         // Whatever is left of this poll's time, at most two seconds.
         let budget = super::request_budget(Duration::from_secs(2)).ok_or(ProbeIssue::Timeout)?;
         // No redirects or proxies: credentials stay at the configured endpoint.
@@ -66,14 +136,24 @@ impl Endpoint {
             .proxy(None)
             .build()
             .into();
-        let mut request = agent.get(format!("{base}{path}"));
-        if let Some(key) = &self.api_key {
-            if key.is_empty() || key.chars().any(char::is_control) {
-                return Err(ProbeIssue::InvalidCredential);
+        let url = format!("{base}{path}");
+        let reply = match json {
+            None => {
+                let mut request = agent.get(url);
+                if let Some(value) = &authorization {
+                    request = request.header("Authorization", value.as_str());
+                }
+                request.call()
             }
-            request = request.header("Authorization", format!("Bearer {key}"));
-        }
-        let mut response = request.call().map_err(request_issue)?;
+            Some(json) => {
+                let mut request = agent.post(url).header("Content-Type", "application/json");
+                if let Some(value) = &authorization {
+                    request = request.header("Authorization", value.as_str());
+                }
+                request.send(json)
+            }
+        };
+        let mut response = reply.map_err(request_issue)?;
         if response.status() != 200 {
             return Err(ProbeIssue::Http(response.status().as_u16()));
         }
@@ -114,6 +194,25 @@ fn inventory(provider: &str, names: Vec<String>, kind: &str) -> LlmTelemetry {
     }
 }
 
+/// Text a runtime reports at `path`, without control characters; `None`
+/// when it is missing or empty.
+fn text(value: &Value, path: &[&str]) -> Option<String> {
+    let text: String = json_value(value, path)?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// A positive count at `path` that fits a `u32`.
+fn small(value: &Value, path: &[&str]) -> Option<u32> {
+    counter(value, path)
+        .filter(|n| *n > 0)
+        .and_then(|n| u32::try_from(n).ok())
+}
+
 pub(super) fn ollama(value: &Value) -> Option<LlmTelemetry> {
     let models = value.get("models")?.as_array()?;
     let names = models
@@ -142,18 +241,234 @@ pub(super) fn ollama(value: &Value) -> Option<LlmTelemetry> {
         details.push_str(&format!(" · {} on CPU", bytes(offloaded)));
     }
     if let [model] = models.as_slice() {
-        if let Some(context) = counter(model, &["context_length"]) {
-            details.push_str(&format!(" · context capacity {context} tokens"));
+        // What the model is and runs on: its architecture and Ollama's engine.
+        let runner = text(model, &["runner"])
+            .or_else(|| text(model, &["details", "runner"]))
+            .map(|runner| match runner.as_str() {
+                "llamacpp" => "llama.cpp".to_owned(),
+                "mlx" => "MLX".to_owned(),
+                "ggml" => "GGML".to_owned(),
+                _ => runner,
+            });
+        match (text(model, &["details", "family"]), runner) {
+            (Some(family), Some(runner)) => details.push_str(&format!(" · {family} on {runner}")),
+            (Some(family), None) => details.push_str(&format!(" · {family}")),
+            (None, Some(runner)) => details.push_str(&format!(" · on {runner}")),
+            (None, None) => {}
         }
+        let shown = identifier(model, "digest")
+            .and_then(|digest| OLLAMA_SHOWN.with_borrow(|shown| shown.facts(&digest)));
+        result.model_facts = ModelFacts {
+            quantization: text(model, &["details", "quantization_level"]),
+            context_configured: counter(model, &["context_length"]).filter(|n| *n > 0),
+            ..shown.unwrap_or_default()
+        };
     }
     result.details = Some(details);
     Some(result)
 }
 
+/// The list of the models Ollama runs.
+const OLLAMA_RUNNING: &str = "/api/ps";
+
+/// What Ollama's `POST /api/show` said about each model it ran, by digest.
+///
+/// `/api/show` is read-only: Ollama reads the model's manifest and the header
+/// of its file, loads nothing and runs no inference. A digest names a model's
+/// contents, so what it says never changes: each digest is asked once, and
+/// again only a minute after an answer that could not be read. The poll asks
+/// for `/api/ps` alone and hands its answer to [`ollama`], so the facts reach
+/// it through this table, kept on the sampler thread that polls.
+#[derive(Default)]
+struct ShownModels(VecDeque<(String, Shown)>);
+
+enum Shown {
+    Facts(Box<ModelFacts>),
+    /// When an answer could not be read.
+    Failed(Instant),
+}
+
+thread_local! {
+    static OLLAMA_SHOWN: RefCell<ShownModels> = RefCell::default();
+}
+
+/// Digests remembered at once: the model running and a few it switched from.
+const SHOWN_MODELS: usize = 8;
+/// How long a failed `/api/show` waits before it is asked again.
+const SHOW_RETRY: Duration = Duration::from_secs(60);
+
+impl ShownModels {
+    fn facts(&self, digest: &str) -> Option<ModelFacts> {
+        self.0.iter().find_map(|(known, shown)| match shown {
+            Shown::Facts(facts) if known == digest => Some(ModelFacts::clone(facts)),
+            _ => None,
+        })
+    }
+
+    /// Whether `/api/show` should be asked about `digest` now.
+    fn wants(&self, digest: &str, now: Instant) -> bool {
+        match self.0.iter().find(|(known, _)| known == digest) {
+            None => true,
+            Some((_, Shown::Facts(_))) => false,
+            Some((_, Shown::Failed(at))) => now.saturating_duration_since(*at) >= SHOW_RETRY,
+        }
+    }
+
+    fn record(&mut self, digest: String, facts: Option<ModelFacts>, now: Instant) {
+        self.0.retain(|(known, _)| *known != digest);
+        if self.0.len() >= SHOWN_MODELS {
+            self.0.pop_front();
+        }
+        let shown = facts.map_or(Shown::Failed(now), |facts| Shown::Facts(Box::new(facts)));
+        self.0.push_back((digest, shown));
+    }
+
+    /// After `/api/ps` answered `body`: ask `/api/show` about the model Ollama
+    /// runs, when it runs one and its digest is new. Facts are only shown for
+    /// a lone model, so nothing is asked while several run.
+    fn learn(endpoint: &Endpoint, port: u16, body: &str) {
+        let Ok(running) = serde_json::from_str::<Value>(body) else {
+            return;
+        };
+        let Some([model]) = running
+            .get("models")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+        else {
+            return;
+        };
+        let name = ["name", "model"]
+            .iter()
+            .find_map(|field| model.get(*field).and_then(Value::as_str))
+            .filter(|name| !name.is_empty() && !name.chars().any(char::is_control));
+        let (Some(name), Some(digest)) = (name, identifier(model, "digest")) else {
+            return;
+        };
+        let now = Instant::now();
+        // Ollama answers for a cloud model by asking its cloud.
+        if cloud_model(name) || !OLLAMA_SHOWN.with_borrow(|shown| shown.wants(&digest, now)) {
+            return;
+        }
+        let mut ask = json!({ "model": name });
+        // The manifest the runner loaded, for a name with one per runner.
+        if let Some(runner) = text(model, &["runner"]) {
+            ask["runner"] = Value::String(runner);
+        }
+        // An answer without facts is still an answer, kept like one with them.
+        let facts = endpoint
+            .request(port, "/api/show", Some(&ask.to_string()))
+            .ok()
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+            .filter(Value::is_object)
+            .map(|show| show_facts(&show).unwrap_or_default());
+        diagnostics_log(
+            if facts.is_some() { "INFO" } else { "WARN" },
+            "ollama_show",
+            format!(
+                "digest={} read={}",
+                log_field(&digest.chars().take(19).collect::<String>()),
+                facts.is_some()
+            ),
+        );
+        OLLAMA_SHOWN.with_borrow_mut(|shown| shown.record(digest, facts, now));
+    }
+}
+
+/// A model Ollama serves from its cloud: named `name:cloud`, or with a tag
+/// ending in `-cloud`.
+fn cloud_model(name: &str) -> bool {
+    name.rsplit_once(':')
+        .is_some_and(|(_, tag)| tag == "cloud" || tag.ends_with("-cloud"))
+}
+
+/// The keys under a GGUF model's architecture that a model of standard
+/// attention carries, besides `rope.*` and `expert_*`. Any other (a sliding
+/// window, latent or linear attention, a state space, layers sharing KV)
+/// means some layers keep a cache the plain formula does not size.
+const PLAIN_ATTENTION: [&str; 23] = [
+    "context_length",
+    "embedding_length",
+    "block_count",
+    "feed_forward_length",
+    "vocab_size",
+    "use_parallel_residual",
+    "logit_scale",
+    "residual_scale",
+    "embedding_scale",
+    "pooling_type",
+    "attn_logit_softcapping",
+    "final_logit_softcapping",
+    "leading_dense_block_count",
+    "attention.head_count",
+    "attention.head_count_kv",
+    "attention.key_length",
+    "attention.value_length",
+    "attention.layer_norm_epsilon",
+    "attention.layer_norm_rms_epsilon",
+    "attention.causal",
+    "attention.clamp_kqv",
+    "attention.max_alibi_bias",
+    "attention.scale",
+];
+
+/// What `/api/show` says about a model's shape: `model_info` holds a GGUF
+/// file's own metadata, or for a safetensors model what Ollama reads from its
+/// `config.json`. `None` when the answer has no `model_info`.
+fn show_facts(show: &Value) -> Option<ModelFacts> {
+    let info = show.get("model_info")?.as_object()?;
+    let gguf = text(show, &["details", "format"]).as_deref() == Some("gguf");
+    let architecture = info
+        .get("general.architecture")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let prefix = format!("{architecture}.");
+    let own = |key: &str| info.get(&format!("{prefix}{key}"));
+    let number = |key: &str| own(key).and_then(Value::as_u64).filter(|n| *n > 0);
+    let small = |key: &str| number(key).and_then(|n| u32::try_from(n).ok());
+    let mut keys = info.keys().filter_map(|key| key.strip_prefix(&prefix));
+    // Latent attention (MLA) caches what the runtime chooses, not heads.
+    let latent = keys
+        .clone()
+        .any(|key| key.starts_with("attention.kv_lora_rank"));
+    // Only a GGUF file names every kind of layer; Ollama's reading of a
+    // safetensors model's config.json leaves hybrid layers out.
+    let plain = gguf
+        && !architecture.is_empty()
+        && keys.all(|key| {
+            PLAIN_ATTENTION.contains(&key) || key.starts_with("rope.") || key.starts_with("expert_")
+        });
+    let heads = small("attention.head_count");
+    let head_dim = match (
+        small("attention.key_length"),
+        small("attention.value_length"),
+    ) {
+        (Some(key), value) if value.is_none_or(|value| value == key) => Some(key),
+        // llama.cpp's own default when a GGUF file names no key length.
+        (None, None) if gguf => heads
+            .zip(small("embedding_length"))
+            .and_then(|(heads, width)| (width % heads == 0).then_some(width / heads)),
+        _ => None,
+    };
+    Some(ModelFacts {
+        parameters: info
+            .get("general.parameter_count")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0),
+        context_trained: number("context_length"),
+        experts: small("expert_count"),
+        experts_per_token: small("expert_used_count"),
+        kv_layers: small("block_count").filter(|_| plain),
+        // A per-layer list of KV heads is not one number: unknown.
+        kv_heads: small("attention.head_count_kv").filter(|_| !latent),
+        head_dim: head_dim.filter(|_| !latent),
+        ..ModelFacts::default()
+    })
+}
+
 pub(super) fn lm_studio(value: &Value) -> Option<LlmTelemetry> {
     let models = value.get("models")?.as_array()?;
     let mut names = Vec::new();
-    let mut contexts = Vec::new();
+    let mut loaded = Vec::new();
     for model in models {
         // Embedding and decision models are not language models; a model
         // without `loaded_instances` is simply not loaded.
@@ -168,17 +483,38 @@ pub(super) fn lm_studio(value: &Value) -> Option<LlmTelemetry> {
         };
         for instance in instances {
             names.push(identifier(instance, "id").or_else(|| identifier(model, "key"))?);
-            contexts.push(counter(instance, &["config", "context_length"]));
+            loaded.push((model, instance));
         }
     }
     let mut result = inventory("LM Studio", names, "loaded");
-    if let [Some(context)] = contexts.as_slice() {
-        result
-            .details
-            .as_mut()?
-            .push_str(&format!(" · context capacity {context} tokens"));
+    if let [(model, instance)] = loaded.as_slice() {
+        result.model_facts = ModelFacts {
+            quantization: text(model, &["quantization", "name"]).or_else(|| {
+                json_value(model, &["quantization", "bits_per_weight"])
+                    .and_then(Value::as_f64)
+                    .filter(|bits| *bits > 0.0)
+                    .map(|bits| format!("{bits}-bit"))
+            }),
+            // LM Studio's `num_experts` is how many experts it runs per
+            // token, a load setting (0 leaves the model's own).
+            experts_per_token: small(instance, &["config", "num_experts"]),
+            context_configured: counter(instance, &["config", "context_length"]).filter(|n| *n > 0),
+            context_trained: counter(model, &["max_context_length"]).filter(|n| *n > 0),
+            ..ModelFacts::default()
+        };
+        // The weights on disk (no live memory is reported), and how many
+        // requests the instance runs at once.
+        let details = result.details.as_mut()?;
+        if let Some(format) = text(model, &["format"]) {
+            details.push_str(&format!(" · {}", format.to_uppercase()));
+        }
+        if let Some(size) = counter(model, &["size_bytes"]).filter(|n| *n > 0) {
+            details.push_str(&format!(" · weights {}", bytes(size)));
+        }
+        if let Some(parallel) = counter(instance, &["config", "parallel"]).filter(|n| *n > 0) {
+            details.push_str(&format!(" · up to {parallel} requests at once"));
+        }
     }
-    // size_bytes is the model file size, not live allocated memory.
     Some(result)
 }
 
@@ -308,16 +644,70 @@ impl Metrics {
     }
 
     fn delta(&self, previous: &Self, name: &str) -> Option<f64> {
-        let current = self.values.get(name)?;
-        let old = previous.values.get(name)?;
-        if current.len() != old.len() {
+        self.delta_by(previous, name, |_| true)
+    }
+
+    /// How much the series of `name` that `keep` selects grew since
+    /// `previous`: `None` when one of them fell (a restart), the set of
+    /// series changed, or none is selected.
+    fn delta_by(
+        &self,
+        previous: &Self,
+        name: &str,
+        keep: impl Fn(&BTreeMap<String, String>) -> bool,
+    ) -> Option<f64> {
+        let current: Vec<_> = self
+            .values
+            .get(name)?
+            .iter()
+            .filter(|(labels, _)| keep(labels))
+            .collect();
+        let old: BTreeMap<_, _> = previous
+            .values
+            .get(name)?
+            .iter()
+            .filter(|(labels, _)| keep(labels))
+            .collect();
+        if current.is_empty() || current.len() != old.len() {
             return None;
         }
-        current.iter().try_fold(0.0, |sum, (key, value)| {
-            let old = old.get(key)?;
-            let delta = value - old;
+        current.into_iter().try_fold(0.0, |sum, (key, value)| {
+            let delta = value - *old.get(key)?;
             (delta.is_finite() && delta >= 0.0).then_some(sum + delta)
         })
+    }
+
+    /// The sum of the series of `name` that `keep` selects; `None` when it
+    /// selects none.
+    fn sum_by(&self, name: &str, keep: impl Fn(&BTreeMap<String, String>) -> bool) -> Option<f64> {
+        let selected: Vec<f64> = self
+            .values
+            .get(name)?
+            .iter()
+            .filter(|(labels, _)| keep(labels))
+            .map(|(_, value)| *value)
+            .collect();
+        let sum: f64 = selected.iter().sum();
+        (!selected.is_empty() && sum.is_finite()).then_some(sum)
+    }
+
+    /// The mean of what a histogram observed since `previous`: the growth of
+    /// its `_sum` over the growth of its `_count`. `None` when it observed
+    /// nothing or was reset.
+    fn mean_since(&self, previous: &Self, histogram: &str) -> Option<f64> {
+        let count = self.delta(previous, &format!("{histogram}_count"))?;
+        let sum = self.delta(previous, &format!("{histogram}_sum"))?;
+        (count >= 1.0)
+            .then_some(sum / count)
+            .filter(|mean| mean.is_finite())
+    }
+
+    /// The one value every series of `name` reports: a constant each rank
+    /// of the server repeats.
+    fn constant(&self, name: &str) -> Option<f64> {
+        let mut values = self.values.get(name)?.values();
+        let first = *values.next()?;
+        (first.is_finite() && values.all(|value| *value == first)).then_some(first)
     }
 }
 
@@ -529,6 +919,8 @@ pub(super) struct MetricsHistory {
     generation: GenerationWindow,
     /// Start time of the mlx-serve process that answered `/metrics.json` with a 404.
     no_sessions: Option<f64>,
+    /// Where SGLang's schedulers spent the last half-minute.
+    scheduler: SchedulerTime,
 }
 
 /// The metric names one engine publishes, so `observe` has no per-engine branches.
@@ -778,6 +1170,8 @@ impl MetricsHistory {
             }
             .into(),
         );
+        // Seconds since the scrape before, when its counters can be compared with these.
+        let mut since = None;
         if let Some((old_provider, old_time, previous)) = &self.previous {
             let elapsed = now.saturating_duration_since(*old_time).as_secs_f64();
             let start = |metrics: &Metrics| {
@@ -789,9 +1183,11 @@ impl MetricsHistory {
                 self.generation.reset();
                 self.sessions = SessionSpeeds::default();
                 self.prefill = PrefillWindow::default();
+                self.scheduler = SchedulerTime::default();
             }
             let span = super::rate_span(Duration::from_secs(5)).as_secs_f64();
             if old_provider == provider && elapsed > 0.0 && elapsed <= span && same_start {
+                since = Some(elapsed);
                 result.generation_tps = metrics
                     .delta(previous, &series.generation)
                     .map(|n| n / elapsed);
@@ -903,9 +1299,460 @@ impl MetricsHistory {
                 "throughput: completed-request token deltas".into()
             };
         }
+        // What each engine's own counters add: its decode speed while it
+        // generates, KV room and preemptions, and what the work since the
+        // last poll waited for.
+        let previous = since.zip(self.previous.as_ref().map(|(_, _, previous)| previous));
+        let interval = previous.map(|(elapsed, previous)| Interval { previous, elapsed });
+        match provider {
+            "vLLM" => vllm_attribution(&metrics, interval, &mut result, &mut details),
+            "SGLang" => sglang_attribution(
+                &metrics,
+                interval,
+                &mut self.scheduler,
+                now,
+                &mut result,
+                &mut details,
+            ),
+            "TensorFold" => tensorfold_attribution(&metrics, interval, &mut result, &mut details),
+            _ => {}
+        }
         result.details = Some(details.join(" · "));
         self.previous = Some((provider.to_owned(), now, metrics));
         Some(result)
+    }
+}
+
+/// The scrape before this one, and the seconds between them, when their
+/// counters can be compared: the same server, not restarted, within a span
+/// that measures the present.
+#[derive(Clone, Copy)]
+struct Interval<'a> {
+    previous: &'a Metrics,
+    elapsed: f64,
+}
+
+/// A wait in plain units: `350 ms`, `1.2 s`.
+fn wait(seconds: f64) -> String {
+    if seconds >= 1.0 {
+        format!("{seconds:.1} s")
+    } else {
+        format!("{:.0} ms", seconds * 1000.0)
+    }
+}
+
+/// `1 request`, `3 requests`.
+fn requests(count: u64) -> String {
+    format!("{count} request{}", if count == 1 { "" } else { "s" })
+}
+
+/// What the work since the last poll did, as one details part.
+fn since_last_poll(parts: Vec<String>) -> Option<String> {
+    (!parts.is_empty()).then(|| format!("since the last poll: {}", parts.join(", ")))
+}
+
+/// The mean queue wait and gap between tokens of the work done in
+/// `interval`, from two histograms' `_sum` and `_count`.
+fn waits(metrics: &Metrics, interval: Interval, queue: &str, between_tokens: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(mean) = metrics.mean_since(interval.previous, queue) {
+        parts.push(format!("queue wait {}", wait(mean)));
+    }
+    if let Some(mean) = metrics.mean_since(interval.previous, between_tokens) {
+        parts.push(format!("{} between tokens", wait(mean)));
+    }
+    parts
+}
+
+/// The first details part of an engine whose decode speed is live while its
+/// prompt counters move only when a request ends.
+const LIVE_DECODE: &str = "throughput: live decode tokens, prefill at completion";
+
+/// What vLLM's own series add: requests preempted for KV room, the KV room
+/// left and the format the cache is stored in, and for the work since the
+/// last poll, the tokens a verify pass emitted with a draft, the share of
+/// draft tokens accepted, and the mean queue wait and gap between tokens.
+fn vllm_attribution(
+    metrics: &Metrics,
+    interval: Option<Interval>,
+    result: &mut LlmTelemetry,
+    details: &mut Vec<String>,
+) {
+    result.preemptions_total = metrics.count("vllm:num_preemptions_total");
+    result.kv_free_tokens = vllm_kv_free_tokens(metrics);
+    result.model_facts.kv_dtype = vllm_kv_dtype(metrics);
+    // An engine registers its draft counters at start exactly when it has a
+    // draft; one without them that names its usage gauge as vLLM's V1 engine
+    // does has none.
+    result.model_facts.draft = if metrics
+        .values
+        .contains_key("vllm:spec_decode_num_drafts_total")
+    {
+        Some(true)
+    } else {
+        metrics
+            .values
+            .contains_key("vllm:kv_cache_usage_perc")
+            .then_some(false)
+    };
+    let Some(interval) = interval else {
+        return;
+    };
+    let grown = |name: &str| metrics.delta(interval.previous, name);
+    let drafts = grown("vllm:spec_decode_num_drafts_total").filter(|n| *n >= 1.0);
+    let drafted = grown("vllm:spec_decode_num_draft_tokens_total").filter(|n| *n >= 1.0);
+    // No draft accepts more tokens than it proposed.
+    let accepted = grown("vllm:spec_decode_num_accepted_tokens_total")
+        .filter(|accepted| drafted.is_none_or(|drafted| *accepted <= drafted));
+    // Accepted tokens per draft, plus the one the target model adds: vLLM's
+    // mean acceptance length.
+    result.tokens_per_pass = drafts
+        .zip(accepted)
+        .map(|(drafts, accepted)| 1.0 + accepted / drafts);
+    let mut parts = waits(
+        metrics,
+        interval,
+        "vllm:request_queue_time_seconds",
+        "vllm:inter_token_latency_seconds",
+    );
+    if let Some((accepted, drafted)) = accepted.zip(drafted) {
+        parts.push(format!(
+            "{:.0}% of draft tokens accepted",
+            accepted / drafted * 100.0
+        ));
+    }
+    details.extend(since_last_poll(parts));
+}
+
+/// The KV room vLLM has left, in tokens: each engine's capacity less the
+/// share its usage gauge says is held, on the engine with the least room.
+/// Capacity is `kv_cache_size_tokens` from `vllm:cache_config_info`, which
+/// counts a hybrid model's tokens as the scheduler does, else blocks × block
+/// size.
+fn vllm_kv_free_tokens(metrics: &Metrics) -> Option<u64> {
+    let configs = metrics.values.get("vllm:cache_config_info")?;
+    let usage = metrics
+        .values
+        .get("vllm:kv_cache_usage_perc")
+        .or_else(|| metrics.values.get("vllm:gpu_cache_usage_perc"))?;
+    let mut least: Option<u64> = None;
+    for (labels, used) in usage {
+        let config = configs
+            .keys()
+            .find(|config| config.get("engine") == labels.get("engine"))?;
+        let number = |key: &str| config.get(key)?.parse::<u64>().ok().filter(|n| *n > 0);
+        let capacity = number("kv_cache_size_tokens")
+            .or_else(|| number("num_gpu_blocks")?.checked_mul(number("block_size")?))?;
+        if !(0.0..=1.0).contains(used) {
+            return None;
+        }
+        // The gauge is held blocks over all blocks: the product is whole
+        // blocks of tokens, give or take the float.
+        let room = (capacity as f64 * (1.0 - used)).round() as u64;
+        least = Some(least.map_or(room, |least| least.min(room)));
+    }
+    least
+}
+
+/// The format vLLM keeps its KV cache in, when set (`auto` is the model's
+/// own dtype, which these series do not name).
+fn vllm_kv_dtype(metrics: &Metrics) -> Option<String> {
+    let dtypes: BTreeSet<&str> = metrics
+        .values
+        .get("vllm:cache_config_info")?
+        .keys()
+        .filter_map(|labels| labels.get("cache_dtype").map(String::as_str))
+        .collect();
+    match dtypes.into_iter().collect::<Vec<_>>().as_slice() {
+        [dtype] if *dtype != "auto" && !dtype.is_empty() => {
+            Some(dtype.chars().filter(|c| !c.is_control()).take(24).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Bytes in SGLang's "GB", which is 2³⁰ bytes.
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// SGLang's decode-token counter, which it advances on every decode step.
+const SGLANG_TOKENS: &str = "sglang:realtime_tokens_total";
+
+/// What SGLang's own series add: a live decode speed, requests retracted
+/// (its preemptions) for KV room, the KV room left in tokens and bytes, what
+/// a token of KV costs, the context it allows and the memory its weights
+/// took, and for the work since the last poll the mean queue wait, the gap
+/// between tokens and the cached tokens it evicted, with where its schedulers
+/// spent the last half-minute.
+fn sglang_attribution(
+    metrics: &Metrics,
+    interval: Option<Interval>,
+    scheduler: &mut SchedulerTime,
+    now: Instant,
+    result: &mut LlmTelemetry,
+    details: &mut Vec<String>,
+) {
+    result.preemptions_total = metrics.count("sglang:num_retracted_requests_total");
+    result.kv_free_tokens = sglang_kv_free_tokens(metrics);
+    let per_token = sglang_kv_bytes_per_token(metrics);
+    result.kv_free_bytes = result
+        .kv_free_tokens
+        .zip(per_token)
+        .and_then(|(tokens, bytes)| tokens.checked_mul(bytes));
+    let facts = &mut result.model_facts;
+    facts.kv_bytes_per_token_reported = per_token;
+    facts.context_configured = metrics
+        .constant("sglang:context_len")
+        .filter(|tokens| *tokens >= 1.0)
+        .map(|tokens| tokens as u64);
+    facts.loaded_bytes = metrics
+        .constant("sglang:weight_memory_usage_gb")
+        .filter(|gb| *gb > 0.0)
+        .map(|gb| (gb * GIB).round() as u64);
+    let decoding = |labels: &BTreeMap<String, String>| {
+        labels.get("mode").map(String::as_str) == Some("decode")
+    };
+    let counter = metrics.sum_by(SGLANG_TOKENS, decoding).is_some();
+    // An older SGLang has only the speed of its last few dozen decode steps,
+    // which it keeps for half a minute after decoding stops.
+    let gauge = metrics.sum("sglang:gen_throughput").filter(|_| !counter);
+    if counter || gauge.is_some() {
+        let running = result.active_requests.is_some_and(|n| n > 0);
+        let decoded = match gauge {
+            // Tokens decoded between two polls: live, and zero through a stall.
+            None => interval.and_then(|interval| {
+                Some(
+                    metrics.delta_by(interval.previous, SGLANG_TOKENS, decoding)?
+                        / interval.elapsed,
+                )
+            }),
+            Some(rate) => Some(if running { rate } else { 0.0 }),
+        };
+        result.generation_tps = decoded;
+        result.generation_tps_live = decoded.is_some();
+        details[0] = match gauge {
+            None => LIVE_DECODE.into(),
+            Some(_) => "throughput: engine decode gauge, prefill at completion".into(),
+        };
+    }
+    // Accepted draft tokens plus the bonus token per verify step, over the
+    // last few dozen steps: only while it is decoding.
+    let lengths: Vec<f64> = metrics
+        .values
+        .get("sglang:spec_accept_length")
+        .into_iter()
+        .flat_map(BTreeMap::values)
+        .copied()
+        .filter(|length| *length >= 1.0)
+        .collect();
+    if result.generation_tps_live && result.generation_tps.is_some_and(|rate| rate > 0.0) {
+        result.tokens_per_pass =
+            (!lengths.is_empty()).then(|| lengths.iter().sum::<f64>() / lengths.len() as f64);
+    }
+    // SGLang names its active draft's size once it has decoded. Without a
+    // draft it reads 0, as a server that has not decoded yet does, so only a
+    // draft is known.
+    if !lengths.is_empty()
+        || metrics
+            .sum("sglang:spec_num_draft_tokens")
+            .is_some_and(|tokens| tokens > 0.0)
+    {
+        result.model_facts.draft = Some(true);
+    }
+    if let Some(interval) = interval {
+        let mut parts = waits(
+            metrics,
+            interval,
+            "sglang:queue_time_seconds",
+            "sglang:inter_token_latency_seconds",
+        );
+        if let Some(evicted) = metrics
+            .delta(interval.previous, "sglang:evicted_tokens_total")
+            .filter(|tokens| *tokens >= 1.0)
+        {
+            parts.push(format!(
+                "{} cached tokens evicted",
+                compact_tokens(evicted as u64)
+            ));
+        }
+        details.extend(since_last_poll(parts));
+        scheduler.observe(now, interval.elapsed, scheduler_shares(metrics, interval));
+    }
+    details.extend(scheduler.text(now));
+}
+
+/// The KV room SGLang has left, in tokens: free slots and slots holding
+/// cached prefixes it would evict for a new request, on the rank with the
+/// least.
+fn sglang_kv_free_tokens(metrics: &Metrics) -> Option<u64> {
+    let available = metrics.values.get("sglang:kv_available_tokens")?;
+    let evictable = metrics.values.get("sglang:kv_evictable_tokens")?;
+    let mut least: Option<f64> = None;
+    for (labels, free) in available {
+        let room = free + evictable.get(labels)?;
+        if !room.is_finite() {
+            return None;
+        }
+        least = Some(least.map_or(room, |least| least.min(room)));
+    }
+    least.map(|room| room as u64)
+}
+
+/// What a token of KV costs on SGLang: the bytes of its KV pool over the
+/// tokens it holds. A hybrid model's sliding-window or Mamba pool shares the
+/// byte figure, so it gives none.
+fn sglang_kv_bytes_per_token(metrics: &Metrics) -> Option<u64> {
+    let hybrid = metrics
+        .values
+        .contains_key("sglang:max_total_num_tokens_swa")
+        || [
+            "sglang:swa_available_tokens",
+            "sglang:swa_used_tokens",
+            "sglang:mamba_available_tokens",
+            "sglang:mamba_used_tokens",
+        ]
+        .iter()
+        .any(|name| metrics.sum(name).is_some_and(|tokens| tokens > 0.0));
+    let pool = metrics.constant("sglang:kv_cache_memory_usage_gb")?;
+    let tokens = metrics.constant("sglang:max_total_num_tokens")?;
+    (!hybrid && pool > 0.0 && tokens >= 1.0).then(|| (pool * GIB / tokens).round() as u64)
+}
+
+/// How far back the scheduler's time split looks.
+const SCHEDULER_WINDOW: Duration = Duration::from_secs(30);
+
+/// Where SGLang's schedulers spent the last half-minute, in seconds per
+/// second of wall time for each scheduler: the GPU running forward passes
+/// (timed only with `SGLANG_ENABLE_METRICS_DEVICE_TIMER`), the scheduler with
+/// no work at all, and the scheduler's CPU time across its threads. SGLang
+/// adds to these counters about once a second, so one poll may be credited
+/// two seconds and the next none; the window evens that out.
+#[derive(Default)]
+struct SchedulerTime(VecDeque<(Instant, f64, [Option<f64>; 3])>);
+
+impl SchedulerTime {
+    fn observe(&mut self, now: Instant, wall: f64, shares: [Option<f64>; 3]) {
+        self.0.push_back((now, wall, shares));
+    }
+
+    /// The window's shares, as a details part, when any is known.
+    fn text(&mut self, now: Instant) -> Option<String> {
+        while self
+            .0
+            .front()
+            .is_some_and(|(at, ..)| now.saturating_duration_since(*at) > SCHEDULER_WINDOW)
+        {
+            self.0.pop_front();
+        }
+        let wall: f64 = self.0.iter().map(|(_, wall, _)| wall).sum();
+        let parts: Vec<String> = ["GPU busy", "scheduler idle", "scheduler CPU"]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(part, name)| {
+                let (mut seconds, mut covered) = (0.0, 0.0);
+                for (_, wall, shares) in &self.0 {
+                    if let Some(share) = shares[part] {
+                        seconds += share * wall;
+                        covered += wall;
+                    }
+                }
+                let share = (covered > 0.0).then_some(seconds / covered)?;
+                // Busy and idle are parts of the wall; CPU spans threads.
+                let share = if part < 2 { share.min(1.0) } else { share };
+                Some(format!("{name} {:.0}%", share * 100.0))
+            })
+            .collect();
+        (!parts.is_empty()).then(|| format!("last {:.0} s: {}", wall, parts.join(", ")))
+    }
+}
+
+/// The shares of `interval` each scheduler spent with the GPU busy, idle and
+/// on the CPU. A share past what one second can hold is a lump SGLang
+/// credited late (idle time it adds when work resumes), not this poll's.
+fn scheduler_shares(metrics: &Metrics, interval: Interval) -> [Option<f64>; 3] {
+    let per_scheduler = |name: &str, most: f64| -> Option<f64> {
+        // A scheduler is a set of labels, whatever the category it times.
+        let schedulers = metrics
+            .values
+            .get(name)?
+            .keys()
+            .map(|labels| {
+                let mut labels = labels.clone();
+                labels.remove("category");
+                labels
+            })
+            .collect::<BTreeSet<_>>()
+            .len();
+        let seconds = metrics.delta(interval.previous, name)?;
+        let share = seconds / schedulers as f64 / interval.elapsed;
+        (share <= most).then_some(share)
+    };
+    [
+        per_scheduler("sglang:forward_execution_seconds_total", 1.25),
+        per_scheduler("sglang:scheduler_idle_seconds_total", 1.25),
+        per_scheduler("sglang:scheduler_process_cpu_seconds_total", 16.0),
+    ]
+}
+
+/// TensorFold's tokens held by running streams, which pass to its finished
+/// total when a request ends.
+const TENSORFOLD_RUNNING: &str = "tensorfold:generation_tokens_running";
+
+/// Finished tokens that show TensorFold drafts nothing: enough for several
+/// decode rounds, each of which would have drafted with MTP on.
+const UNDRAFTED_TOKENS: u64 = 32;
+
+/// What TensorFold's own series add: a live decode speed from the tokens its
+/// running streams hold, whether it drafts with MTP and the tokens a decode
+/// round of the requests finished since the last poll emitted, the requests
+/// that gave a lane up to a later one, and the requests its admission
+/// refused.
+fn tensorfold_attribution(
+    metrics: &Metrics,
+    interval: Option<Interval>,
+    result: &mut LlmTelemetry,
+    details: &mut Vec<String>,
+) {
+    result.preemptions_total = metrics.count("tensorfold:preemptions_total");
+    let drafted = metrics.count("tensorfold:mtp_drafted_total");
+    let finished = metrics.count("tensorfold:generation_tokens_total");
+    result.model_facts.draft = match (drafted, finished) {
+        (Some(drafted), _) if drafted > 0 => Some(true),
+        (Some(_), Some(finished)) if finished >= UNDRAFTED_TOKENS => Some(false),
+        _ => None,
+    };
+    // A round emits the target's own token and the drafted tokens it kept.
+    result.tokens_per_pass = interval.and_then(|interval| {
+        let grown = |name: &str| metrics.delta(interval.previous, name);
+        let rounds = grown("tensorfold:decode_rounds_total").filter(|n| *n >= 1.0)?;
+        let drafted = grown("tensorfold:mtp_drafted_total").filter(|n| *n >= 1.0)?;
+        let accepted = grown("tensorfold:mtp_accepted_total").filter(|kept| *kept <= drafted)?;
+        Some(1.0 + accepted / rounds)
+    });
+    if metrics.values.contains_key(TENSORFOLD_RUNNING) {
+        // Running plus finished tokens grow by what was decoded, however
+        // many requests end between two polls.
+        let generated = |metrics: &Metrics| {
+            Some(
+                metrics.sum(TENSORFOLD_RUNNING)?
+                    + metrics.sum("tensorfold:generation_tokens_total")?,
+            )
+        };
+        let decoded = interval.and_then(|interval| {
+            let grown = generated(metrics)? - generated(interval.previous)?;
+            (grown.is_finite() && grown >= 0.0).then(|| grown / interval.elapsed)
+        });
+        result.generation_tps = decoded;
+        result.generation_tps_live = decoded.is_some();
+        details[0] = LIVE_DECODE.into();
+    }
+    if let Some(refused) = metrics
+        .count("tensorfold:admission_rejected_total")
+        .filter(|n| *n > 0)
+    {
+        details.push(format!(
+            "{} refused admission since the server started",
+            requests(refused)
+        ));
     }
 }
 
@@ -999,6 +1846,44 @@ pub(super) fn apply_mlx_serve_sessions(
     if let [only] = result.requests.as_slice() {
         result.prompt_tokens = Some(only.prompt);
         result.output_tokens = only.output;
+    }
+}
+
+impl Sample {
+    /// What vLLM's, SGLang's and TensorFold's own counters say about
+    /// speculative decoding and the KV cache, for Diagnostics: each reading
+    /// only when the runtime reports it. Other runtimes give their own.
+    pub(crate) fn native_runtime_lines(&self) -> Vec<String> {
+        // SGLang calls its preemptions retractions.
+        let preempted = match self.llm_provider.as_str() {
+            "vLLM" | "TensorFold" => "preempted",
+            "SGLang" => "retracted",
+            _ => return Vec::new(),
+        };
+        let mut lines = Vec::new();
+        if let Some(tokens) = self.llm_tokens_per_pass {
+            lines.push(format!(
+                "Speculative decoding: {tokens:.1} tokens per verify pass"
+            ));
+        }
+        let mut cache = Vec::new();
+        if let Some(free) = self.llm_kv_free_tokens {
+            let size = self
+                .llm_kv_free_bytes
+                .map(|free| format!(" ({})", bytes(free)))
+                .unwrap_or_default();
+            cache.push(format!("{} tokens free{size}", compact_tokens(free)));
+        }
+        if let Some(count) = self.llm_preemptions_total.filter(|count| *count > 0) {
+            cache.push(format!(
+                "{} {preempted} since the server started",
+                requests(count)
+            ));
+        }
+        if !cache.is_empty() {
+            lines.push(format!("KV cache: {}", cache.join(" · ")));
+        }
+        lines
     }
 }
 

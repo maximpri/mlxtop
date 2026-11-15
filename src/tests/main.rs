@@ -733,5 +733,7 @@ mod qa_chip_facts;
 mod qa_context_left;
 #[path = "main_qa_efficiency.rs"]
 mod qa_efficiency;
+#[path = "main_qa_native_runtimes.rs"]
+mod qa_native_runtimes;
 #[path = "main_runtimes.rs"]
 mod runtimes;

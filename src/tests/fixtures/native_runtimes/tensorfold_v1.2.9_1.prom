@@ -1,0 +1,98 @@
+# TensorFold v1.2.9 /metrics in the order Metrics.render and renderAdmission in
+# zig/src/server/metrics.zig at that tag write it, on a Mac (process
+# footprint, no device memory), with prompt states kept, MTP drafting and
+# admission limits on. Two seconds after tensorfold_v1.2.9_0.prom: the stream
+# finished at 380 tokens (145 rounds keeping 234 of 290 drafted tokens) and
+# a new one holds 40.
+# HELP tensorfold:requests_running Requests in prefill or decode.
+# TYPE tensorfold:requests_running gauge
+tensorfold:requests_running 1
+# HELP tensorfold:requests_waiting Requests queued or held until a lane is free.
+# TYPE tensorfold:requests_waiting gauge
+tensorfold:requests_waiting 0
+# HELP tensorfold:generation_tokens_running Generated tokens held by live streams.
+# TYPE tensorfold:generation_tokens_running gauge
+tensorfold:generation_tokens_running 40
+# HELP tensorfold:prompt_tokens_total Prompt tokens of finished requests.
+# TYPE tensorfold:prompt_tokens_total counter
+tensorfold:prompt_tokens_total 222000
+# HELP tensorfold:prompt_cache_budget_bytes Startup budget for retained prompt states.
+# TYPE tensorfold:prompt_cache_budget_bytes gauge
+tensorfold:prompt_cache_budget_bytes 4294967296
+# HELP tensorfold:prompt_cache_states All retained prompt states, including long-message interior cuts.
+# TYPE tensorfold:prompt_cache_states gauge
+tensorfold:prompt_cache_states 3
+# HELP tensorfold:prompt_cache_bytes Storage held by retained prompt states and spare buffers, inside their budget.
+# TYPE tensorfold:prompt_cache_bytes gauge
+tensorfold:prompt_cache_bytes 1610612736
+# HELP tensorfold:prompt_tokens_cached_total Prompt tokens of finished requests restored from kept prompt states.
+# TYPE tensorfold:prompt_tokens_cached_total counter
+tensorfold:prompt_tokens_cached_total 130048
+# HELP tensorfold:generation_tokens_total Generated tokens of finished requests.
+# TYPE tensorfold:generation_tokens_total counter
+tensorfold:generation_tokens_total 5400
+# HELP tensorfold:kv_cache_usage_ratio Tokens in a stream cache divided by that stream's context window.
+# TYPE tensorfold:kv_cache_usage_ratio gauge
+tensorfold:kv_cache_usage_ratio{pool="0"} 0.25
+# HELP tensorfold:mtp_drafted_total Draft tokens verified on finished requests.
+# TYPE tensorfold:mtp_drafted_total counter
+tensorfold:mtp_drafted_total 6290
+# HELP tensorfold:mtp_accepted_total Draft tokens kept on finished requests.
+# TYPE tensorfold:mtp_accepted_total counter
+tensorfold:mtp_accepted_total 3334
+# HELP tensorfold:request_decode_seconds Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.
+# TYPE tensorfold:request_decode_seconds histogram
+tensorfold:request_decode_seconds_bucket{le="+Inf"} 21
+tensorfold:request_decode_seconds_sum 89.8
+tensorfold:request_decode_seconds_count 21
+# HELP tensorfold:decode_rounds_total Decode rounds used by finished requests.
+# TYPE tensorfold:decode_rounds_total counter
+tensorfold:decode_rounds_total 2045
+# HELP tensorfold:process_footprint_bytes Current OS physical footprint including Metal buffers (macOS).
+# TYPE tensorfold:process_footprint_bytes gauge
+tensorfold:process_footprint_bytes 21474836480
+# HELP tensorfold:process_footprint_peak_bytes Kernel lifetime peak physical footprint including Metal buffers; never reset by health (macOS).
+# TYPE tensorfold:process_footprint_peak_bytes gauge
+tensorfold:process_footprint_peak_bytes 23622320128
+# HELP tensorfold:num_requests_running Requests in prefill or decode. A mirror of tensorfold:requests_running.
+# TYPE tensorfold:num_requests_running gauge
+tensorfold:num_requests_running 1
+# HELP tensorfold:num_requests_waiting Requests queued or held until a lane is free. A mirror of tensorfold:requests_waiting.
+# TYPE tensorfold:num_requests_waiting gauge
+tensorfold:num_requests_waiting 0
+# HELP tensorfold:kv_cache_usage_perc A stream's cache occupancy under vLLM's name; same streams and ratios as tensorfold:kv_cache_usage_ratio.
+# TYPE tensorfold:kv_cache_usage_perc gauge
+tensorfold:kv_cache_usage_perc{stream="0"} 0.25
+# HELP tensorfold:spec_decode_num_draft_tokens_total Draft tokens verified on finished requests, this server's single draft counter.
+# TYPE tensorfold:spec_decode_num_draft_tokens_total counter
+tensorfold:spec_decode_num_draft_tokens_total 6290
+# HELP tensorfold:spec_decode_num_accepted_tokens_total Draft tokens kept on finished requests.
+# TYPE tensorfold:spec_decode_num_accepted_tokens_total counter
+tensorfold:spec_decode_num_accepted_tokens_total 3334
+# HELP tensorfold:prefix_cache_queries_total Prompt tokens of finished requests, looked up in the kept prompt states, under vLLM's name.
+# TYPE tensorfold:prefix_cache_queries_total counter
+tensorfold:prefix_cache_queries_total 222000
+# HELP tensorfold:prefix_cache_hits_total Prompt tokens of finished requests restored from kept prompt states, under vLLM's name.
+# TYPE tensorfold:prefix_cache_hits_total counter
+tensorfold:prefix_cache_hits_total 130048
+# HELP tensorfold:client_disconnections_total Requests a client left before the reply left the server.
+# TYPE tensorfold:client_disconnections_total counter
+tensorfold:client_disconnections_total 0
+# HELP tensorfold:preemptions_total Requests that had to give a lane up to a later one.
+# TYPE tensorfold:preemptions_total counter
+tensorfold:preemptions_total 1
+# HELP tensorfold:admission_inflight Model requests holding an admission reservation.
+# TYPE tensorfold:admission_inflight gauge
+tensorfold:admission_inflight 1
+# HELP tensorfold:admission_inflight_peak Most model requests holding reservations at once since start.
+# TYPE tensorfold:admission_inflight_peak gauge
+tensorfold:admission_inflight_peak 4
+# HELP tensorfold:admission_accepted_total Model requests admitted before their body was read.
+# TYPE tensorfold:admission_accepted_total counter
+tensorfold:admission_accepted_total 22
+# HELP tensorfold:admission_rejected_total Model requests refused with 429, by reason.
+# TYPE tensorfold:admission_rejected_total counter
+tensorfold:admission_rejected_total{reason="global_limit"} 3
+tensorfold:admission_rejected_total{reason="key_limit"} 5
+tensorfold:admission_rejected_total{reason="principal_capacity"} 0
+tensorfold:admission_rejected_total{reason="rate_limit"} 7

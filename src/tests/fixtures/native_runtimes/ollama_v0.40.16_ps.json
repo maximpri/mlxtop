@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "name": "llama3:8b",
+      "model": "llama3:8b",
+      "size": 6654289920,
+      "digest": "2ae6f6dd7a3dd734790bbbf58b8909a606e0e7e97e94b7604e0aa7ae4490e6d8",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "llama",
+        "families": ["llama"],
+        "parameter_size": "8.0B",
+        "quantization_level": "Q4_0"
+      },
+      "expires_at": "2026-11-15T14:38:31.83753-05:00",
+      "size_vram": 6654289920,
+      "context_length": 8192,
+      "runner": "llamacpp"
+    }
+  ]
+}
