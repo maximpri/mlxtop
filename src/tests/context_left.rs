@@ -324,6 +324,9 @@ fn growing(contexts: &[u64]) -> Sample {
     sample.file_backed = 3 * GIB;
     sample.gpu_in_use = Some(25 * GIB);
     sample.metal.resource_limit = Some(32 * GIB);
+    // A Mac's sample names its GPU, so it reads as one pool on any OS.
+    sample.metal.device_name = Some("Apple M4 Max".into());
+    sample.metal.gpu_cores = Some(32);
     sample
 }
 
