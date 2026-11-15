@@ -646,6 +646,12 @@ impl Collector {
         sample.llm_draft_acceptance = llm_stats
             .and_then(|stats| stats.draft_acceptance)
             .filter(|share| (0.0..=1.0).contains(share));
+        sample.llm_tokens_per_pass = llm_stats
+            .and_then(|stats| stats.tokens_per_pass)
+            .filter(|tokens| tokens.is_finite() && *tokens >= 1.0);
+        sample.llm_kv_free_tokens = llm_stats.and_then(|stats| stats.kv_free_tokens);
+        sample.llm_kv_free_bytes = llm_stats.and_then(|stats| stats.kv_free_bytes);
+        sample.llm_preemptions_total = llm_stats.and_then(|stats| stats.preemptions_total);
         sample.ssd_cache = llm_stats.and_then(|stats| stats.ssd_cache);
         sample.disk = disk_activity(
             sample.process_memory.as_ref(),

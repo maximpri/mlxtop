@@ -638,6 +638,17 @@ pub(crate) struct LlmTelemetry {
     /// The share of draft tokens accepted since the last poll (speculative
     /// decoding), 0–1.
     pub(crate) draft_acceptance: Option<f64>,
+    /// Tokens one verify pass emits with speculative decoding (the draft
+    /// tokens accepted plus the one the model adds), averaged since the last
+    /// poll; `None` without a draft or when the runtime does not say.
+    pub(crate) tokens_per_pass: Option<f64>,
+    /// KV-cache room the runtime reports left, in tokens.
+    pub(crate) kv_free_tokens: Option<u64>,
+    /// Memory the runtime's own plan has left for KV cache, in bytes.
+    pub(crate) kv_free_bytes: Option<u64>,
+    /// Requests the runtime preempted or recomputed for want of KV cache,
+    /// counted since it started.
+    pub(crate) preemptions_total: Option<u64>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -789,6 +800,20 @@ pub(crate) struct Sample {
     /// speculative decoding earned. Low acceptance is slow decoding on a
     /// healthy machine.
     pub(crate) llm_draft_acceptance: Option<f64>,
+    /// Tokens one verify pass emitted with speculative decoding, since the
+    /// last poll: the text's share of the speed. `None` without a draft.
+    #[serde(default)]
+    pub(crate) llm_tokens_per_pass: Option<f64>,
+    /// KV-cache room the runtime reports left, in tokens.
+    #[serde(default)]
+    pub(crate) llm_kv_free_tokens: Option<u64>,
+    /// Memory the runtime's own plan has left for KV cache, in bytes.
+    #[serde(default)]
+    pub(crate) llm_kv_free_bytes: Option<u64>,
+    /// Requests the runtime preempted or recomputed for want of KV cache,
+    /// counted since it started.
+    #[serde(default)]
+    pub(crate) llm_preemptions_total: Option<u64>,
     pub(crate) llm_active_requests: Option<u64>,
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
@@ -1016,6 +1041,10 @@ impl Default for Sample {
             llm_cache_interval_efficiency: None,
             llm_prefix_hit_rate: None,
             llm_draft_acceptance: None,
+            llm_tokens_per_pass: None,
+            llm_kv_free_tokens: None,
+            llm_kv_free_bytes: None,
+            llm_preemptions_total: None,
             llm_active_requests: None,
             llm_waiting_requests: None,
             llm_model_memory: None,
