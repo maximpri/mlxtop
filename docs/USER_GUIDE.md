@@ -793,9 +793,9 @@ rates are measured. `mlxtop stream` takes a first sample to start the rates,
 then writes a line every `--interval` seconds, or at the configured interval,
 as the dashboard does, until it is stopped. It ends with exit status 0 and
 says nothing when whatever reads it goes away (`mlxtop stream | head -3`) and
-on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.5–3.3 KB: about 2.7 KB for
-a machine serving a model, about 3.3 KB while a slowdown and its request are
-named. Standard output carries only JSON; a config file that was ignored is
+on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.6–3.7 KB: about 3.1 KB for
+a machine serving a model whose facts are known, about 3.7 KB while a slowdown
+and its request are named. Standard output carries only JSON; a config file that was ignored is
 said on standard error.
 
 The layout carries a `schema_version`, now 1, and is **experimental through
@@ -808,19 +808,24 @@ hears about a change instead of misreading it.
 
 Every field follows the same rules:
 
-- Units are in the names: `_bytes`, `_bytes_per_s`, `_tok_per_s`, `_tokens`,
-  `_s` (seconds), `_ms` (milliseconds; times are milliseconds since the Unix
-  epoch), `_w` (watts) and `_celsius`. Shares are ratios from 0 to 1, named
-  `_ratio`; nothing is a percentage. `relative_change` is a plain number:
-  -0.5 is half as fast.
+- Units are in the names: `_bytes` (a pass's, a token's or a sequence's where
+  the name says so), `_bytes_per_s`, `_tok_per_s`, `_tokens`, `_s` (seconds),
+  `_ms` (milliseconds; times are milliseconds since the Unix epoch), `_w`
+  (watts) and `_celsius`. Shares are ratios from 0 to 1, named `_ratio`;
+  nothing is a percentage. `relative_change` is a plain number: -0.5 is half
+  as fast.
 - A reading that is unknown is `null`, never 0: a counter that could not be
   read, a platform that has none, a runtime that does not report it.
 - Where a figure comes from is the `source` of the object that holds it,
   which covers everything inside it: `host` (measured by mlxtop from the
   operating system), `runtime` (reported by the runtime, through its API, its
   log or a usage file) or `estimate` (mlxtop's own judgement from other
-  readings: the usual speed and what is slow against it). The GPU memory
-  limit, which can come from either side, names its own in `limit_source`.
+  readings: the usual speed and what is slow against it, which chip this is
+  and so its published bandwidth, and what the model costs). A figure whose
+  source is not its object's names its own beside it: the GPU memory limit,
+  which can come from either side, in `limit_source`; the published bandwidth
+  in `published_bandwidth_source`; KV bytes per token, which the runtime may
+  report, in `kv_bytes_per_token_source`.
 - Values that name a state are lowercase words joined by underscores.
 - There are no process names, command lines or process ids, so a stream can
   go to another machine. Runtime and model names stay.
@@ -846,6 +851,8 @@ Every field follows the same rules:
 | `host.chip` | The Apple chip, as its GPU is named (`Apple M4 Max`) |
 | `host.gpu_cores` | The Apple GPU's cores |
 | `host.ram_bytes` | All of RAM |
+| `host.published_bandwidth_bytes_per_s` | The peak memory bandwidth the chip's maker publishes: the Mac's chip, or the one NVIDIA or AMD card, as the host footer shows it; `null` where mlxtop's table does not hold the chip or cannot tell its bin, and with several cards |
+| `host.published_bandwidth_source` | `estimate`: which chip this is, and so its figure, is mlxtop's judgement from its name, GPU cores and memory |
 | `host.memory.layout` | `unified` (the GPU's memory is RAM: Apple Silicon, DGX Spark), `dedicated` (cards with VRAM), or `null` with no GPU reading |
 | `host.memory.pressure` | The operating system's memory pressure: `normal`, `warning` (shown as "watch") or `critical` |
 | `host.memory.tight` | Pressure is raised or little memory is free, so file paging counts against the machine |
@@ -913,6 +920,16 @@ Every field follows the same rules:
 | `runtime.model_memory_ceiling_bytes` | The most memory it lets them take |
 | `runtime.model_size_bytes` | The loaded model's size (Ollama) |
 | `runtime.model_offloaded_bytes` | The part of the model it placed outside GPU memory (Ollama) |
+| `runtime.context_allowed_tokens` | The context it allows for the model |
+| `runtime.model_facts` | What the model costs a pass, a token and a sequence, as mlxtop works it out from the model's own files (see [Model facts](#model-facts)); `null` when none of it is known |
+| `runtime.model_facts.source` | `estimate` |
+| `runtime.model_facts.weight_bytes_per_pass` | Weight bytes one forward pass reads for a token: the decoder layers and the output head; for MoE, the experts one token uses |
+| `runtime.model_facts.bits_per_weight` | Bits per parameter a pass reads, scales and biases included |
+| `runtime.model_facts.kv_bytes_per_token` | KV-cache bytes one more token of context costs |
+| `runtime.model_facts.kv_bytes_per_token_source` | `runtime` where the runtime reports it, `estimate` where mlxtop works it out from the model's layers |
+| `runtime.model_facts.state_bytes_per_sequence` | What a sequence holds whatever its length: linear-attention state, full sliding windows, a draft's context window; 0 for a model with none |
+| `runtime.model_facts.context_trained_tokens` | The context the model was trained for, as its `config.json` (else the runtime) declares it |
+| `runtime.model_facts.draft_weight_bytes` | The draft's weight bytes as stored, where speculative decoding drafts |
 | `runtime.mlx` | The MLX allocator inside it, where it reports one; else `null` |
 | `runtime.mlx.version` | Its MLX version |
 | `runtime.mlx.active_bytes` | MLX's active memory |

@@ -19,6 +19,8 @@
     "chip": "Apple M4 Max",
     "gpu_cores": 32,
     "ram_bytes": 38654705664,
+    "published_bandwidth_bytes_per_s": 410000000000,
+    "published_bandwidth_source": "estimate",
     "memory": {
       "layout": "unified",
       "pressure": "normal",
@@ -103,6 +105,17 @@
     "model_memory_ceiling_bytes": 32212254720,
     "model_size_bytes": null,
     "model_offloaded_bytes": null,
+    "context_allowed_tokens": 131072,
+    "model_facts": {
+      "source": "estimate",
+      "weight_bytes_per_pass": 15020479488,
+      "bits_per_weight": 4.691,
+      "kv_bytes_per_token": 33280,
+      "kv_bytes_per_token_source": "estimate",
+      "state_bytes_per_sequence": 160038912,
+      "context_trained_tokens": 262144,
+      "draft_weight_bytes": 3848808960
+    },
     "mlx": null,
     "generation": {
       "tok_per_s": 61.8,

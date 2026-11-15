@@ -37,6 +37,31 @@ fn private_process() -> LlmProcess {
     }
 }
 
+/// What WP3 works out for the owner's Qwen3.8-27B-oQ4e-mtp served through
+/// Splash with int8 KV (see tests/model_facts.rs): 16 full-attention layers
+/// of 4 KV heads of 256 keep keys and values, at a byte a value and a byte
+/// of scale per 64.
+pub(crate) fn owner_model_facts() -> crate::model_facts::ModelFacts {
+    crate::model_facts::ModelFacts {
+        bytes_per_pass: Some(15_020_479_488),
+        parameters: Some(26_896_000_000),
+        bits_per_weight: Some(4.6913),
+        quantization: Some("4/5-bit g64".into()),
+        kv_layers: Some(16),
+        kv_heads: Some(4),
+        head_dim: Some(256),
+        kv_dtype: Some("int8".into()),
+        kv_bytes_per_element: Some(1.0 + 1.0 / 64.0),
+        fixed_state_bytes: Some(154_140_672 + 5_898_240),
+        context_configured: Some(131_072),
+        context_trained: Some(262_144),
+        draft: Some(true),
+        draft_bytes: Some(3_848_808_960),
+        runtime_version: Some("oMLX 0.7.3 · Splash 1.5.0".into()),
+        ..crate::model_facts::ModelFacts::default()
+    }
+}
+
 /// The owner's Mac Studio (M4 Max, 32-core GPU, 36 GiB) serving a 27B model
 /// through oMLX and Splash, twelve seconds into a slowdown that coincides
 /// with paging.
@@ -86,6 +111,7 @@ pub(crate) fn mac_studio_slowdown() -> Sample {
             cpu_speed_limit: None,
         },
         system_power_mw: Some(35_712),
+        model: owner_model_facts(),
         llm_count: 1,
         llm_rss: 17 * GIB,
         process_memory: Some(crate::process_memory::Reading {
@@ -289,6 +315,7 @@ pub(crate) fn mac_no_runtime() -> Sample {
         llm_model_memory_max: None,
         llm_details: None,
         llm_engine: None,
+        model: crate::model_facts::ModelFacts::default(),
         ssd_cache: None,
         disk: DiskActivity::default(),
         correlation: CorrelationInsight::default(),
@@ -318,6 +345,7 @@ pub(crate) fn mac_remote_runtime() -> Sample {
     sample.llm_waiting_requests = Some(2);
     sample.llm_active_requests = Some(4);
     sample.llm_details = Some("remote API · throughput: server token deltas".into());
+    sample.model = crate::model_facts::ModelFacts::default();
     sample
 }
 
@@ -463,20 +491,20 @@ fn the_snapshot_matches_the_golden_schema_field_by_field() {
 }
 
 #[test]
-fn every_line_is_one_json_object_of_about_two_to_three_kilobytes() {
+fn every_line_is_one_json_object_of_about_three_kilobytes() {
     let text = line(&mac_studio_slowdown(), Platform::MacOs);
     assert!(text.ends_with('\n'));
     assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
     let value: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["schema_version"], SCHEMA_VERSION);
     assert_eq!(value["ts_ms"], TS);
-    // About 2–3 KB: more while a slowdown and its requests are named, less
-    // with no runtime to report on.
+    // About 2.5–4 KB: more while a slowdown and its requests are named, less
+    // with no runtime and no model facts to report on.
     let busy = text.len();
     let idle = line(&mac_studio_idle(), Platform::MacOs).len();
     let quiet = line(&mac_no_runtime(), Platform::MacOs).len();
     assert!(
-        (2_000..=3_000).contains(&idle) && busy <= 3_500 && quiet < idle && idle < busy,
+        (2_500..=3_500).contains(&idle) && busy <= 4_000 && quiet < idle && idle < busy,
         "busy {busy}, idle {idle}, quiet {quiet} bytes"
     );
 }
@@ -553,6 +581,10 @@ fn unknown_readings_are_null_never_zero() {
         "/runtime/cache/reuse_ratio",
         "/runtime/draft/acceptance_ratio",
         "/host/runtime_process/disk_read_bytes_per_s",
+        "/host/published_bandwidth_bytes_per_s",
+        "/host/published_bandwidth_source",
+        "/runtime/context_allowed_tokens",
+        "/runtime/model_facts",
         "/usual_speed",
         "/slowdown",
         "/slowdown_ended",
@@ -696,7 +728,7 @@ fn the_verdict_names_every_kind_of_headline() {
 
 /// An NVIDIA workstation: a card with memory of its own, and a runtime
 /// that keeps its readings in a log.
-fn linux_workstation() -> Sample {
+pub(crate) fn linux_workstation() -> Sample {
     Sample {
         total_memory: 64 * GIB,
         vm_available: true,
@@ -1068,6 +1100,79 @@ fn heat_and_the_runtimes_allocator_are_read_when_reported() {
         json(&sample, Platform::MacOs)["runtime"]["connected"],
         Value::Null
     );
+}
+
+#[test]
+fn the_chips_published_bandwidth_is_an_estimate() {
+    // The owner's 32-core M4 Max reads 410 GB/s, not the 40-core part's 546.
+    let mac = json(&mac_studio_slowdown(), Platform::MacOs);
+    assert_eq!(
+        mac["host"]["published_bandwidth_bytes_per_s"],
+        410_000_000_000_u64
+    );
+    assert_eq!(mac["host"]["published_bandwidth_source"], "estimate");
+    // A bin the readings cannot settle is unknown, not guessed.
+    let mut unsure = mac_studio_slowdown();
+    unsure.metal.gpu_cores = None;
+    let unsure = json(&unsure, Platform::MacOs);
+    for field in [
+        "published_bandwidth_bytes_per_s",
+        "published_bandwidth_source",
+    ] {
+        assert_eq!(unsure["host"][field], Value::Null, "{field}");
+    }
+    // One card has its own figure; several cards have no single one.
+    let mut one = linux_workstation();
+    one.gpus.truncate(1);
+    assert_eq!(
+        json(&one, Platform::Linux)["host"]["published_bandwidth_bytes_per_s"],
+        1_008_000_000_000_u64
+    );
+    assert_eq!(
+        json(&linux_workstation(), Platform::Linux)["host"]["published_bandwidth_bytes_per_s"],
+        Value::Null
+    );
+}
+
+#[test]
+fn model_facts_are_an_estimate_that_names_the_runtimes_own_figures() {
+    let value = json(&mac_studio_slowdown(), Platform::MacOs);
+    let facts = &value["runtime"]["model_facts"];
+    assert_eq!(facts["source"], "estimate");
+    assert_eq!(facts["weight_bytes_per_pass"], 15_020_479_488_u64);
+    assert_eq!(facts["bits_per_weight"], 4.691);
+    assert_eq!(facts["kv_bytes_per_token"], 33_280);
+    assert_eq!(facts["kv_bytes_per_token_source"], "estimate");
+    assert_eq!(facts["state_bytes_per_sequence"], 160_038_912);
+    assert_eq!(facts["context_trained_tokens"], 262_144);
+    assert_eq!(facts["draft_weight_bytes"], 3_848_808_960_u64);
+    // The context the runtime allows is its own setting, beside its other limits.
+    assert_eq!(value["runtime"]["context_allowed_tokens"], 131_072);
+    // KV bytes the runtime reports win over the layers, and say whose they are.
+    let mut sample = mac_studio_slowdown();
+    sample.model.kv_bytes_per_token_reported = Some(65_536);
+    let facts = &json(&sample, Platform::MacOs)["runtime"]["model_facts"];
+    assert_eq!(facts["kv_bytes_per_token"], 65_536);
+    assert_eq!(facts["kv_bytes_per_token_source"], "runtime");
+    // A model with no fixed state holds 0 a sequence: known, not unknown.
+    sample.model = crate::model_facts::ModelFacts {
+        fixed_state_bytes: Some(0),
+        ..Default::default()
+    };
+    let facts = &json(&sample, Platform::MacOs)["runtime"]["model_facts"];
+    assert_eq!(facts["state_bytes_per_sequence"], 0);
+    assert_eq!(facts["kv_bytes_per_token"], Value::Null);
+    assert_eq!(facts["kv_bytes_per_token_source"], Value::Null);
+    // With none of its figures known, there is no object at all.
+    sample.model = crate::model_facts::ModelFacts {
+        context_configured: Some(8_192),
+        bits_per_weight: Some(f64::NAN),
+        runtime_version: Some("oMLX 0.7.3".into()),
+        ..Default::default()
+    };
+    let value = json(&sample, Platform::MacOs);
+    assert_eq!(value["runtime"]["model_facts"], Value::Null);
+    assert_eq!(value["runtime"]["context_allowed_tokens"], 8_192);
 }
 
 /// Every field path in `value`: `memory.ram.left_bytes`, `gpus[].name`.

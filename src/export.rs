@@ -153,6 +153,13 @@ pub(crate) struct Host {
     /// The Apple GPU's cores.
     pub(crate) gpu_cores: Option<u16>,
     pub(crate) ram_bytes: Option<u64>,
+    /// The peak memory bandwidth the chip's maker publishes: the Mac's
+    /// chip, or the one NVIDIA or AMD card. Unknown where mlxtop's table
+    /// does not hold the chip or cannot tell its bin, and with several cards.
+    pub(crate) published_bandwidth_bytes_per_s: Option<u64>,
+    /// `estimate`: which chip this is, and so its figure, is mlxtop's
+    /// judgement from its name, GPU cores and memory, not a reading.
+    pub(crate) published_bandwidth_source: Option<Source>,
     pub(crate) memory: Memory,
     /// The Apple GPU of a Mac, or each NVIDIA and AMD card.
     pub(crate) gpus: Vec<Gpu>,
@@ -165,6 +172,7 @@ pub(crate) struct Host {
 impl Host {
     fn of(sample: &Sample, platform: Platform) -> Self {
         let apple = platform == Platform::MacOs;
+        let bandwidth = published_bandwidth(sample, platform);
         Self {
             source: Source::Host,
             platform: match platform {
@@ -176,6 +184,8 @@ impl Host {
             chip: sample.metal.device_name.clone().filter(|_| apple),
             gpu_cores: sample.metal.gpu_cores.filter(|_| apple),
             ram_bytes: known(sample.total_memory),
+            published_bandwidth_bytes_per_s: bandwidth,
+            published_bandwidth_source: bandwidth.map(|_| Source::Estimate),
             memory: Memory::of(sample, platform),
             gpus: Gpu::all(sample, platform),
             thermal: Thermal::of(sample),
@@ -185,6 +195,25 @@ impl Host {
             runtime_process: RuntimeProcess::of(sample),
         }
     }
+}
+
+/// The peak memory bandwidth the maker publishes for the chip that serves,
+/// in bytes a second: the Mac's chip, or the one card, as the host footer
+/// names it, decided by the platform the sample was taken on.
+fn published_bandwidth(sample: &Sample, platform: Platform) -> Option<u64> {
+    let bandwidth = match platform {
+        Platform::MacOs => crate::chip_facts::lookup(
+            sample.metal.device_name.as_deref()?,
+            sample.metal.gpu_cores,
+            Some(sample.total_memory),
+        ),
+        // Several cards have no single figure.
+        _ => match sample.gpus.as_slice() {
+            [card] => crate::chip_facts::card(card),
+            _ => None,
+        },
+    };
+    bandwidth.map(|bandwidth| (bandwidth.gb_s * 1e9).round() as u64)
 }
 
 /// Memory laid out as the hardware is: one pool where the GPU shares RAM,
@@ -563,6 +592,11 @@ pub(crate) struct Runtime {
     pub(crate) model_size_bytes: Option<u64>,
     /// The part of the model it placed outside GPU memory.
     pub(crate) model_offloaded_bytes: Option<u64>,
+    /// The context it is set to allow for the model.
+    pub(crate) context_allowed_tokens: Option<u64>,
+    /// What the model costs a pass, a token and a sequence, as mlxtop
+    /// works it out from the model's own files; `null` when nothing is known.
+    pub(crate) model_facts: Option<ModelFacts>,
     /// The MLX allocator inside it, where it reports one.
     pub(crate) mlx: Option<Mlx>,
     pub(crate) generation: Generation,
@@ -607,6 +641,8 @@ impl Runtime {
             model_memory_ceiling_bytes: sample.llm_model_memory_max,
             model_size_bytes: sample.llm_model_size,
             model_offloaded_bytes: sample.llm_model_offloaded,
+            context_allowed_tokens: sample.model.context_configured,
+            model_facts: ModelFacts::of(&sample.model),
             mlx: Mlx::of(sample),
             generation: Generation::of(sample),
             prefill: Prefill::of(sample),
@@ -647,6 +683,64 @@ impl Mlx {
             .iter()
             .any(Option::is_some);
         reported.then_some(mlx)
+    }
+}
+
+/// What the serving model costs, as mlxtop works it out from the model's
+/// `config.json` and safetensors headers and the runtime's settings: an
+/// estimate, except a figure that names the runtime as its source.
+#[derive(Serialize)]
+pub(crate) struct ModelFacts {
+    pub(crate) source: Source,
+    /// Weight bytes one forward pass reads for a token: the decoder layers
+    /// and the output head; for MoE, the experts one token uses.
+    pub(crate) weight_bytes_per_pass: Option<u64>,
+    /// Bits per parameter a pass reads, scales and biases included.
+    pub(crate) bits_per_weight: Option<f64>,
+    /// KV-cache bytes one more token of context costs.
+    pub(crate) kv_bytes_per_token: Option<u64>,
+    /// `runtime` where the runtime reports it, `estimate` where mlxtop
+    /// works it out from the model's layers.
+    pub(crate) kv_bytes_per_token_source: Option<Source>,
+    /// What a sequence holds whatever its length: linear-attention state,
+    /// full sliding windows, a draft's context window. 0 for a model with none.
+    pub(crate) state_bytes_per_sequence: Option<u64>,
+    /// The context the model was trained for, as its `config.json` (else
+    /// the runtime) declares it.
+    pub(crate) context_trained_tokens: Option<u64>,
+    /// The draft's weight bytes as stored, where speculative decoding drafts.
+    pub(crate) draft_weight_bytes: Option<u64>,
+}
+
+impl ModelFacts {
+    fn of(facts: &crate::model_facts::ModelFacts) -> Option<Self> {
+        let kv_bytes_per_token = facts.kv_bytes_per_token();
+        let model = Self {
+            source: Source::Estimate,
+            weight_bytes_per_pass: facts.bytes_per_pass,
+            bits_per_weight: facts
+                .bits_per_weight
+                .filter(|bits| bits.is_finite() && *bits > 0.0)
+                .map(|bits| round(bits, 3)),
+            kv_bytes_per_token,
+            kv_bytes_per_token_source: kv_bytes_per_token.map(|_| {
+                if facts.kv_bytes_per_token_reported.is_some() {
+                    Source::Runtime
+                } else {
+                    Source::Estimate
+                }
+            }),
+            state_bytes_per_sequence: facts.fixed_state_bytes,
+            context_trained_tokens: facts.context_trained,
+            draft_weight_bytes: facts.draft_bytes,
+        };
+        let known = model.weight_bytes_per_pass.is_some()
+            || model.bits_per_weight.is_some()
+            || model.kv_bytes_per_token.is_some()
+            || model.state_bytes_per_sequence.is_some()
+            || model.context_trained_tokens.is_some()
+            || model.draft_weight_bytes.is_some();
+        known.then_some(model)
     }
 }
 
@@ -1065,4 +1159,4 @@ pub(crate) fn stream(
 
 #[cfg(test)]
 #[path = "tests/export.rs"]
-mod tests;
+pub(crate) mod tests;
