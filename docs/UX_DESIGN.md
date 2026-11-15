@@ -255,6 +255,23 @@ colors in time-series history instead of recoloring old samples on refresh.
   until eight samples of it have been: it is learned, never judged against
   different work. Request count and prompt size are therefore never a
   slowdown's reason.
+- Compare like with like within similar work, one sentence per rule. "With a
+  draft model, speed is judged per verify pass, so a change in how well the
+  draft guesses is reported as the text, not as a slowdown": where the
+  runtime counts tokens per pass, earlier speeds are taken at this sample's
+  count. On one Mac Studio thinking off ran 123 tok/s at 7.8 tokens a pass
+  and thinking on 88 at 5.55, both about 15.8 passes a second; over 8,088 of
+  its requests the passes a second within a context band did not move with
+  tokens per pass. "Speed is compared with earlier work at a similar depth,
+  after allowing for the cache each token reads": with the model's weight
+  and KV bytes known, earlier speeds are scaled by
+  (W + kv·t_then) ÷ (W + kv·t_now), since a KV-heavy model loses about a
+  quarter from 16k to 32k inside one factor of two. The bytes model, not a
+  slope learned from the session, because it needs no depth spread to learn
+  from and cannot learn a slowdown as depth; on a hybrid model it explains
+  half of what depth costs and leaves at most 8% per doubling. Judged per
+  pass, the usual speed on the edge follows the text, beside the draft's
+  share (`draft 64% · usual 87.5`).
 - Generation is slow when it is unusually far below the usual speed for its
   work, by at least a fifth and 2 tok/s, for three samples in a row. A slowdown ends
   after three samples back at the usual speed (`RECOVERED`). The usual

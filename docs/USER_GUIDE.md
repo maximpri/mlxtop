@@ -171,11 +171,41 @@ runtime). A runtime whose speed jumps about is rarely unusual; a steady one
 shows a small change.
 
 Generation speed depends on the work: a longer context and more requests
-writing at once are slower. So a sample's speed is compared with earlier
-samples of **similar work**: as many requests writing at once (1, 2, 3, or 4
-and more), with a context (prompt and output so far) within a factor of two.
-Work mlxtop has not seen before is learned for eight samples before it is
-judged; it is never compared with different work.
+writing at once are slower, and with a draft model so is text the draft
+guesses less well. So a sample's speed is compared with earlier samples of
+**similar work**: as many requests writing at once (1, 2, 3, or 4 and more),
+with a context (prompt and output so far) within a factor of two. Work
+mlxtop has not seen before is learned for eight samples before it is judged;
+it is never compared with different work. Two rules then compare like with
+like:
+
+- **With a draft model, speed is judged per verify pass, so a change in how
+  well the draft guesses is reported as the text, not as a slowdown.** One
+  pass of the model verifies a block of drafted tokens and emits those it
+  accepts and one of its own. When the runtime counts the tokens a pass
+  emits (Splash does), each earlier speed is taken at this sample's tokens
+  per pass, so what is compared is the machine's verify passes a second. On
+  one Mac Studio a short answer ran at 123 tok/s with thinking off (7.8
+  tokens a pass) and 88 with thinking on (5.55): about 15.8 passes a second
+  either way, and no slowdown. Over a month of that server's requests the
+  passes a second at a given depth were the same whatever the draft landed.
+  A slowdown judged per pass is never put down to draft acceptance; while
+  lower acceptance is new, Diagnostics lists it under `Unusual:`. Speeds
+  measured before the runtime counted are not compared per pass. oMLX does
+  not pass Splash's count on, so behind oMLX speed is judged per token.
+- **Speed is compared with earlier work at a similar depth, after allowing
+  for the cache each token reads.** A pass reads the model's weights and the
+  KV cache of the context, so when the [model's facts](#model-facts) give
+  both, each earlier speed is scaled to this depth by (W + kv × earlier
+  context) ÷ (W + kv × context now), W being the weight bytes a pass reads
+  and kv the KV bytes a token adds. A KV-heavy model such as Qwen3-30B-A3B
+  reads 5.1 GB a pass at 16k context and 6.7 GB at 32k, so it runs about a
+  quarter slower twice as deep with nothing wrong. On the hybrid Qwen3.8-27B
+  (15.0 GB a pass, 33 KB of KV a token) the bytes explain about half of what
+  depth costs, and attention work the rest: at most 8% per doubling is left,
+  well inside the slow rule's margin. An MoE model with a draft is not
+  scaled: a pass that verifies several tokens reads the experts each of them
+  routes to.
 
 Generation is **slow** when its speed is unusually low for its work (and at
 least a fifth below usual) for three samples in a row. While no answer is
@@ -192,9 +222,10 @@ reason, however high that level is.
 
 The generation chart's bottom edge says what speed it judges against, for
 the work being done, for example `usual 30.0 for 2 requests · 131.2k
-context`. During a slowdown a solid yellow line marks that usual speed on
-the chart, so the gap under it is the drop; while all is well there is no
-line.
+context`. Judged per pass, that speed follows the text: beside `draft 97%`
+it may read `usual 123.0`, and beside `draft 64%` `usual 87.5` for the same
+work. During a slowdown a solid yellow line marks that usual speed on the
+chart, so the gap under it is the drop; while all is well there is no line.
 
 Yellow means impact and nothing else. It appears only while the model is
 slowed or stalled:
