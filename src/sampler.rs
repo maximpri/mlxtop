@@ -118,9 +118,9 @@ impl Sampler {
                                 break;
                             }
                         },
-                        Output::Latest(latest) => latest.publish(crate::export::snapshot(
+                        Output::Latest(latest) => latest.publish(crate::export::session_snapshot(
+                            &collector,
                             &sample,
-                            collector.platform,
                             interval.as_secs(),
                         )),
                     }

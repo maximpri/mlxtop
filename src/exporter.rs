@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! `mlxtop serve`: sampling runs with no screen, and a listener on the
 //! loopback interface answers `/metrics` (Prometheus text), `/snapshot` (the
-//! JSON `--once --json` prints) and `/health` from the newest sample. A
+//! JSON line `mlxtop stream` writes) and `/health` from the newest sample. A
 //! request never starts a sample or waits for one: it reads the slot the
 //! sampler last filled, so a runtime that hangs costs a scrape nothing.
 //!
@@ -885,6 +885,21 @@ pub(crate) const READINGS: &[Metric<Snapshot>] = &[
         |s| whole(s.runtime.context_allowed_tokens),
     ),
     gauge(
+        "mlxtop_llm_kv_free_tokens",
+        "KV-cache room the runtime reports left, in tokens: a pool its requests share, or llama.cpp's running slot nearest its limit",
+        |s| whole(s.runtime.kv_free_tokens),
+    ),
+    gauge(
+        "mlxtop_llm_kv_free_bytes",
+        "KV-cache room the runtime reports left, in bytes: Splash's memory plan, or SGLang's free tokens at its bytes a token",
+        |s| whole(s.runtime.kv_free_bytes),
+    ),
+    counter(
+        "mlxtop_llm_preemptions_total",
+        "Requests the runtime preempted, retracted or suspended for want of KV cache, by its own count since it started",
+        |s| whole(s.runtime.preemptions_total),
+    ),
+    gauge(
         "mlxtop_llm_weight_bytes_per_pass",
         "Estimate: weight bytes one forward pass reads for a token",
         |s| whole(s.runtime.model_facts.as_ref()?.weight_bytes_per_pass),
@@ -969,6 +984,56 @@ pub(crate) const READINGS: &[Metric<Snapshot>] = &[
         "mlxtop_llm_draft_acceptance_ratio",
         "The share of drafted tokens accepted since the last poll (speculative decoding)",
         |s| s.runtime.draft.acceptance_ratio,
+    ),
+    gauge(
+        "mlxtop_llm_tokens_per_verify_pass",
+        "Tokens one verify pass emitted since the last poll: the drafted tokens accepted and the model's own (speculative decoding)",
+        |s| s.runtime.draft.tokens_per_pass,
+    ),
+    gauge(
+        "mlxtop_llm_decode_verify_passes_per_second",
+        "Estimate: verify passes a second while one request decodes alone: generation speed over tokens per pass",
+        |s| s.efficiency.as_ref().map(|decode| decode.verify_passes_per_s),
+    ),
+    gauge(
+        "mlxtop_llm_decode_bytes_per_pass",
+        "Estimate: what one decode pass reads: the weights, the KV cache of its context and the sequence's state",
+        |s| whole(s.efficiency.as_ref().map(|decode| decode.bytes_per_pass)),
+    ),
+    gauge(
+        "mlxtop_llm_decode_bandwidth_share_ratio",
+        "Estimate: the share of the chip's published peak bandwidth decode reads, per verify pass where a draft runs (its own reads left out)",
+        |s| s.efficiency.as_ref().map(|decode| decode.bandwidth_share_ratio),
+    ),
+    gauge(
+        "mlxtop_llm_decode_best_bandwidth_share_ratio",
+        "Estimate: the best share decode has reached for similar work this session, while generation kept its usual speed",
+        |s| s.efficiency.as_ref()?.best_bandwidth_share_ratio,
+    ),
+    gauge(
+        "mlxtop_llm_decode_no_draft_ceiling_tokens_per_second",
+        "Estimate: the generation speed this machine could not exceed without a draft: one token a pass at the chip's full peak",
+        |s| s.efficiency.as_ref().map(|decode| decode.no_draft_ceiling_tok_per_s),
+    ),
+    gauge(
+        "mlxtop_llm_context_left_tokens",
+        "Estimate: tokens each request in flight can still add, or the next with none in flight: the smaller of what memory and the context window allow",
+        |s| whole(s.context_left.as_ref().map(|left| left.tokens_per_request)),
+    ),
+    gauge(
+        "mlxtop_llm_context_left_requests",
+        "Estimate: the requests that context is for: those in flight, or 1 for the next",
+        |s| whole(s.context_left.as_ref().map(|left| left.requests)),
+    ),
+    gauge(
+        "mlxtop_llm_context_left_by_memory_tokens",
+        "Estimate: what memory alone leaves each request; left out where only the context window limits it",
+        |s| whole(s.context_left.as_ref()?.by_memory_tokens),
+    ),
+    gauge(
+        "mlxtop_llm_context_left_by_window_tokens",
+        "Estimate: what the context window alone leaves each request: the window less the most context one holds",
+        |s| whole(s.context_left.as_ref().map(|left| left.by_window_tokens)),
     ),
     gauge(
         "mlxtop_llm_usual_generation_tokens_per_second",

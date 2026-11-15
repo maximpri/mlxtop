@@ -16,8 +16,12 @@
 //!   covers everything inside it that names no other: `host` for what mlxtop
 //!   measured from the operating system, `runtime` for what the runtime
 //!   reported, `estimate` for mlxtop's own judgement from other readings
-//!   (the usual speed and what is slow against it). A figure whose source
-//!   varies says so beside it (`limit_source`).
+//!   (the usual speed and what is slow against it, decode per verify pass,
+//!   the context left). A figure whose source varies says so beside it
+//!   (`limit_source`).
+//! - What only a session knows (the best decode reached here) is in the
+//!   snapshots `stream` and `serve` write from their session; `--once`
+//!   watches none, so it is `null` there.
 //! - No process names, command lines or process ids: the stream is meant to
 //!   cross a network. Runtime and model names stay.
 //! - Fields are added without a new version, so a reader ignores fields it
@@ -29,8 +33,9 @@
 //! object's `of`, and add it to `tests/fixtures/export_v1.json` and to the
 //! field list in docs/USER_GUIDE.md: the tests hold the output to both.
 use crate::collector::{epoch_millis, Collector};
-use crate::diagnosis::{assess, Verdict};
+use crate::diagnosis::{assess, assess_session, Verdict};
 use crate::domain::{CorrelationCause, DropEnd, Phase, Sample, TelemetrySource, Tone};
+use crate::efficiency::Record;
 use crate::host::Platform;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -68,6 +73,11 @@ pub(crate) struct Snapshot {
     pub(crate) verdict: VerdictLine,
     pub(crate) host: Host,
     pub(crate) runtime: Runtime,
+    /// Decode per verify pass against the chip's peak, while one request
+    /// decodes alone and every input is known.
+    pub(crate) efficiency: Option<Efficiency>,
+    /// How much more context fits, while every input is known.
+    pub(crate) context_left: Option<ContextLeft>,
     /// The usual speed for the work being done, once there is one.
     pub(crate) usual_speed: Option<UsualSpeed>,
     /// What else is unusual in this sample, the most telling first: an
@@ -80,17 +90,47 @@ pub(crate) struct Snapshot {
 }
 
 /// The snapshot of `sample`, taken `interval_s` seconds after the one
-/// before it on a `platform` machine.
+/// before it on a `platform` machine, with no session behind it: what
+/// `--once --json` prints.
 pub(crate) fn snapshot(sample: &Sample, platform: Platform, interval_s: u64) -> Snapshot {
+    build(sample, platform, interval_s, None)
+}
+
+/// The snapshot of `sample`, the sample `collector` just took, as its
+/// session sees it, the way the dashboard does: with what the session
+/// watched decode reach, so the best share and a healthy verdict's note
+/// near it are known. What `mlxtop stream` writes and `mlxtop serve`
+/// answers with.
+pub(crate) fn session_snapshot(
+    collector: &Collector,
+    sample: &Sample,
+    interval_s: u64,
+) -> Snapshot {
+    build(
+        sample,
+        collector.platform,
+        interval_s,
+        Some(&collector.session.decode),
+    )
+}
+
+fn build(
+    sample: &Sample,
+    platform: Platform,
+    interval_s: u64,
+    decode: Option<&Record>,
+) -> Snapshot {
     let insight = &sample.correlation;
     Snapshot {
         schema_version: SCHEMA_VERSION,
         mlxtop_version: crate::cli::VERSION.into(),
         ts_ms: sample.ts,
         interval_s,
-        verdict: VerdictLine::of(sample),
+        verdict: VerdictLine::of(sample, decode),
         host: Host::of(sample, platform),
         runtime: Runtime::of(sample),
+        efficiency: Efficiency::of(sample, decode),
+        context_left: ContextLeft::of(sample, platform),
         usual_speed: UsualSpeed::of(sample),
         unusual: insight
             .unusual
@@ -121,8 +161,13 @@ pub(crate) struct VerdictLine {
 }
 
 impl VerdictLine {
-    fn of(sample: &Sample) -> Self {
-        let finding = assess(sample);
+    /// As the dashboard words it with a session (`decode`), else as the
+    /// static report does.
+    fn of(sample: &Sample, decode: Option<&Record>) -> Self {
+        let finding = match decode {
+            Some(decode) => assess_session(sample, decode),
+            None => assess(sample),
+        };
         Self {
             state: finding.verdict,
             severity: match finding.tone {
@@ -594,6 +639,15 @@ pub(crate) struct Runtime {
     pub(crate) model_offloaded_bytes: Option<u64>,
     /// The context it is set to allow for the model.
     pub(crate) context_allowed_tokens: Option<u64>,
+    /// KV-cache room it reports left, in tokens: a pool its requests share,
+    /// or for llama.cpp the room of the running slot nearest its limit.
+    pub(crate) kv_free_tokens: Option<u64>,
+    /// KV-cache room it reports left, in bytes: what its own memory plan has
+    /// left (Splash), or its free tokens at the bytes a token costs (SGLang).
+    pub(crate) kv_free_bytes: Option<u64>,
+    /// Requests it preempted, retracted or suspended for want of KV cache,
+    /// by its own count since it started.
+    pub(crate) preemptions_total: Option<u64>,
     /// What the model costs a pass, a token and a sequence, as mlxtop
     /// works it out from the model's own files; `null` when nothing is known.
     pub(crate) model_facts: Option<ModelFacts>,
@@ -642,6 +696,9 @@ impl Runtime {
             model_size_bytes: sample.llm_model_size,
             model_offloaded_bytes: sample.llm_model_offloaded,
             context_allowed_tokens: sample.model.context_configured,
+            kv_free_tokens: sample.llm_kv_free_tokens,
+            kv_free_bytes: sample.llm_kv_free_bytes,
+            preemptions_total: sample.llm_preemptions_total,
             model_facts: ModelFacts::of(&sample.model),
             mlx: Mlx::of(sample),
             generation: Generation::of(sample),
@@ -920,13 +977,104 @@ impl Cache {
 pub(crate) struct Draft {
     /// The share of drafted tokens accepted since the last poll.
     pub(crate) acceptance_ratio: Option<f64>,
+    /// Tokens one verify pass emitted since the last poll: the drafted
+    /// tokens it accepted and the model's own.
+    pub(crate) tokens_per_pass: Option<f64>,
 }
 
 impl Draft {
     fn of(sample: &Sample) -> Self {
         Self {
             acceptance_ratio: sample.llm_draft_acceptance.and_then(ratio),
+            // A pass emits at least the token the model adds itself.
+            tokens_per_pass: sample
+                .llm_tokens_per_pass
+                .filter(|tokens| tokens.is_finite() && *tokens >= 1.0)
+                .map(|tokens| round(tokens, 2)),
         }
+    }
+}
+
+/// How close decode runs to what the chip's memory can feed it, counted per
+/// verify pass, as Diagnostics says it: an estimate from the chip's
+/// published peak and the model's facts. The draft's own reads are left out.
+#[derive(Serialize)]
+pub(crate) struct Efficiency {
+    pub(crate) source: Source,
+    /// A draft proposes the tokens a pass verifies, so the share is per
+    /// verify pass, not per token.
+    pub(crate) draft: bool,
+    /// Verify passes a second: the generation speed over tokens per pass.
+    pub(crate) verify_passes_per_s: f64,
+    /// Tokens a pass emits: the runtime's count with a draft, 1 without.
+    pub(crate) tokens_per_pass: f64,
+    /// What one pass reads: the weights, the KV cache of the context it
+    /// decodes and the sequence's fixed state.
+    pub(crate) bytes_per_pass: u64,
+    /// The share of the chip's published peak those passes read.
+    pub(crate) bandwidth_share_ratio: f64,
+    /// The best share decode has reached for similar work this session,
+    /// while generation kept its usual speed: unknown with no session
+    /// (`--once`) and until the session has enough readings.
+    pub(crate) best_bandwidth_share_ratio: Option<f64>,
+    /// The speed this machine could not exceed without a draft: one token a
+    /// pass at the chip's full peak.
+    pub(crate) no_draft_ceiling_tok_per_s: f64,
+}
+
+impl Efficiency {
+    fn of(sample: &Sample, decode: Option<&Record>) -> Option<Self> {
+        let estimate = crate::efficiency::of_sample(sample)?;
+        Some(Self {
+            source: Source::Estimate,
+            draft: estimate.draft,
+            verify_passes_per_s: round(estimate.passes, 2),
+            tokens_per_pass: round(estimate.tokens_per_pass, 2),
+            bytes_per_pass: estimate.bytes_per_pass,
+            bandwidth_share_ratio: round(estimate.share, 4),
+            best_bandwidth_share_ratio: decode
+                .and_then(|decode| decode.best(sample, &estimate))
+                .and_then(ratio),
+            no_draft_ceiling_tok_per_s: round(estimate.ceiling(), 2),
+        })
+    }
+}
+
+/// How much more context fits: the tokens each request in flight can still
+/// add before the memory its KV cache grows into runs out, or its context
+/// window does, as Diagnostics works it out. A forecast.
+#[derive(Serialize)]
+pub(crate) struct ContextLeft {
+    pub(crate) source: Source,
+    /// Tokens each request can still add: the smaller of the two limits.
+    pub(crate) tokens_per_request: u64,
+    /// The requests it is for: those in flight, or with none the next one.
+    pub(crate) requests: u64,
+    /// What memory alone leaves each request; unknown where only the
+    /// window limits it.
+    pub(crate) by_memory_tokens: Option<u64>,
+    /// What the window alone leaves each request: the window less the most
+    /// context one of them holds.
+    pub(crate) by_window_tokens: u64,
+    /// `memory` or `window`: the limit `tokens_per_request` is (memory's
+    /// where they tie, as Diagnostics says it).
+    pub(crate) limited_by: &'static str,
+}
+
+impl ContextLeft {
+    fn of(sample: &Sample, platform: Platform) -> Option<Self> {
+        let forecast = crate::context_left::forecast_for(sample, gpu_memory(sample, platform))?;
+        let memory = forecast
+            .by_memory
+            .is_some_and(|memory| memory <= forecast.by_window);
+        Some(Self {
+            source: Source::Estimate,
+            tokens_per_request: forecast.tokens,
+            requests: forecast.requests,
+            by_memory_tokens: forecast.by_memory,
+            by_window_tokens: forecast.by_window,
+            limited_by: if memory { "memory" } else { "window" },
+        })
     }
 }
 
@@ -1117,7 +1265,8 @@ pub(crate) fn write_line(out: &mut dyn Write, snapshot: &Snapshot) -> io::Result
 /// `mlxtop stream`: a snapshot of every sample, one line of JSON each, at
 /// `interval`, until the reader goes away or `stop` says so; both end it
 /// without an error. A first sample, not written, starts the rates, so
-/// every line has them.
+/// every line has them. Each is judged beside the collector's session, as
+/// the dashboard judges it.
 pub(crate) fn stream(
     collector: &mut Collector,
     interval: Duration,
@@ -1146,7 +1295,7 @@ pub(crate) fn stream(
         let sample = collector.sample();
         match write_line(
             out,
-            &snapshot(&sample, collector.platform, interval.as_secs()),
+            &session_snapshot(collector, &sample, interval.as_secs()),
         ) {
             // The reader went away (`| head -3`): the stream is done.
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
