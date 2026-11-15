@@ -1889,9 +1889,9 @@ fn a_slow_prefill_is_found_named_and_drawn_like_a_slow_answer() {
     );
     for _ in 0..4 {
         for history in [
-            &mut collector.prefill_history,
-            &mut collector.generation_history,
-            &mut collector.swap_history,
+            &mut collector.view.prefill_history,
+            &mut collector.view.generation_history,
+            &mut collector.view.swap_history,
         ] {
             push_history_with_tone(history, Some(700), Tone::Green, 60);
         }

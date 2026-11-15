@@ -344,12 +344,16 @@ fn reset_discards_baselines_history_and_journal() {
     let mut collector = collector(linux_host(), Platform::Linux, None);
     collector.sample();
     collector.sample();
+    assert!(collector.session.started.is_some());
     collector.reset();
     assert!(collector.previous.is_none());
     assert!(collector.generation_history.is_empty() && collector.signals.is_empty());
     assert_eq!(collector.current.updated, "waiting");
     let view = collector.view();
     assert!(view.load_history.is_empty());
+    assert!(view.session.started.is_none(), "the session starts over");
+    // What the view is drawn for is the machine's, not the session's.
+    assert_eq!(view.platform, Platform::Linux);
     let sample = collector.sample();
     assert!(!sample.rate_ready, "reset must drop the rate baseline");
     assert!(journal(&collector)[0].1.starts_with("journal started"));

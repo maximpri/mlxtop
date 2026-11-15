@@ -83,7 +83,11 @@ impl Held {
 /// Consecutive failed process listings answered with the last good one.
 const PROCESS_READ_RETRIES: u32 = 3;
 
-#[derive(Clone)]
+/// What the interface draws: the newest sample and the histories kept from
+/// it. The collector keeps one and hands a copy over after each sample, and
+/// a reset starts it over, so a history added here is drawn, handed over
+/// and cleared without being listed anywhere else.
+#[derive(Clone, Default)]
 pub(crate) struct CollectorView {
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
@@ -149,26 +153,10 @@ pub(crate) struct Collector {
     pub(crate) runtime_logged: Option<String>,
     /// Why config.json was ignored at start, told once in the Journal.
     pub(crate) config_ignored: Option<String>,
-    pub(crate) current: Sample,
-    pub(crate) generation_history: VecDeque<ChartPoint>,
-    pub(crate) prefill_history: VecDeque<ChartPoint>,
-    pub(crate) cache_history: VecDeque<ChartPoint>,
-    pub(crate) disk_history: VecDeque<ChartPoint>,
-    pub(crate) decode_reads: VecDeque<crate::domain::DecodeRead>,
-    pub(crate) load_history: VecDeque<ChartPoint>,
-    /// RAM by kind (wired, app, compressed, cache, free) for each memory
-    /// sample, aligned one to one with `load_history`.
-    pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
-    /// GPU memory in use for each memory sample, the cards' own or the
-    /// GPU's part of RAM: aligned one to one with `load_history`.
-    pub(crate) gpu_memory_history: VecDeque<Option<u64>>,
-    pub(crate) swap_history: VecDeque<ChartPoint>,
-    pub(crate) compression_history: VecDeque<ChartPoint>,
-    pub(crate) gpu_history: VecDeque<ChartPoint>,
-    pub(crate) signals: VecDeque<SignalEvent>,
-    pub(crate) request_history: request_history::History,
-    pub(crate) operator_history: operator_history::History,
-    pub(crate) session: crate::session::Session,
+    /// The newest sample and its histories, as the interface is handed
+    /// them. The collector reads as this view: `collector.current` is
+    /// `collector.view.current`.
+    pub(crate) view: CollectorView,
     pub(crate) history_limit: usize,
     pub(crate) thresholds: Thresholds,
     /// The `omx` section the oMLX endpoint was resolved from.
@@ -180,6 +168,20 @@ pub(crate) struct Collector {
     pub(crate) gpu_band: Option<GpuBand>,
     /// Provider and source last reported as "telemetry online".
     pub(crate) telemetry_online: Option<(String, TelemetrySource)>,
+}
+
+impl std::ops::Deref for Collector {
+    type Target = CollectorView;
+
+    fn deref(&self) -> &CollectorView {
+        &self.view
+    }
+}
+
+impl std::ops::DerefMut for Collector {
+    fn deref_mut(&mut self) -> &mut CollectorView {
+        &mut self.view
+    }
 }
 
 /// Latched GPU load bands, each with an enter and a lower exit level.
@@ -275,22 +277,10 @@ impl Collector {
             runtime_logged: None,
             config_ignored: None,
             slow_read_at: None,
-            session: Default::default(),
-            current: Sample::default(),
-            generation_history: VecDeque::with_capacity(history_limit),
-            prefill_history: VecDeque::with_capacity(history_limit),
-            cache_history: VecDeque::with_capacity(history_limit),
-            disk_history: VecDeque::with_capacity(history_limit),
-            decode_reads: VecDeque::with_capacity(history_limit),
-            load_history: VecDeque::with_capacity(history_limit),
-            composition_history: VecDeque::with_capacity(history_limit),
-            gpu_memory_history: VecDeque::with_capacity(history_limit),
-            swap_history: VecDeque::with_capacity(history_limit),
-            compression_history: VecDeque::with_capacity(history_limit),
-            gpu_history: VecDeque::with_capacity(history_limit),
-            signals: VecDeque::with_capacity(8),
-            request_history: request_history::History::default(),
-            operator_history: operator_history::History::default(),
+            view: CollectorView {
+                platform,
+                ..CollectorView::default()
+            },
             history_limit,
             thresholds: Thresholds::from_config(&config),
             omx: config.omx.clone(),
@@ -690,14 +680,14 @@ impl Collector {
                 .as_ref()
                 .is_some_and(|last| *last != identity)
             {
-                self.generation_history.clear();
-                self.prefill_history.clear();
+                self.view.generation_history.clear();
+                self.view.prefill_history.clear();
             }
             self.rate_identity = Some(identity);
         }
 
         push_history(
-            &mut self.generation_history,
+            &mut self.view.generation_history,
             chart_rate_value(&sample, ChartMetric::Generation),
             ChartMetric::Generation,
             self.history_limit,
@@ -706,13 +696,13 @@ impl Collector {
         // A prefill speed has no threshold and no grade: it is a reading.
         let prefill = chart_rate_value(&sample, ChartMetric::Prefill);
         push_history_with_tone(
-            &mut self.prefill_history,
+            &mut self.view.prefill_history,
             prefill,
             Tone::Green,
             self.history_limit,
         );
         push_history(
-            &mut self.cache_history,
+            &mut self.view.cache_history,
             sample
                 .llm_cache_interval_efficiency
                 .filter(|value| value.is_finite() && *value >= 0.0)
@@ -723,7 +713,7 @@ impl Collector {
         );
         // Weight reads are blue, prompt-cache traffic cyan.
         push_history_with_tone(
-            &mut self.disk_history,
+            &mut self.view.disk_history,
             sample.disk.rate(),
             if sample.disk.weights > 0 {
                 Tone::Blue
@@ -737,17 +727,17 @@ impl Collector {
             .filter(|speed| speed.is_finite() && *speed > 0.0)
             .filter(|_| sample.disk.read.is_some())
         {
-            while self.decode_reads.len() >= self.history_limit.max(1) {
-                self.decode_reads.pop_front();
+            while self.view.decode_reads.len() >= self.history_limit.max(1) {
+                self.view.decode_reads.pop_front();
             }
-            self.decode_reads.push_back(crate::domain::DecodeRead {
+            self.view.decode_reads.push_back(crate::domain::DecodeRead {
                 speed,
                 from_disk: sample.disk.weights > 0,
             });
         }
         // Generation has no threshold either: a sample is its usual speed
         // or, marked below, unusually slow.
-        if let Some(point) = self.generation_history.back_mut() {
+        if let Some(point) = self.view.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
                 Tone::Muted
             } else {
@@ -755,26 +745,28 @@ impl Collector {
             };
         }
         push_history_with_tone(
-            &mut self.load_history,
+            &mut self.view.load_history,
             resident_memory_percent(&sample),
             sample.pressure_tone,
             self.history_limit,
         );
-        self.composition_history
+        self.view
+            .composition_history
             .push_back(crate::memory_composition::segments(&sample));
-        while self.composition_history.len() > self.history_limit {
-            self.composition_history.pop_front();
+        while self.view.composition_history.len() > self.history_limit {
+            self.view.composition_history.pop_front();
         }
         // What the GPU holds: its own memory in use where the cards have
         // any, else its part of RAM where the OS counts that.
-        self.gpu_memory_history
+        self.view
+            .gpu_memory_history
             .push_back(match sample.gpu_memory() {
                 crate::gpu::Memory::Dedicated { used, .. } => Some(used),
                 crate::gpu::Memory::Shared => sample.gpu_in_use,
                 crate::gpu::Memory::Unknown => None,
             });
-        while self.gpu_memory_history.len() > self.history_limit {
-            self.gpu_memory_history.pop_front();
+        while self.view.gpu_memory_history.len() > self.history_limit {
+            self.view.gpu_memory_history.pop_front();
         }
         // Captured tones follow the assessment's states, so a chart never
         // shows a severity the headline does not report.
@@ -782,7 +774,7 @@ impl Collector {
         // the system (swap, and file paging while memory is tight).
         let paging = sample.paging_measured().then_some(sample.disk_paging());
         push_history_with_tone(
-            &mut self.swap_history,
+            &mut self.view.swap_history,
             paging,
             paging
                 .map(|_| paging_tone(sample.paging_churn(), &sample.impact, self.thresholds))
@@ -792,12 +784,13 @@ impl Collector {
         let compression = (sample.vm_available && sample.rate_ready)
             .then_some(sample.compress.saturating_add(sample.decompress));
         let previous_tone = self
+            .view
             .compression_history
             .back()
             .filter(|point| point.value.is_some())
             .map(|point| point.tone);
         push_history_with_tone(
-            &mut self.compression_history,
+            &mut self.view.compression_history,
             compression,
             compression
                 .map(|churn| compression_tone(churn, previous_tone, self.thresholds))
@@ -805,7 +798,7 @@ impl Collector {
             self.history_limit,
         );
         push_history(
-            &mut self.gpu_history,
+            &mut self.view.gpu_history,
             sample.gpu_util.map(u64::from),
             ChartMetric::Gpu,
             self.history_limit,
@@ -814,7 +807,7 @@ impl Collector {
 
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
-        self.session.observe(&sample);
+        self.view.session.observe(&sample);
         // What generation was doing, so a log can be replayed against it.
         let generating = crate::analysis::CorrelationObservation::from_sample(&sample);
         crate::recording::write(&sample);
@@ -858,7 +851,7 @@ impl Collector {
                 sample.disk.saves,
             ),
         );
-        self.current = sample.clone();
+        self.view.current = sample.clone();
         sample
     }
 
@@ -888,13 +881,13 @@ impl Collector {
         }
         for chart in charts {
             let history = match chart {
-                Chart::Generation => &mut self.generation_history,
-                Chart::Prefill => &mut self.prefill_history,
-                Chart::Cache => &mut self.disk_history,
-                Chart::Memory => &mut self.load_history,
-                Chart::Paging => &mut self.swap_history,
-                Chart::Compression => &mut self.compression_history,
-                Chart::Gpu => &mut self.gpu_history,
+                Chart::Generation => &mut self.view.generation_history,
+                Chart::Prefill => &mut self.view.prefill_history,
+                Chart::Cache => &mut self.view.disk_history,
+                Chart::Memory => &mut self.view.load_history,
+                Chart::Paging => &mut self.view.swap_history,
+                Chart::Compression => &mut self.view.compression_history,
+                Chart::Gpu => &mut self.view.gpu_history,
                 // Drawn per request, not per sample: the panel is tagged.
                 Chart::Prompt | Chart::Queue | Chart::Latency => continue,
             };
@@ -910,25 +903,7 @@ impl Collector {
     }
 
     pub(crate) fn view(&self) -> CollectorView {
-        CollectorView {
-            current: self.current.clone(),
-            generation_history: self.generation_history.clone(),
-            prefill_history: self.prefill_history.clone(),
-            cache_history: self.cache_history.clone(),
-            disk_history: self.disk_history.clone(),
-            decode_reads: self.decode_reads.clone(),
-            session: self.session.clone(),
-            load_history: self.load_history.clone(),
-            composition_history: self.composition_history.clone(),
-            gpu_memory_history: self.gpu_memory_history.clone(),
-            swap_history: self.swap_history.clone(),
-            compression_history: self.compression_history.clone(),
-            platform: self.platform,
-            gpu_history: self.gpu_history.clone(),
-            signals: self.signals.clone(),
-            request_history: self.request_history.clone(),
-            operator_history: self.operator_history.clone(),
-        }
+        self.view.clone()
     }
 
     /// One log line when a runtime's connection or its failing probes
@@ -965,8 +940,10 @@ impl Collector {
             events.push((state.to_string(), summary, tone));
         };
 
-        self.request_history.observe(&sample.llm_requests);
-        self.operator_history.observe(sample, self.history_limit);
+        self.view.request_history.observe(&sample.llm_requests);
+        self.view
+            .operator_history
+            .observe(sample, self.history_limit);
         for request in &sample.llm_requests {
             if let Some(summary) = providers::new_request_summary(&mut self.seen_requests, request)
             {
@@ -1348,7 +1325,7 @@ impl Collector {
                 continue;
             }
             let kind = EventKind::from_state(&state);
-            self.signals.push_back(SignalEvent {
+            self.view.signals.push_back(SignalEvent {
                 time: sample.updated.clone(),
                 recorded_at: SystemTime::now(),
                 kind,
@@ -1358,12 +1335,18 @@ impl Collector {
             });
         }
         let journal_limit = self.history_limit.clamp(40, 240);
-        while self.signals.len() > journal_limit {
-            self.signals.pop_front();
+        while self.view.signals.len() > journal_limit {
+            self.view.signals.pop_front();
         }
     }
 
+    /// Start the session over: everything drawn and learned goes; the
+    /// machine, the runtime client and the settings stay.
     pub(crate) fn reset(&mut self) {
+        self.view = CollectorView {
+            platform: self.platform,
+            ..CollectorView::default()
+        };
         self.previous = None;
         self.cached_at_start = None;
         self.rate_identity = None;
@@ -1375,23 +1358,7 @@ impl Collector {
         self.gpu_band = None;
         self.telemetry_online = None;
         self.seen_requests.clear();
-        self.request_history = request_history::History::default();
-        self.operator_history = operator_history::History::default();
         self.correlation.reset();
-        self.generation_history.clear();
-        self.prefill_history.clear();
-        self.cache_history.clear();
-        self.disk_history.clear();
-        self.decode_reads.clear();
-        self.session = Default::default();
-        self.load_history.clear();
-        self.composition_history.clear();
-        self.gpu_memory_history.clear();
-        self.swap_history.clear();
-        self.compression_history.clear();
-        self.gpu_history.clear();
-        self.signals.clear();
-        self.current = Sample::default();
     }
 }
 
