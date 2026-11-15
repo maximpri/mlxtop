@@ -17,7 +17,7 @@ class UsageWriterTests(unittest.TestCase):
             self.assertEqual(record["usage"]["prompt_tokens"], 1024)
             self.assertEqual(set(record), {"provider", "request_id", "observed_at", "usage"})
         ollama = usage_record("ollama", {"done": True, "prompt_eval_count": 80,
-                             "eval_count": 4, "response": "private", "prompt_eval_duration": 123})
+                             "eval_count": 4, "response": "private"})
         self.assertEqual(ollama["usage"], {"prompt_tokens": 80, "completion_tokens": 4})
         self.assertNotIn("timings", ollama)
         lm = usage_record("lmstudio", {"stats": {"input_tokens": 40, "total_output_tokens": 3},
@@ -57,6 +57,84 @@ class UsageWriterTests(unittest.TestCase):
         self.assertEqual(llama["timings"]["output_tokens_per_second"], 12.5)
         zero = usage_record("ollama", {"prompt_eval_count": 0, "eval_count": 0, "eval_duration": 0})
         self.assertNotIn("timings", zero)
+
+    def test_llama_server_timings_are_read_whatever_runtime_sent_them(self):
+        # A final reply's `timings`, as llama.cpp v1.0.0 server_slot_stats::to_json
+        # writes them; Splash and proxies send the same shape.
+        timings = {"cache_n": 24576, "prompt_n": 6144, "prompt_ms": 7680.0,
+                   "prompt_per_token_ms": 1.25, "prompt_per_second": 800.0,
+                   "predicted_n": 512, "predicted_ms": 12800.0,
+                   "predicted_per_token_ms": 25.0, "predicted_per_second": 40.0,
+                   "draft_n": 600, "draft_n_accepted": 420}
+        for provider in ("llama.cpp", "splash", "omlx", "tensorfold"):
+            record = usage_record(provider, {
+                "usage": {"prompt_tokens": 30720, "completion_tokens": 512},
+                "timings": timings, "choices": [{"message": {"content": "private"}}]})
+            self.assertEqual(record["timings"], {"output_tokens_per_second": 40.0,
+                                                 "prompt_tokens_per_second": 800.0})
+            self.assertEqual(record["usage"]["prompt_tokens_details"], {"cached_tokens": 24576})
+            self.assertNotIn("private", json.dumps(record))
+        # A usage count of cached tokens wins over the timings'.
+        record = usage_record("llama.cpp", {
+            "usage": {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 10}},
+            "timings": {"cache_n": 60}})
+        self.assertEqual(record["usage"]["prompt_tokens_details"], {"cached_tokens": 10})
+        # A prompt speed of zero is a time the server did not have.
+        record = usage_record("llama.cpp", {"usage": {"prompt_tokens": 1},
+                                            "timings": {"prompt_per_second": 0.0}})
+        self.assertNotIn("timings", record)
+
+    def test_ollama_prompt_speed_counts_uncached_tokens_and_load_is_kept(self):
+        # A final /api/chat reply: api.Metrics in Ollama v0.40.16, in nanoseconds.
+        record = usage_record("ollama", {
+            "done": True, "message": {"content": "private"},
+            "total_duration": 9_500_000_000, "load_duration": 3_250_000_000,
+            "prompt_eval_count": 2048, "prompt_eval_cached_count": 1024,
+            "prompt_eval_duration": 2_000_000_000,
+            "eval_count": 100, "eval_duration": 4_000_000_000})
+        self.assertEqual(record["timings"], {"output_tokens_per_second": 25.0,
+                                             "prompt_tokens_per_second": 512.0,
+                                             "model_load_ms": 3250})
+        self.assertNotIn("private", json.dumps(record))
+        # A prompt read entirely from the cache was not timed.
+        cached = usage_record("ollama", {"prompt_eval_count": 64, "prompt_eval_cached_count": 64,
+                                         "prompt_eval_duration": 1_000_000})
+        self.assertNotIn("timings", cached)
+
+    def test_lm_studio_reports_a_model_load_only_after_one(self):
+        loaded = usage_record("lmstudio", {"stats": {"input_tokens": 40, "total_output_tokens": 3,
+                                                     "model_load_time_seconds": 4.5}})
+        self.assertEqual(loaded["timings"], {"model_load_ms": 4500})
+        warm = usage_record("lmstudio", {"stats": {"input_tokens": 40, "total_output_tokens": 3}})
+        self.assertNotIn("timings", warm)
+        # A record already written by this helper keeps its fields.
+        again = usage_record("lmstudio", {"stats": {"input_tokens": 1},
+                                          "timings": {"model_load_ms": 1800,
+                                                      "prompt_tokens_per_second": 99.5}})
+        self.assertEqual(again["timings"], {"prompt_tokens_per_second": 99.5,
+                                            "model_load_ms": 1800})
+
+    def test_invalid_prompt_and_load_timings_are_rejected(self):
+        for value in (-1, True, float("nan"), float("inf"), "bad"):
+            for timings in ({"prompt_per_second": value}, {"prompt_tokens_per_second": value},
+                            {"predicted_per_second": value}):
+                with self.assertRaises(ValueError):
+                    usage_record("splash", {"usage": {"prompt_tokens": 1}, "timings": timings})
+            with self.assertRaises(ValueError):
+                usage_record("lmstudio", {"stats": {"input_tokens": 1,
+                                                    "model_load_time_seconds": value}})
+        for value in (-1, 1.5, True, "1s"):
+            for key in ("load_duration", "prompt_eval_duration"):
+                with self.assertRaises(ValueError):
+                    usage_record("ollama", {"prompt_eval_count": 1, key: value})
+            with self.assertRaises(ValueError):
+                usage_record("mlx-lm", {"usage": {"prompt_tokens": 1},
+                                        "timings": {"model_load_ms": value}})
+        with self.assertRaises(ValueError):
+            usage_record("lmstudio", {"stats": {"input_tokens": 1,
+                                                "model_load_time_seconds": 2.0**64}})
+        with self.assertRaises(ValueError):
+            usage_record("splash", {"usage": {"prompt_tokens": 1}, "timings": {"cache_n": 2}})
 
     def test_invalid_native_timings_are_rejected(self):
         for value in (-1, True, float("nan"), float("inf"), "bad"):

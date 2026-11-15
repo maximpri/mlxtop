@@ -203,12 +203,15 @@ pub(crate) fn inputs_for(sample: &Sample, memory: Memory) -> Option<Inputs> {
         .filter(|window| *window > 0)?;
     let flight = in_flight(sample)?;
     let provider = sample.llm_provider.as_str();
-    let room = if let Some(tokens) = sample.llm_kv_free_tokens {
+    // A runtime that sizes its KV cache per request when it loads the model
+    // has its window left whatever it reports: llama.cpp's KV room is per
+    // slot, not a pool its requests share.
+    let room = if SIZED_AT_LOAD.contains(&provider) {
+        Room::Window
+    } else if let Some(tokens) = sample.llm_kv_free_tokens {
         Room::Tokens(tokens)
     } else if let Some(bytes) = sample.llm_kv_free_bytes {
         Room::Plan(bytes)
-    } else if SIZED_AT_LOAD.contains(&provider) {
-        Room::Window
     } else if GROWING.contains(&provider) && !splash(sample) && !sample.llm_remote {
         machine_room(sample, memory)?
     } else {

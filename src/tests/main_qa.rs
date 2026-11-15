@@ -624,3 +624,6 @@ mod model_facts;
 // What Splash and oMLX say about the draft and what held work up, judged as every screen is.
 #[path = "main_qa_runtime_attribution.rs"]
 mod runtime_attribution;
+// llama-server's readings in prompt load and Diagnostics, judged as every screen is.
+#[path = "main_qa_llama.rs"]
+mod llama;

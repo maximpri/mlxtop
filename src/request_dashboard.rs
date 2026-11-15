@@ -6,7 +6,7 @@ use crate::domain::{ChartMetric, Sample};
 const CACHE_GRADED_PROMPT: u64 = 4096;
 use crate::chart_render::meter_cells;
 use crate::formatting::{
-    compact_label, compact_tokens, progress_percent, telemetry_age, time_left_label,
+    compact_label, compact_tokens, duration_label, progress_percent, telemetry_age, time_left_label,
 };
 use crate::request_history::{same_request, Entry, History};
 use crate::theme::{BLUE, CYAN, DIM, EDGE, GREEN, MUTED, PANEL};
@@ -297,7 +297,55 @@ fn output_summary(entry: &Entry, live: bool, sample: &Sample, width: u16) -> Lin
         MUTED,
         width,
     );
+    if let Some(timing) = reported_timing(sample, &entry.usage) {
+        if let Some(ms) = timing.load_ms.filter(|ms| *ms >= SHOWN_LOAD_MS) {
+            append_detail(
+                &mut line,
+                format!("MODEL LOAD {}", load_label(ms)),
+                CYAN,
+                width,
+            );
+        }
+        let usage = &entry.usage;
+        let computed = usage.prompt.saturating_sub(usage.cached.unwrap_or(0));
+        if let Some(speed) = timing
+            .prefill_tps
+            .filter(|_| computed >= TIMED_PROMPT_TOKENS)
+        {
+            append_detail(&mut line, format!("PREFILL {speed:.0} tok/s"), CYAN, width);
+        }
+    }
     line
+}
+
+/// A prompt computed in less than one batch of this many tokens (llama.cpp's
+/// and Ollama's default) is timed mostly by fixed costs: its speed says
+/// nothing about prefill.
+const TIMED_PROMPT_TOKENS: u64 = 512;
+
+/// A model load under a second is a runtime handing over a model it already
+/// holds: Ollama reports one with every request.
+const SHOWN_LOAD_MS: u64 = 1000;
+
+/// What the runtime reported of a finished request's timing, if anything.
+fn reported_timing<'a>(
+    sample: &'a Sample,
+    usage: &domain::RequestUsage,
+) -> Option<&'a domain::RequestTiming> {
+    sample
+        .llm_request_timings
+        .iter()
+        .rev()
+        .find(|timing| timing.belongs_to(usage))
+}
+
+fn load_label(ms: u64) -> String {
+    let seconds = ms as f64 / 1000.0;
+    if seconds < 10.0 {
+        format!("{seconds:.1}s")
+    } else {
+        duration_label(seconds)
+    }
 }
 
 fn draw_bar(

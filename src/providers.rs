@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Read-only provider adapters. Only counters and identifiers cross into samples.
-use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
+use crate::domain::{LlmTelemetry, RequestTiming, RequestUsage, TelemetrySource};
 use crate::json::{json_value, request_rate};
 use crate::runtime_diagnostics::{default_port, default_ports, ProbeIssue, RuntimeReport};
 use serde_json::Value;
@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
 
+#[path = "provider_llama.rs"]
+pub(crate) mod llama;
 #[path = "provider_native.rs"]
 mod native;
 #[path = "provider_splash.rs"]
 mod splash;
+use llama::LlamaRate;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
 
@@ -611,6 +614,7 @@ impl Adapter {
                 // Completed prompt counts belong in request history. Never attach
                 // them to the output/queue of an unrelated active request.
                 native.requests.extend(reported.requests);
+                native.request_timings.extend(reported.request_timings);
                 Some(native)
             }
             (native, reported) => reported.or(native),
@@ -714,165 +718,15 @@ impl Adapter {
 
     fn poll_llama(&mut self, now: Instant) -> Option<LlmTelemetry> {
         // Builds from 2026-10 listen on 9931 by default, older ones on 8080.
-        // /health answers whichever monitoring endpoints are disabled.
+        // /health answers whichever monitoring endpoints are disabled, and
+        // never wakes a sleeping server.
         let port = self.answering_port("llama.cpp", "/health");
-        // Either monitoring endpoint may be disabled independently.
-        let slots = self
-            .get(port, "/slots")
-            .and_then(|body| serde_json::from_str::<Value>(&body).ok());
-        let live = self
-            .llama
-            .observe(slots.as_ref().and_then(llama_progress), now);
-        let slots = slots.and_then(|slots| parse_llama_slots(&slots));
-        let metrics = self.get(port, "/metrics");
-        let averages = metrics
-            .as_deref()
-            .and_then(|text| self.llama.averages(text));
-        let mut result = merge_llama_metrics(slots, metrics.as_deref());
-        // The `*_tokens_seconds` gauges average the window since the last
-        // scrape, and each scrape empties it: polled every second they read 0.
-        // The cumulative counters' growth is the average instead.
-        if let (Some(result), Some((generation, prefill))) = (result.as_mut(), averages) {
-            result.generation_tps = generation;
-            result.prefill_tps = prefill;
-        }
-        // The server's own rates average finished requests and stay at zero
-        // through a long first answer; a live rate replaces them while requests run.
-        if let (Some(result), Some(rate)) = (result.as_mut(), live) {
-            result.generation_tps = Some(rate);
-            result.generation_tps_live = true;
-        }
-        result
-    }
-}
-
-/// A slot's output tokens. Newer llama-server builds report `next_token` as a
-/// list with one entry per sequence; older ones as a single object.
-fn slot_decoded(slot: &Value) -> Option<u64> {
-    match slot.get("next_token")? {
-        Value::Array(entries) => entries.iter().try_fold(0_u64, |sum, entry| {
-            sum.checked_add(counter(entry, &["n_decoded"])?)
-        }),
-        _ => counter(slot, &["next_token", "n_decoded"]),
-    }
-}
-
-/// One running request: its slot, its task and its output tokens so far.
-type SlotProgress = (u64, u64, u64);
-
-/// Output tokens of every running request by slot and task, from `/slots`.
-/// `None` when the reply does not have that shape.
-fn llama_progress(slots: &Value) -> Option<Vec<SlotProgress>> {
-    slots
-        .as_array()?
-        .iter()
-        .filter(|slot| slot["is_processing"] == true)
-        .map(|slot| {
-            Some((
-                counter(slot, &["id"])?,
-                counter(slot, &["id_task"])?,
-                slot_decoded(slot)?,
-            ))
-        })
-        .collect()
-}
-
-/// llama-server publishes generation speed only as an average over finished
-/// requests. The live rate is the growth of each running request's output
-/// between two samples; a request counts only when the same slot runs the same
-/// task in both, so a finished or newly started request never reads as speed.
-/// It must also have decoded tokens already in the earlier sample: a slot
-/// still prefilling stays at zero output and is not stalled, and the first
-/// sample after prefill spans prompt time as well.
-#[derive(Default)]
-pub(super) struct LlamaRate {
-    previous: Option<(Vec<SlotProgress>, Instant)>,
-    /// The server's cumulative token and time counters at the last scrape,
-    /// and the averages last computed from them.
-    totals: Option<LlamaTotals>,
-    averages: (Option<f64>, Option<f64>),
-}
-
-/// llama-server's cumulative counters: `*_tokens_total` and the seconds
-/// spent on them. Their growth between two scrapes is the average speed.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct LlamaTotals {
-    predicted: f64,
-    predicted_seconds: f64,
-    prompt: f64,
-    prompt_seconds: f64,
-}
-
-impl LlamaRate {
-    /// The average generation and prefill speeds from the counters' growth,
-    /// held while nothing grows. `None` when the server has no counters.
-    pub(super) fn averages(&mut self, metrics: &str) -> Option<(Option<f64>, Option<f64>)> {
-        let totals = LlamaTotals {
-            predicted: metric(metrics, "llamacpp:tokens_predicted_total")?,
-            predicted_seconds: metric(metrics, "llamacpp:tokens_predicted_seconds_total")?,
-            prompt: metric(metrics, "llamacpp:prompt_tokens_total")?,
-            prompt_seconds: metric(metrics, "llamacpp:prompt_seconds_total")?,
-        };
-        let rate =
-            |tokens: f64, seconds: f64| (tokens > 0.0 && seconds > 0.0).then(|| tokens / seconds);
-        if let Some(old) = self.totals {
-            if totals.predicted < old.predicted || totals.prompt < old.prompt {
-                // A restarted server counts from zero again.
-                self.averages = (None, None);
-            } else {
-                if let Some(speed) = rate(
-                    totals.predicted - old.predicted,
-                    totals.predicted_seconds - old.predicted_seconds,
-                ) {
-                    self.averages.0 = Some(speed);
-                }
-                if let Some(speed) = rate(
-                    totals.prompt - old.prompt,
-                    totals.prompt_seconds - old.prompt_seconds,
-                ) {
-                    self.averages.1 = Some(speed);
-                }
-            }
-        }
-        self.totals = Some(totals);
-        Some(self.averages)
-    }
-}
-
-/// Samples further apart than this measure an average, not the current speed.
-const LLAMA_RATE_SPAN: Duration = Duration::from_secs(30);
-
-impl LlamaRate {
-    pub(super) fn observe(
-        &mut self,
-        current: Option<Vec<SlotProgress>>,
-        now: Instant,
-    ) -> Option<f64> {
-        let Some(current) = current else {
-            self.previous = None;
-            return None;
-        };
-        let rate = self.previous.as_ref().and_then(|(old, at)| {
-            let span = now.checked_duration_since(*at)?;
-            if span.is_zero() || span > rate_span(LLAMA_RATE_SPAN) {
-                return None;
-            }
-            let mut grown = 0_u64;
-            let mut matched = false;
-            for (slot, task, decoded) in &current {
-                let before = old
-                    .iter()
-                    .find(|(s, t, _)| s == slot && t == task)
-                    .map(|(_, _, n)| *n);
-                if let Some(before) = before.filter(|before| *before > 0 && before <= decoded) {
-                    grown = grown.saturating_add(decoded - before);
-                    matched = true;
-                }
-            }
-            matched.then(|| grown as f64 / span.as_secs_f64())
+        let mut llama = std::mem::take(&mut self.llama);
+        let result = llama.poll(now, &|path| self.get(port, path), &|path| {
+            self.get_json(port, path)
         });
-        self.previous = Some((current, now));
-        rate
+        self.llama = llama;
+        result
     }
 }
 
@@ -886,87 +740,6 @@ pub(super) fn first_answering_port(
         .iter()
         .copied()
         .find(|port| matches!(probe(*port), Ok(_) | Err(ProbeIssue::Http(_))))
-}
-
-fn merge_llama_metrics(slots: Option<LlmTelemetry>, metrics: Option<&str>) -> Option<LlmTelemetry> {
-    let Some(metrics) = metrics else {
-        return slots;
-    };
-    let generation = metric(metrics, "llamacpp:predicted_tokens_seconds");
-    let prefill = metric(metrics, "llamacpp:prompt_tokens_seconds");
-    let active = metric_count(metrics, "llamacpp:requests_processing");
-    let waiting = metric_count(metrics, "llamacpp:requests_deferred");
-    if generation.is_none() && prefill.is_none() && active.is_none() && waiting.is_none() {
-        return slots;
-    }
-    let mut result = slots.unwrap_or_else(|| LlmTelemetry {
-        source: TelemetrySource::Live,
-        observed_at: Some(SystemTime::now()),
-        provider: Some("llama.cpp".into()),
-        ..LlmTelemetry::default()
-    });
-    result.generation_tps = generation;
-    result.prefill_tps = prefill;
-    result.active_requests = result.active_requests.or(active);
-    result.waiting_requests = waiting;
-    result.status = Some(
-        match result.active_requests {
-            Some(0) if waiting.unwrap_or(0) == 0 => "idle",
-            Some(_) => "processing",
-            None => "running",
-        }
-        .into(),
-    );
-    Some(result)
-}
-
-fn metric_count(text: &str, name: &str) -> Option<u64> {
-    metric(text, name)
-        .filter(|n| n.fract() == 0.0 && *n < u64::MAX as f64)
-        .map(|n| n as u64)
-}
-
-fn metric(text: &str, name: &str) -> Option<f64> {
-    native::metric_sum(text, name)
-}
-
-fn parse_llama_slots(slots: &Value) -> Option<LlmTelemetry> {
-    let slots = slots.as_array()?;
-    if slots
-        .iter()
-        .any(|slot| slot.get("is_processing").and_then(Value::as_bool).is_none())
-    {
-        return None;
-    }
-    let active: Vec<_> = slots
-        .iter()
-        .filter(|s| s["is_processing"] == true)
-        .collect();
-    Some(LlmTelemetry {
-        source: TelemetrySource::Live,
-        observed_at: Some(SystemTime::now()),
-        provider: Some("llama.cpp".into()),
-        status: Some(
-            if active.is_empty() {
-                "idle"
-            } else {
-                "processing"
-            }
-            .into(),
-        ),
-        active_requests: Some(active.len() as u64),
-        // Sum every active slot, but never present a partial sum as complete.
-        output_tokens: (!active.is_empty())
-            .then(|| {
-                active
-                    .iter()
-                    .try_fold(0_u64, |sum, slot| sum.checked_add(slot_decoded(slot)?))
-            })
-            .flatten(),
-        // n_ctx is capacity, n_decoded is output, and prompt_n is fresh prefill
-        // work. None is a substitute for a full per-request prompt count.
-        ..LlmTelemetry::default()
-    })
 }
 
 fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
@@ -1021,6 +794,10 @@ fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
     })
 }
 
+/// One finished request's usage record: its counts, and the timings its
+/// runtime sent with them. llama-server's own `timings` are read whatever
+/// runtime the record names, since Splash and proxies send the same shape;
+/// Ollama's and LM Studio's native fields only from those runtimes.
 fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
     if record.get("done").and_then(Value::as_bool) == Some(false) {
         return None;
@@ -1036,6 +813,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .get("usage")
         .or_else(|| record.get("stats"))
         .unwrap_or(record);
+    let timings = record.get("timings");
     let prompt = counter(usage, &["prompt_tokens"])
         .or_else(|| counter(usage, &["input_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_count"]))?;
@@ -1047,24 +825,18 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .or_else(|| counter(usage, &["input_tokens_details", "cached_tokens"]))
         .or_else(|| counter(usage, &["cached_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_cached_count"]))
-        .or_else(|| {
-            (provider == "llama.cpp")
-                .then(|| counter(record, &["timings", "cache_n"]))
-                .flatten()
-        })
+        .or_else(|| timings.and_then(|timings| counter(timings, &["cache_n"])))
         .filter(|n| *n <= prompt);
     let model = identifier(record, "model")
         .or_else(|| identifier(record, "model_instance_id"))
         .unwrap_or_else(|| "unknown".into());
-    let output_tps = record
-        .get("timings")
+    let output_tps = timings
         .and_then(|timings| {
-            request_rate(timings, &["output_tokens_per_second"]).or_else(|| {
-                // llama-server's own completion timings.
-                (provider == "llama.cpp")
-                    .then(|| request_rate(timings, &["predicted_per_second"]))
-                    .flatten()
-            })
+            // mlxtop's own field, else llama-server's completion timings.
+            request_rate(
+                timings,
+                &["output_tokens_per_second", "predicted_per_second"],
+            )
         })
         .or_else(|| {
             (provider == "LM Studio")
@@ -1081,6 +853,57 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             let count = counter(usage, &["eval_count"])?;
             Some(count as f64 / duration as f64 * 1_000_000_000.0)
         });
+    // How fast the prompt was read, over the tokens the runtime computed:
+    // mlxtop's own field, llama-server's, or Ollama's prompt time
+    // (nanoseconds) over its uncached tokens. A speed of zero is a divisor
+    // the runtime did not have, not a measurement.
+    let prefill_tps = timings
+        .and_then(|timings| {
+            request_rate(timings, &["prompt_tokens_per_second", "prompt_per_second"])
+        })
+        .or_else(|| {
+            if provider != "Ollama" {
+                return None;
+            }
+            let duration =
+                counter(usage, &["prompt_eval_duration"]).filter(|duration| *duration > 0)?;
+            let computed = prompt.saturating_sub(cached.unwrap_or(0));
+            Some(computed as f64 / duration as f64 * 1_000_000_000.0)
+        })
+        .filter(|speed| *speed > 0.0);
+    // How long the request waited for the model to load: mlxtop's own field,
+    // Ollama's `load_duration` (nanoseconds), or LM Studio's
+    // `model_load_time_seconds`, which it sends only after a load.
+    let load_ms = timings
+        .and_then(|timings| counter(timings, &["model_load_ms"]))
+        .or_else(|| {
+            // Ollama leaves out a zero duration: one that is sent is a load.
+            (provider == "Ollama")
+                .then(|| {
+                    counter(usage, &["load_duration"])
+                        .filter(|nanos| *nanos > 0)
+                        .map(|nanos| nanos / 1_000_000)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            (provider == "LM Studio")
+                .then(|| {
+                    request_rate(usage, &["model_load_time_seconds"])
+                        .and_then(native::seconds_to_ms)
+                })
+                .flatten()
+        });
+    let request_timings = (prefill_tps.is_some() || load_ms.is_some())
+        .then(|| RequestTiming {
+            provider: provider.into(),
+            model: model.clone(),
+            id: id.clone(),
+            prefill_tps,
+            load_ms,
+        })
+        .into_iter()
+        .collect();
     Some(LlmTelemetry {
         source: TelemetrySource::Report,
         observed_at: Some(observed_at),
@@ -1089,6 +912,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         status: Some("last result".into()),
         prompt_tokens: Some(prompt),
         output_tokens: output,
+        request_timings,
         requests: vec![RequestUsage {
             provider: provider.into(),
             model,
@@ -1140,7 +964,9 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
         return None;
     }
     let mut latest: Option<LlmTelemetry> = None;
-    let mut requests = Vec::new();
+    // Each request with the timing its own record carried, so a request
+    // written twice keeps its last record's timing too.
+    let mut requests: Vec<(RequestUsage, Option<RequestTiming>)> = Vec::new();
     for line in bytes[start..end].split(|b| *b == b'\n') {
         let Some(record) = serde_json::from_slice::<Value>(line)
             .ok()
@@ -1151,7 +977,14 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
         if provider.is_some_and(|selected| record.provider.as_deref() != Some(selected)) {
             continue;
         }
-        requests.extend(record.requests.clone());
+        requests.extend(record.requests.iter().map(|request| {
+            let timing = record
+                .request_timings
+                .iter()
+                .find(|timing| timing.belongs_to(request))
+                .cloned();
+            (request.clone(), timing)
+        }));
         if latest
             .as_ref()
             .is_none_or(|old| record.observed_at >= old.observed_at)
@@ -1162,11 +995,11 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
     let mut latest = latest?;
     let selected = latest.provider.as_deref();
     let mut seen = std::collections::HashSet::new();
-    latest.requests = requests
+    let mut kept: Vec<_> = requests
         .into_iter()
         .rev()
-        .filter(|request| Some(request.provider.as_str()) == selected)
-        .filter(|request| {
+        .filter(|(request, _)| Some(request.provider.as_str()) == selected)
+        .filter(|(request, _)| {
             seen.insert((
                 request.provider.clone(),
                 request.model.clone(),
@@ -1175,7 +1008,12 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
         })
         .take(128)
         .collect();
-    latest.requests.reverse();
+    kept.reverse();
+    latest.request_timings = kept
+        .iter()
+        .filter_map(|(_, timing)| timing.clone())
+        .collect();
+    latest.requests = kept.into_iter().map(|(request, _)| request).collect();
     Some(latest)
 }
 
