@@ -584,15 +584,26 @@ fn differences(path: &str, actual: &Value, expected: &Value, found: &mut Vec<Str
 
 /// `snapshot` must equal the golden JSON file `name`, field by field. A
 /// blessed file keeps the output's own field order.
+/// The golden files hold `<version>` where the build's version goes, so a
+/// version bump changes no golden file; the real value is tested apart.
+const VERSION_PLACEHOLDER: &str = "<version>";
+
 fn golden_json(name: &str, snapshot: &super::Snapshot) {
     let path = fixture_path(name);
+    assert_eq!(snapshot.mlxtop_version, crate::cli::VERSION);
     if std::env::var_os("MLXTOP_BLESS").is_some() {
-        let mut text = serde_json::to_string_pretty(snapshot).unwrap();
+        let mut text = serde_json::to_string_pretty(snapshot).unwrap().replacen(
+            &format!("\"mlxtop_version\": \"{}\"", crate::cli::VERSION),
+            &format!("\"mlxtop_version\": \"{VERSION_PLACEHOLDER}\""),
+            1,
+        );
         text.push('\n');
         std::fs::write(&path, text).unwrap();
         return;
     }
-    let actual = &serde_json::to_value(snapshot).unwrap();
+    let mut actual = serde_json::to_value(snapshot).unwrap();
+    actual["mlxtop_version"] = Value::from(VERSION_PLACEHOLDER);
+    let actual = &actual;
     let expected: Value = serde_json::from_str(
         &std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("{}: {error}", path.display())),

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "mlxtop_version": "3.3.1-rc.6",
+  "mlxtop_version": "<version>",
   "ts_ms": 1763190207123,
   "interval_s": 1,
   "verdict": {
