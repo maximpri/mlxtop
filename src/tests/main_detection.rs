@@ -1687,7 +1687,7 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
     ];
     sample.correlation.unusual = vec![CorrelationCause::Paging, CorrelationCause::GpuIdle];
     sample.correlation.usual_speed = Some((50.0, 40.0));
-    let lines = crate::report::diagnostic_lines(&sample);
+    let lines = crate::report::diagnostic_lines(&sample, None);
     let at = |text: &str| lines.iter().position(|line| line == text);
     assert!(at("Usual generation speed 50.0 tok/s · slow below 40.0").is_some());
     assert!(
@@ -1751,7 +1751,7 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
         usual_speed: Some((50.0, 40.0)),
         ..CorrelationInsight::default()
     };
-    let lines = crate::report::diagnostic_lines(&sample);
+    let lines = crate::report::diagnostic_lines(&sample, None);
     assert!(lines
         .iter()
         .any(|line| line.starts_with("Usual generation speed")));
@@ -1768,7 +1768,7 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
     // With nothing unusual, nothing is listed.
     sample.correlation.unusual.clear();
     sample.correlation.notes.clear();
-    let lines = crate::report::diagnostic_lines(&sample);
+    let lines = crate::report::diagnostic_lines(&sample, None);
     assert!(!lines.iter().any(|line| line.starts_with("Unusual:")));
 }
 

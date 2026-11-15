@@ -109,6 +109,7 @@ impl App {
                     frame,
                     Rect::new(area.x, area.y, area.width, verdict_rows),
                     &self.collector.current,
+                    &self.collector.session.decode,
                     self.paused,
                     self.sampler_disconnected,
                 );
@@ -603,6 +604,7 @@ impl App {
             frame,
             rows[1],
             &self.collector.current,
+            &self.collector.session.decode,
             self.paused,
             self.sampler_disconnected,
         );

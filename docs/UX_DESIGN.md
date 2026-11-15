@@ -56,7 +56,9 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   normal.
   Put a fixed borderless assessment below it: an icon and the finding, with
   evidence only when something is wrong, then a second line only for the next
-  check (→) or a missing reading worth knowing about. Lead with the verdict:
+  check (→), a missing reading worth knowing about, or, under a healthy
+  verdict while decode runs near the best this machine has reached, what
+  would make it faster (a muted note). Lead with the verdict:
   when nothing is actionable and OS pressure is normal, say
   `✓ Healthy · no bottleneck` in green; high GPU use is evidence, never the
   headline. Findings use sentence case. Use `d` for full evidence and runtime
@@ -223,6 +225,12 @@ colors in time-series history instead of recoloring old samples on refresh.
   average since the request began, which hides a stall. A generating request
   with no token for 1.5 s has stalled: say so first, with what the host was
   doing meanwhile, and journal its end with its length.
+- Count decode efficiency per verify pass, never per token: with a draft a
+  pass emits several tokens, and per token a healthy server reads 450% of its
+  chip's peak. It is an estimate: say so in its words, never colour it, and
+  show nothing when an input is unknown or it comes out above 100%. Judge it
+  against the best this machine has reached with the model, not the
+  published peak, which no chip reaches.
 - Find slowdowns by anomaly detection, with one rule for every signal. A
   signal has a usual value (the middle of its last 300 samples taken while
   generation ran at its usual speed) and a usual spread (how far it

@@ -3,6 +3,7 @@
 use crate::app::App;
 use crate::diagnosis;
 use crate::domain::{Sample, Tone};
+use crate::efficiency::Record;
 use crate::report::diagnostic_lines;
 use crate::theme::{CYAN, MUTED, PANEL};
 use ratatui::layout::Rect;
@@ -11,7 +12,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bool, stopped: bool) {
+/// The assessment strip: the verdict for `sample`, with what the session's
+/// `decode` record adds to a healthy one.
+pub(crate) fn summary(
+    frame: &mut Frame,
+    area: Rect,
+    sample: &Sample,
+    decode: &Record,
+    paused: bool,
+    stopped: bool,
+) {
     // A verdict on the last sample would read as current; it is not.
     if stopped {
         let line = Line::from(Span::styled(
@@ -23,7 +33,7 @@ pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bo
         frame.render_widget(Paragraph::new(line), area);
         return;
     }
-    let finding = diagnosis::assess(sample);
+    let finding = diagnosis::assess_session(sample, decode);
     // An icon carries the verdict's severity before any words do.
     let icon = match finding.tone {
         Tone::Green => '✓',
@@ -144,7 +154,10 @@ impl App {
             .border_style(Style::default().fg(CYAN))
             .style(Style::default().bg(PANEL));
         let inner = block.inner(area);
-        let mut lines = diagnostic_lines(&self.collector.current);
+        let mut lines = diagnostic_lines(
+            &self.collector.current,
+            Some(&self.collector.session.decode),
+        );
         if self.paused {
             lines.insert(0, "PAUSED · retained observations; resume with p".into());
         }

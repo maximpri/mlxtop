@@ -33,11 +33,15 @@ pub(crate) struct Session {
     /// Seconds of work a slowdown or stall cost, by its reason: the share
     /// of each interval the model ran below its usual speed.
     pub(crate) lost: BTreeMap<&'static str, f64>,
+    /// What decode reached per verify pass while generation kept its usual
+    /// speed, by context: the best this machine does with the model.
+    pub(crate) decode: crate::efficiency::Record,
 }
 
 impl Session {
     /// Count one sample.
     pub(crate) fn observe(&mut self, sample: &Sample) {
+        self.decode.observe(sample);
         let now = sample.llm_observed_at.unwrap_or_else(SystemTime::now);
         self.started.get_or_insert(now);
         let seconds = self
@@ -136,6 +140,7 @@ pub(crate) fn lines(
             lines.push(format!("  {:<26} {}", cause, duration_label(seconds)));
         }
     }
+    lines.extend(session.decode.summary());
     let done: Vec<(&crate::domain::RequestUsage, Timing)> = requests
         .entries
         .iter()

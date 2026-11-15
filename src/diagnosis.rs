@@ -163,6 +163,41 @@ pub(crate) fn assess(sample: &Sample) -> Finding {
     finding
 }
 
+/// The verdict as the dashboard shows it, having watched the session:
+/// `assess`, and what the session's decode record adds to a healthy one.
+pub(crate) fn assess_session(sample: &Sample, decode: &crate::efficiency::Record) -> Finding {
+    let mut finding = assess(sample);
+    if let Some(note) = decode_note(sample, decode, &finding) {
+        finding.next = note;
+    }
+    finding
+}
+
+/// Under `✓ Healthy · no bottleneck`, while generation keeps its usual
+/// speed and decode runs near the best this machine has reached with the
+/// model: only the model's side can make it faster. An estimate, said as
+/// one, and a note rather than a check: nothing is wrong.
+fn decode_note(
+    sample: &Sample,
+    decode: &crate::efficiency::Record,
+    finding: &Finding,
+) -> Option<String> {
+    let usual =
+        sample.correlation.direction == ThroughputDirection::Flat && !sample.correlation.slow;
+    if finding.verdict != Verdict::Healthy || !finding.next.is_empty() || !usual {
+        return None;
+    }
+    let estimate = crate::efficiency::of_sample(sample)?;
+    decode.near_best(sample, &estimate).then(|| {
+        if estimate.draft {
+            "Decode is near its estimated limit: fewer bytes/token or a better draft."
+        } else {
+            "Decode is near its estimated limit: fewer bytes/token or a draft model."
+        }
+        .into()
+    })
+}
+
 /// Whether the sample's rate for the phase being judged is live and current.
 fn live_rate(sample: &Sample) -> bool {
     let prefill = sample.correlation.phase == crate::domain::Phase::Prefill;
