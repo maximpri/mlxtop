@@ -30,6 +30,7 @@ mod logging;
 mod memory_composition;
 mod memory_headroom;
 mod model_dashboard;
+mod model_facts;
 mod omlx;
 mod operator_charts;
 mod operator_history;

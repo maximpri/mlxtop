@@ -2,7 +2,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 
 use crate::logging::{diagnostics_log, log_field};
@@ -197,6 +197,16 @@ pub(crate) trait Host: Send {
     fn command(&self, program: &str, args: &[&str]) -> Option<String>;
     /// Whole text file, or `None` when it cannot be read.
     fn read_file(&self, path: &Path) -> Option<String>;
+    /// At most the first `max_bytes` of a regular file, so a large one is
+    /// never read whole (a safetensors shard's header, not its weights);
+    /// `None` when it cannot be read, as on a host with no files.
+    fn read_prefix(&self, _path: &Path, _max_bytes: u64) -> Option<Vec<u8>> {
+        None
+    }
+    /// When a file last changed, or `None` when it cannot be read.
+    fn modified(&self, _path: &Path) -> Option<SystemTime> {
+        None
+    }
     /// Entries of a directory; empty when it cannot be listed.
     fn read_dir(&self, path: &Path) -> Vec<PathBuf>;
     /// Memory and processes from the Windows APIs; `None` on other systems,
@@ -245,6 +255,21 @@ impl Host for System {
         fs::read_to_string(path).ok()
     }
 
+    fn read_prefix(&self, path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+        // A pipe or device would block or never end; only files are read.
+        if !fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut reader = fs::File::open(path).ok()?.take(max_bytes);
+        reader.read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    fn modified(&self, path: &Path) -> Option<SystemTime> {
+        fs::metadata(path).ok()?.modified().ok()
+    }
+
     fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
         fs::read_dir(path)
             .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
@@ -270,6 +295,14 @@ mod windows {
 
         fn read_file(&self, path: &Path) -> Option<String> {
             System.read_file(path)
+        }
+
+        fn read_prefix(&self, path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+            System.read_prefix(path, max_bytes)
+        }
+
+        fn modified(&self, path: &Path) -> Option<SystemTime> {
+            System.modified(path)
         }
 
         fn read_dir(&self, path: &Path) -> Vec<PathBuf> {

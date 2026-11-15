@@ -131,6 +131,10 @@ pub(crate) struct FakeHost {
 struct FakeState {
     commands: HashMap<String, VecDeque<String>>,
     files: HashMap<PathBuf, VecDeque<String>>,
+    /// Binary files (a safetensors header), served by `read_prefix`.
+    blobs: HashMap<PathBuf, Vec<u8>>,
+    /// When files last changed; a file without one reads as the epoch.
+    modified: HashMap<PathBuf, SystemTime>,
     dirs: HashMap<PathBuf, Vec<PathBuf>>,
     calls: Vec<String>,
     panic_on: Option<String>,
@@ -183,6 +187,25 @@ impl FakeHost {
         self
     }
 
+    /// A binary file, served by `read_prefix`.
+    pub(crate) fn blob(self, path: &str, data: &[u8]) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .blobs
+            .insert(PathBuf::from(path), data.to_vec());
+        self
+    }
+
+    /// Say a file changed at `at`; a clone the code under test holds sees it.
+    pub(crate) fn modified_at(&self, path: &str, at: SystemTime) {
+        self.state
+            .lock()
+            .unwrap()
+            .modified
+            .insert(PathBuf::from(path), at);
+    }
+
     /// Queue a Windows API reading; the last one repeats like commands do.
     pub(crate) fn windows(self, reading: crate::host::WindowsReading) -> Self {
         self.state.lock().unwrap().windows.push_back(reading);
@@ -216,6 +239,26 @@ impl Host for FakeHost {
         let mut state = self.state.lock().unwrap();
         state.calls.push(format!("read {}", path.display()));
         state.files.get_mut(path).and_then(next)
+    }
+
+    fn read_prefix(&self, path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .calls
+            .push(format!("prefix {} {max_bytes}", path.display()));
+        let bytes = match state.blobs.get(path) {
+            Some(bytes) => bytes.clone(),
+            None => state.files.get_mut(path).and_then(next)?.into_bytes(),
+        };
+        Some(bytes.into_iter().take(max_bytes as usize).collect())
+    }
+
+    fn modified(&self, path: &Path) -> Option<SystemTime> {
+        let state = self.state.lock().unwrap();
+        state.modified.get(path).copied().or_else(|| {
+            (state.blobs.contains_key(path) || state.files.contains_key(path))
+                .then_some(SystemTime::UNIX_EPOCH)
+        })
     }
 
     fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
@@ -517,4 +560,77 @@ pub(crate) fn empty_view() -> CollectorView {
         request_history: request_history::History::default(),
         operator_history: operator_history::History::default(),
     }
+}
+
+/// Where `owner_models` puts the owner's model and its draft.
+pub(crate) const OWNER_MODEL: &str = "/omlx/models/Qwen3.8-27B-oQ4e-mtp";
+pub(crate) const OWNER_DRAFT: &str = "/omlx/models/Qwen3.8-27B-DFlash2-incoai";
+
+/// The owner's Qwen3.8-27B-oQ4e-mtp and its DFlash2 draft as served on his
+/// Mac Studio, as header-only fixtures: each `config.json` and the JSON
+/// header of each safetensors shard, no weights. The draft's header is
+/// whole. The model's keeps every tensor of layers 0–3 (three
+/// linear-attention layers and a full-attention one), the embedding, the
+/// output head, the final norm, the MTP head and the vision tower's own
+/// tensors and first block; in each shard the other layers are one packed
+/// 4-bit placeholder module and the other vision blocks one placeholder
+/// tensor, each carrying exactly the bytes and parameters it replaces, so
+/// every total is the full model's. Its config keeps the quantization
+/// overrides of layers 0–3 only.
+pub(crate) fn owner_models(mut host: FakeHost) -> FakeHost {
+    let model: [(&str, &[u8]); 5] = [
+        (
+            "config.json",
+            include_bytes!("fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/config.json"),
+        ),
+        (
+            "model-00001-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors"
+            ),
+        ),
+        (
+            "model-00002-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors"
+            ),
+        ),
+        (
+            "model-00003-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors"
+            ),
+        ),
+        (
+            "model-00004-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors"
+            ),
+        ),
+    ];
+    let draft: [(&str, &[u8]); 2] = [
+        (
+            "config.json",
+            include_bytes!("fixtures/model_facts/Qwen3.8-27B-DFlash2-incoai/config.json"),
+        ),
+        (
+            "model.safetensors",
+            include_bytes!("fixtures/model_facts/Qwen3.8-27B-DFlash2-incoai/model.safetensors"),
+        ),
+    ];
+    for (dir, files) in [(OWNER_MODEL, &model[..]), (OWNER_DRAFT, &draft[..])] {
+        let paths: Vec<String> = files
+            .iter()
+            .map(|(name, _)| format!("{dir}/{name}"))
+            .collect();
+        for (path, (_, bytes)) in paths.iter().zip(files) {
+            host = host.blob(path, bytes);
+        }
+        let mut entries: Vec<&str> = paths.iter().map(String::as_str).collect();
+        // Beside the weights: what mlx-lm does not load.
+        let tokenizer = format!("{dir}/tokenizer.json");
+        entries.push(&tokenizer);
+        host = host.dir(dir, &entries);
+    }
+    host
 }

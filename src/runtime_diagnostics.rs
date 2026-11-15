@@ -231,6 +231,7 @@ impl RuntimeReport {
                     .collect::<String>()
             ));
         }
+        lines.extend(crate::model_facts::lines(&sample.model));
         for probe in &self.probes {
             lines.push(format!(
                 "{}: {}",

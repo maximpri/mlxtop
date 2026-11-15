@@ -393,3 +393,7 @@ fn qa_screens_for_the_model_judge() {
         }
     }
 }
+
+// Model facts in Diagnostics, judged as every screen is.
+#[path = "main_qa_model_facts.rs"]
+mod model_facts;

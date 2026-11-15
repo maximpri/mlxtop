@@ -562,6 +562,8 @@ pub(crate) struct LlmTelemetry {
     pub(crate) remote: bool,
     pub(crate) cache_interval_efficiency: Option<f64>,
     pub(crate) mlx: MlxTelemetry,
+    /// What the model reads per pass and holds per token and sequence.
+    pub(crate) model_facts: crate::model_facts::ModelFacts,
 }
 
 /// One poll of the machine and the runtime. It is written to a recording
@@ -616,6 +618,9 @@ pub(crate) struct Sample {
     pub(crate) gpus: Vec<gpu::Device>,
     pub(crate) metal: MetalTelemetry,
     pub(crate) mlx: MlxTelemetry,
+    /// The serving model's facts: bytes per pass, KV per token, state.
+    #[serde(default)]
+    pub(crate) model: crate::model_facts::ModelFacts,
     pub(crate) thermal: String,
     /// Power the whole machine draws, in milliwatts, where macOS reports it.
     pub(crate) system_power_mw: Option<u64>,
@@ -826,6 +831,7 @@ impl Default for Sample {
             gpus: Vec::new(),
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
+            model: Default::default(),
             thermal: "unavailable".into(),
             system_power_mw: None,
             vm_counters: None,

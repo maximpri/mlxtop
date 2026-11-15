@@ -94,3 +94,50 @@ fn a_missing_program_is_reported_once_until_it_runs() {
     assert_eq!(System.command(&name, &[]), None);
     assert!(!first_spawn_failure(&name), "still missing: still quiet");
 }
+
+#[test]
+fn system_host_reads_only_the_start_of_a_file_and_when_it_changed() {
+    let root = std::env::temp_dir().join(format!("mlxtop-host-prefix-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("model.safetensors");
+    fs::write(&file, b"\x05\0\0\0\0\0\0\0{}   weights").unwrap();
+    let host = System;
+    // The length and the header, never what follows them.
+    assert_eq!(
+        host.read_prefix(&file, 8).as_deref(),
+        Some(&b"\x05\0\0\0\0\0\0\0"[..])
+    );
+    assert_eq!(
+        host.read_prefix(&file, 13).as_deref(),
+        Some(&b"\x05\0\0\0\0\0\0\0{}   "[..])
+    );
+    assert_eq!(
+        host.read_prefix(&file, 1 << 20).map(|bytes| bytes.len()),
+        Some(20)
+    );
+    assert!(host.modified(&file).is_some());
+    // A directory and a missing file cannot be read.
+    assert_eq!(host.read_prefix(&root, 8), None);
+    assert_eq!(host.read_prefix(&root.join("missing"), 8), None);
+    assert_eq!(host.modified(&root.join("missing")), None);
+    // A host with no files reads nothing.
+    struct Empty;
+    impl Host for Empty {
+        fn command(&self, _: &str, _: &[&str]) -> Option<String> {
+            None
+        }
+        fn read_file(&self, _: &Path) -> Option<String> {
+            None
+        }
+        fn read_dir(&self, _: &Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+    assert_eq!(Empty.read_prefix(&file, 8), None);
+    assert_eq!(Empty.modified(&file), None);
+    assert_eq!(Empty.command("true", &[]), None);
+    assert_eq!(Empty.read_file(&file), None);
+    assert!(Empty.read_dir(&root).is_empty());
+    let _ = fs::remove_dir_all(&root);
+}
