@@ -74,6 +74,11 @@ bar:
   processes on an integrated NVIDIA GPU hold (`nvidia-smi
   --query-compute-apps`); where that count is missing the line reads `GPU
   shares this RAM`.
+- Under what is left, how much more context fits: the tokens each request
+  in flight can still add, or with none in flight the next request
+  (`≈37k tokens at 2 requests`). It is an estimate, in muted text, never a
+  warning colour, and the first row to go: it is drawn only where every
+  other row keeps its own. Diagnostics (`d`) gives the arithmetic.
 - Then each part's size. A narrow panel wraps them onto a second row; it
   does not drop the sizes.
 - **By app** names the runtime's own footprint and the largest other app.
@@ -522,6 +527,35 @@ Model: 14.0 GiB read per pass · 4.69 bits per weight, 4/5-bit g64 · 26.9B para
 Context: KV 32.5 KiB per token, int8 · 152.6 MiB state per sequence · 131.1k tokens allowed of 262.1k trained
 Version: oMLX 0.7.3 · Splash 1.5.0
 ```
+
+Under the facts, how much more context fits, with its arithmetic. Tokens
+left for each request = (room − margin − the state of a request not yet
+running) ÷ (KV bytes per token × requests in flight), and no more than the
+context window less the most context one of them holds. Requests in flight
+already hold their state, so it is not taken off the room again. The room
+is the runtime's own where it reports it: the KV cache it has left in
+tokens, or what its memory plan has left in bytes, taken as given. A runtime
+that sizes its KV cache for its window when it loads a model (llama.cpp,
+KoboldCpp, Jan, Ollama) has its window left whatever memory does. oMLX's own
+engine, mlx-lm and mlx-serve grow the cache as tokens arrive, so their room
+is what the memory panel says is left, less 1 GiB kept back for the system
+and the runtime's working memory. Splash plans its memory itself and says
+nothing until its plan is read. It needs the context window, the requests
+in flight with the context they hold and, for a room in bytes, the KV bytes
+a token costs; without any of them nothing is shown. On a Mac Studio whose
+Splash plan leaves 5.02 GB for requests, two agentic contexts of 63.7k
+tokens fill it:
+
+```text
+Context left: ≈1k more tokens for each of the 2 requests in flight (estimate)
+By memory: 64.3 MiB left in Splash's memory plan ÷ (2 requests × 32.5 KiB a token) = 1.0k tokens each, the smaller
+By window: 131.1k tokens allowed − 63.7k held = 67.4k tokens each
+Held: 127.3k tokens in 2 requests: 3.9 GiB of KV cache and ≈610.5 MiB of state (305.2 MiB each), 98% of what Splash's plan has for requests (4.6 GiB)
+```
+
+A Splash request in flight holds two state cells, so its state is counted
+twice; the draft's attention cache beside them (40 MiB for Qwen3.8-27B's
+DFlash2 draft) is not among the facts, so the state shown is a lower bound.
 
 Once GPU memory reaches 90% of the GPU wired limit (`iogpu.wired_limit_mb`)
 or of Metal's recommended working set, where MLX warns that generation can

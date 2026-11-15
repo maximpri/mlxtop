@@ -232,6 +232,8 @@ impl RuntimeReport {
             ));
         }
         lines.extend(crate::model_facts::lines(&sample.model));
+        // How much more context fits, worked out from those facts.
+        lines.extend(crate::context_left::lines(sample));
         for probe in &self.probes {
             lines.push(format!(
                 "{}: {}",

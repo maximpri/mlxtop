@@ -41,7 +41,7 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 | runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, the chip's peak memory bandwidth (muted, first to drop), GPU memory meter (orange from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
 | generation / prefill | Separate tok/s bar histories with independent axes; no outer throughput box |
 | prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling; generated tokens under the sizes when the panel keeps four bar rows |
-| memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), orange from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache); a trace of what was left, in each sample's pressure colour |
+| memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), orange from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache), and under it how much more context fits in tokens (muted, the first row to drop); a trace of what was left, in each sample's pressure colour |
 | compression | macOS compress + decompress traffic bars (B/s, axis at least `compression_warn_rate`), stored/compressor bytes and ratio, compressing/decompressing rates and the compressor's share of RAM; orange from `compression_warn_rate`, never red |
 | GPU | Utilization area and load state; on the bottom edge, while it has room, the cards' power against their caps and a lone card's memory activity; hardware belongs in the runtime card |
 | paging / I/O | Paging-rate bars (axis at least `swap_warn_rate`), page-in/page-out rates and a horizontal swap used/total capacity bar, `swap off` without swap |
@@ -163,7 +163,9 @@ the total, each with what is left. The history is what was left (free plus
 file cache), and each sample keeps the pressure severity captured with it,
 so a full but healthy RAM stays green. Without composition counters the
 history is an occupancy area graded the same way. Short panels keep the
-meters and drop the history.
+meters and drop the history. How much more context fits (`≈37k tokens at 2
+requests`) is an estimate in plain muted text, never graded: it takes a row
+only where every other row keeps its own.
 Missing occupancy remains muted.
 
 On macOS, paging counts file page-ins and page-outs as well as swap, because

@@ -14,6 +14,7 @@ mod cli;
 mod collector;
 mod completion_log;
 mod config;
+mod context_left;
 mod decode_tracker;
 mod diagnosis;
 mod diagnostics_view;
