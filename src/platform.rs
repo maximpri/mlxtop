@@ -512,6 +512,7 @@ pub(crate) fn parse_metal_hardware(text: &str) -> MetalTelemetry {
         tiler_util: find_named_number(text, "Tiler Utilization %")
             .and_then(|value| value.try_into().ok()),
         resource_limit: None,
+        machine_model: None,
     }
 }
 

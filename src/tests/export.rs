@@ -105,6 +105,7 @@ pub(crate) fn mac_studio_slowdown() -> Sample {
             renderer_util: Some(96),
             tiler_util: Some(41),
             resource_limit: Some(28_000 * MIB),
+            machine_model: None,
         },
         thermal: "nominal".into(),
         thermal_state: ThermalState {
@@ -207,6 +208,7 @@ pub(crate) fn mac_studio_slowdown() -> Sample {
             notes: vec!["paging 8.0 MiB/s (usual none)".into()],
             usual_speed: Some((123.0, 98.4)),
             usual_for: "1 request · 41.0k context".into(),
+            earlier: String::new(),
         },
         llm_top: "omlx-worker".into(),
         llm_pid: 4242,

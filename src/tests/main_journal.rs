@@ -100,6 +100,7 @@ fn paging_alert_banner_shows_until_acknowledged_or_reset() {
     app.tick();
     assert_eq!(app.alert_bells, 2);
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.alert.is_none());
     let rendered = render_app(&app, 180, 50);
     assert!(!rendered.contains("⚠ SWAP THRASHING"));

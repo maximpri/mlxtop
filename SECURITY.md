@@ -43,6 +43,14 @@ A `--record` file holds the machine's readings and the runtime's request ids,
 model names and token counts, never prompts, output or process command lines,
 and is created readable by its owner only (recordings made by 3.3.0 do contain
 runtime command lines).
+The usual speeds mlxtop keeps across sessions are in
+`~/Library/Application Support/mlxtop/baselines.json` on macOS,
+`~/.local/state/mlxtop/baselines.json` (or under `$XDG_STATE_HOME`) on Linux
+and `%LOCALAPPDATA%\mlxtop\baselines.json` on Windows: speeds, the machine's
+model identifier, chip and RAM, and runtime, model and version names, never
+prompts, output, request ids, command lines or process names. The file is
+readable by its owner only, in a folder only its owner can open, is never
+sent anywhere, and is turned off by `"baselines": false` (Settings).
 
 `mlxtop update` and the install scripts check each download against the
 release's `SHA256SUMS`. That detects a damaged download; because the checksum

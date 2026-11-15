@@ -199,8 +199,27 @@ fn command_line_options_override_config_and_validate_ranges() {
     assert_eq!(
         parse_args(&args(&["replay", "s.jsonl"]), &config).unwrap(),
         CliAction::Replay {
-            path: "s.jsonl".into()
+            path: "s.jsonl".into(),
+            baselines: None,
         }
+    );
+    // A replay can judge against usual speeds kept across sessions.
+    assert_eq!(
+        parse_args(
+            &args(&["replay", "s.jsonl", "--baselines", "kept.json"]),
+            &config
+        )
+        .unwrap(),
+        CliAction::Replay {
+            path: "s.jsonl".into(),
+            baselines: Some("kept.json".into()),
+        }
+    );
+    assert_eq!(
+        parse_args(&args(&["replay", "s.jsonl", "--baselines"]), &config)
+            .unwrap_err()
+            .to_string(),
+        "--baselines needs the file usual speeds are kept in"
     );
     assert!(parse_args(&args(&["replay"]), &config).is_err());
     assert!(parse_args(&args(&["replay", "a", "--x"]), &config).is_err());
@@ -939,7 +958,12 @@ fn global_keys_pause_resize_interval_switch_tabs_and_reset() {
         summary: "swap".into(),
         time: "now".into(),
     });
+    // r asks first; nothing is cleared until y answers it.
     press(&mut app, &[KeyCode::Char('r')]);
+    assert!(app.reset_prompt && app.alert.is_some());
+    assert_eq!(app.journal_filter, JournalFilter::Gpu);
+    press(&mut app, &[KeyCode::Char('y')]);
+    assert!(!app.reset_prompt);
     assert!(app.alert.is_none());
     assert_eq!(app.journal_filter, JournalFilter::All);
     assert!(matches!(

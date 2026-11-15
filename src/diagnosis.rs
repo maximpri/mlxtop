@@ -136,6 +136,14 @@ pub(crate) fn slowdown_next_step(sample: &Sample) -> String {
         CorrelationCause::DraftAcceptance => {
             "The draft model is guessing worse on this text: the machine is not the limit; a better-matched draft, or none, may be faster.".into()
         }
+        // The finding is the sentence itself: below earlier sessions, and
+        // the update between them where there was one.
+        CorrelationCause::EarlierSessions if !sample.correlation.earlier.is_empty() => {
+            format!("{}.", sample.correlation.earlier)
+        }
+        CorrelationCause::EarlierSessions => {
+            "This model now generates below its usual from earlier sessions at this depth.".into()
+        }
         // Judged per verify pass, how well the draft guesses is already
         // allowed for: the passes themselves ran slower.
         CorrelationCause::None if judged_per_pass(sample) => {
@@ -286,8 +294,11 @@ fn measured_slowdown(sample: &Sample, finding: &mut Finding) -> bool {
         {
             finding.evidence = format!("{} for {:.0}s", finding.evidence, episode.seconds);
         }
-        // The reason is whatever else is unusual at the same time.
-        finding.context = if sample.correlation.lead.is_empty() {
+        // The reason is whatever else is unusual at the same time; against
+        // earlier sessions, it is what the speed is compared with.
+        finding.context = if sample.correlation.cause == CorrelationCause::EarlierSessions {
+            "Usual from earlier sessions".into()
+        } else if sample.correlation.lead.is_empty() {
             "Nothing else unusual".into()
         } else {
             format!("WITH {}", sample.correlation.lead)

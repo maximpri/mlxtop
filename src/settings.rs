@@ -96,6 +96,13 @@ pub(crate) const FIELDS: &[Field] = &[
         kind: Kind::Toggle { default: true },
     },
     Field {
+        key: "baselines",
+        section: "General",
+        label: "Keep usual speeds",
+        help: BASELINES_HELP,
+        kind: Kind::Toggle { default: true },
+    },
+    Field {
         key: "api_key",
         section: "Inference engine",
         label: "API key",
@@ -246,6 +253,15 @@ pub(crate) const FIELDS: &[Field] = &[
         },
     },
 ];
+
+/// Where usual speeds are kept, as each platform's help says it.
+const BASELINES_HELP: &str = if cfg!(target_os = "macos") {
+    "Each model's usual generation speed by context, kept across sessions in ~/Library/Application Support/mlxtop/baselines.json: numbers only, readable by you only. Slowdowns are then judged from the first request, and an update that slows a model is named. Off neither reads nor writes it."
+} else if cfg!(windows) {
+    r"Each model's usual generation speed by context, kept across sessions in %LOCALAPPDATA%\mlxtop\baselines.json: numbers only. Slowdowns are then judged from the first request, and an update that slows a model is named. Off neither reads nor writes it."
+} else {
+    "Each model's usual generation speed by context, kept across sessions in ~/.local/state/mlxtop/baselines.json ($XDG_STATE_HOME): numbers only, readable by you only. Slowdowns are then judged from the first request, and an update that slows a model is named. Off neither reads nor writes it."
+};
 
 /// What a stored credential shows as, whatever its length.
 const SECRET_SHOWN: &str = "••••••••";

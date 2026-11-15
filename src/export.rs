@@ -1219,6 +1219,7 @@ pub(crate) fn cause_name(cause: CorrelationCause) -> &'static str {
         CorrelationCause::GpuIdle => "gpu_idle",
         CorrelationCause::DraftAcceptance => "draft_acceptance",
         CorrelationCause::KvPreemption => "kv_preemption",
+        CorrelationCause::EarlierSessions => "earlier_sessions",
     }
 }
 
@@ -1294,6 +1295,10 @@ pub(crate) fn stream(
         }
         let started = Instant::now();
         let sample = collector.sample();
+        // Standard output is the JSON; the one-line notice goes beside it.
+        if let Some(notice) = collector.baselines_notice() {
+            eprintln!("mlxtop: {notice}");
+        }
         match write_line(
             out,
             &session_snapshot(collector, &sample, interval.as_secs()),

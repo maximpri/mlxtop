@@ -6,8 +6,12 @@
 //! reason is whatever else is unusual at the same time. The usual value is
 //! that of similar work, compared like with like: per verify pass when a
 //! draft's tokens per pass are counted, and at the same depth when the
-//! model's facts say what a pass reads.
-use crate::anomaly::{median, Usual, WINDOW};
+//! model's facts say what a pass reads. Where usual speeds are kept across
+//! sessions (`crate::baseline_store`), work this session has not yet done
+//! is judged against earlier sessions' from its first sample, until it has
+//! a usual speed of its own.
+use crate::anomaly::{median, Usual, LEARN_SAMPLES, WINDOW};
+use crate::baseline_store::{Band, Baselines, Follow, Kind, Per, Seed};
 use crate::config::{Thresholds, PAGING_ACTIVE_ENTER_RATE};
 use crate::domain::{
     CorrelationCause, CorrelationInsight, CorrelationKey, DiskActivity, DropEnd, DropEpisode,
@@ -608,6 +612,9 @@ pub(crate) struct Work {
     /// Bytes a pass read at this context: the model's weights and the KV
     /// cache of the context, when the model's facts give both.
     pub(crate) pass_bytes: Option<f64>,
+    /// What each token of context adds to `pass_bytes`, when it is known:
+    /// speeds kept at another depth are taken to this one with it.
+    pub(crate) kv: Option<f64>,
 }
 
 impl Work {
@@ -617,18 +624,53 @@ impl Work {
         } else {
             o.active_requests.unwrap_or(1)
         };
+        let bytes = o.pass_weights.zip(o.kv_per_token).zip(o.context);
         Self {
             requests: requests.clamp(1, MANY_REQUESTS),
             context: o.context,
             tokens_per_pass: o.tokens_per_pass,
             // A batch reads the weights once and each sequence's cache, so
             // the requests' context together is what its passes read.
-            pass_bytes: o
-                .pass_weights
-                .zip(o.kv_per_token)
-                .zip(o.context)
+            pass_bytes: bytes
                 .map(|((weights, kv), context)| weights as f64 + kv as f64 * context as f64),
+            kv: bytes.map(|((_, kv), _)| kv as f64),
         }
+    }
+
+    /// The kind of work its speeds are kept across sessions as.
+    fn kind(self) -> Kind {
+        Kind {
+            band: Band::of(self.context),
+            requests: self.requests,
+            per: if self.tokens_per_pass.is_some() {
+                Per::Pass
+            } else {
+                Per::Token
+            },
+        }
+    }
+
+    /// How much longer a pass of this work takes than one `depth` tokens
+    /// deep, from the bytes each reads; 1 where they are not known.
+    fn deeper_than(self, depth: Option<u64>) -> f64 {
+        match (self.pass_bytes, self.kv, self.context, depth) {
+            (Some(here), Some(kv), Some(context), Some(depth)) => {
+                let there = here + kv * (depth as f64 - context as f64);
+                if here > 0.0 && there > 0.0 {
+                    here / there
+                } else {
+                    1.0
+                }
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// `speed`, measured on this work, as it is kept across sessions: per
+    /// verify pass where the passes are counted, at its band's depth.
+    fn kept(self, speed: f64) -> f64 {
+        speed / self.tokens_per_pass.unwrap_or(1.0)
+            * self.deeper_than(Band::of(self.context).depth())
     }
 
     /// The same number of requests, with a context within a factor of two
@@ -679,11 +721,32 @@ impl Work {
     }
 }
 
+/// Whether speeds kept across sessions are of `work`'s kind: as many
+/// requests writing, and a context in the same band.
+fn kept_for(seed: &Seed, work: Work) -> bool {
+    seed.kind.requests == work.requests && seed.kind.band == Band::of(work.context)
+}
+
+/// What takes a kept speed to `work`: its tokens per pass where speeds were
+/// kept per pass, and its depth. `None` when one counts passes and the
+/// other does not: a pass and a token are not the same speed.
+fn kept_at(seed: &Seed, work: Work) -> Option<f64> {
+    let text = match (seed.kind.per, work.tokens_per_pass) {
+        (Per::Pass, Some(tokens)) => tokens,
+        (Per::Token, None) => 1.0,
+        _ => return None,
+    };
+    Some(text / work.deeper_than(seed.kind.band.depth()))
+}
+
 /// Earlier generation speeds, each with the work it was measured on. A
 /// speed is judged against earlier samples of similar work.
 #[derive(Clone, Default)]
 pub(crate) struct Speeds {
     samples: VecDeque<(f64, Work)>,
+    /// Usual speeds kept from earlier sessions, a window per kind of work:
+    /// what the work this session has not yet done is judged against.
+    earlier: Vec<Seed>,
 }
 
 impl Speeds {
@@ -702,29 +765,60 @@ impl Speeds {
     /// not seen before has no usual speed until it has been seen: it is
     /// learned, never judged against different work.
     pub(crate) fn usual(&self, work: Work) -> Usual {
+        self.judged(work).0
+    }
+
+    /// The usual speed for `work`, as `usual` gives it; and the earlier
+    /// sessions' speeds it was taken with, if any. Until this session has a
+    /// usual speed of its own for the work, earlier sessions' speeds of its
+    /// kind stand in for it, after the few of its own; from then on it is
+    /// judged against itself alone, as a session that keeps none is.
+    fn judged(&self, work: Work) -> (Usual, Option<&Seed>) {
+        let mut speeds: Vec<f64> = self
+            .samples
+            .iter()
+            .rev()
+            .filter(|(_, earlier)| earlier.like(work))
+            .filter_map(|(speed, earlier)| earlier.speed_at(*speed, work))
+            .take(WINDOW)
+            .collect();
+        let here = speeds.len();
+        let kept = self
+            .earlier
+            .iter()
+            .filter(|_| here < LEARN_SAMPLES)
+            .filter(|seed| kept_for(seed, work))
+            .find_map(|seed| kept_at(seed, work).map(|factor| (seed, factor)));
+        if let Some((seed, factor)) = kept {
+            speeds.extend(
+                seed.speeds
+                    .iter()
+                    .rev()
+                    .take(WINDOW - here)
+                    .map(|speed| speed * factor),
+            );
+        }
         let mut usual = Usual::default();
-        usual.relearn(
-            self.samples
-                .iter()
-                .rev()
-                .filter(|(_, earlier)| earlier.like(work))
-                .filter_map(|(speed, earlier)| earlier.speed_at(*speed, work))
-                .take(WINDOW)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev(),
-        );
-        usual
+        usual.relearn(speeds.into_iter().rev());
+        (usual, kept.map(|(seed, _)| seed))
     }
 
     /// A slower speed for this work has held with nothing else unusual: it
-    /// is how this work now runs. Earlier samples of the same work go.
+    /// is how this work now runs. Earlier samples of the same work go, and
+    /// so do earlier sessions'.
     fn settle(&mut self, quiet: &[(f64, Work)]) {
         self.samples
             .retain(|(_, earlier)| !quiet.iter().any(|(_, work)| earlier.like(*work)));
+        self.earlier
+            .retain(|seed| !quiet.iter().any(|(_, work)| kept_for(seed, *work)));
         for (speed, work) in quiet {
             self.learn(*speed, *work);
         }
+    }
+
+    /// Judge against this session's speeds alone from now on.
+    pub(crate) fn forget_earlier(&mut self) {
+        self.earlier.clear();
     }
 }
 
@@ -759,6 +853,10 @@ pub(crate) struct CorrelationEngine {
     prefill: Option<Box<CorrelationEngine>>,
     /// The reason last journaled, and when it was last seen.
     told: Option<(CorrelationCause, Option<SystemTime>)>,
+    /// Usual speeds kept across sessions, when they are: what the engine
+    /// judges against before it has learned its own, and where what it
+    /// learns is saved. A reset keeps it.
+    pub(crate) baselines: Option<Box<Baselines>>,
     /// The runtime's count of requests recomputed for want of KV cache,
     /// as last read.
     preemptions: Option<u64>,
@@ -785,6 +883,11 @@ struct Episode {
     /// The latest reason found in it, in words: once that reason passes
     /// while speed is still down, the slowdown is still its doing.
     reason: Option<(CorrelationCause, String)>,
+    /// Told as below earlier sessions' usual. Once it ends, earlier
+    /// sessions are not judged against again until the next one: the
+    /// finding is told once a session, and a session that ended slow runs
+    /// otherwise.
+    earlier: bool,
 }
 
 impl CorrelationEngine {
@@ -804,6 +907,7 @@ impl CorrelationEngine {
             self.reset();
             self.model = Some(model);
         }
+        self.follow_baselines(sample, current.at);
         // A count that went back is a runtime that restarted: no rise.
         let total = sample.llm_preemptions_total;
         current.preempted = self
@@ -873,15 +977,22 @@ impl CorrelationEngine {
         let gap = seconds_between(self.seen, current.at);
         if gap >= SETTLE_SECONDS.max(3.0 * self.cadence) {
             self.keep_pending(thresholds);
-            if let Some(open) = self.episode.take().filter(|open| !open.silent) {
-                self.finished = Some(DropEnd {
-                    settled: false,
-                    finished: true,
-                    seconds: seconds_between(open.began, self.seen),
-                    low: open.low,
-                    rate: open.low,
-                    reference: open.reference,
-                });
+            if let Some(open) = self.episode.take() {
+                // Ended below earlier sessions' usual: this session runs
+                // otherwise, and is judged against itself from now on.
+                if open.earlier {
+                    self.speed.forget_earlier();
+                }
+                if !open.silent {
+                    self.finished = Some(DropEnd {
+                        settled: false,
+                        finished: true,
+                        seconds: seconds_between(open.began, self.seen),
+                        low: open.low,
+                        rate: open.low,
+                        reference: open.reference,
+                    });
+                }
             }
         }
         if gap > 0.0 {
@@ -900,29 +1011,48 @@ impl CorrelationEngine {
         // or another request writing beside it is expected to be slower.
         let work = Work::of(&current);
         self.work = work;
-        let expected = self.speed.usual(work);
+        let (expected, sessions) = self.speed.judged(work);
+        // Work this session has no usual speed for yet is judged against
+        // earlier sessions': the runtime version they were measured on.
+        let sessions = sessions.map(|seed| seed.runtime.clone());
         let usual_for = work.label();
         let usual = slow_range(&expected);
         let low = expected
             .below(speed, SLOW_SHARE, SLOW_MIN_TPS)
             .filter(|_| !quiet);
+        // A sample clearly below earlier sessions' usual says so from the
+        // first: a slowdown it becomes only as any other does.
+        let against = sessions
+            .as_ref()
+            .zip(low.filter(|level| *level > 0.0))
+            .map(|(then, level)| self.earlier_sentence((level - speed) / level * 100.0, then));
         // Outside a slowdown a sample still says what is unusual in it: its
         // own speed, and any reading of the host.
-        let steady = |usual: Option<(f64, f64)>, watched: Vec<Finding>| CorrelationInsight {
-            direction: if usual.is_some() {
-                ThroughputDirection::Flat
-            } else {
-                ThroughputDirection::Unknown
-            },
-            delta_percent: usual
-                .filter(|(usual, _)| *usual > 0.0)
-                .map(|(usual, _)| (speed - usual) / usual * 100.0),
-            usual_speed: usual,
-            usual_for: usual_for.clone(),
-            slow: low.is_some(),
-            unusual: watched.iter().map(|found| found.signal.cause()).collect(),
-            notes: watched.into_iter().map(|found| found.text).collect(),
-            ..CorrelationInsight::default()
+        let steady = |usual: Option<(f64, f64)>, watched: Vec<Finding>, against: Option<String>| {
+            let mut unusual: Vec<CorrelationCause> =
+                watched.iter().map(|found| found.signal.cause()).collect();
+            let mut notes: Vec<String> = watched.into_iter().map(|found| found.text).collect();
+            if let Some(sentence) = &against {
+                unusual.insert(0, CorrelationCause::EarlierSessions);
+                notes.insert(0, sentence.clone());
+            }
+            CorrelationInsight {
+                direction: if usual.is_some() {
+                    ThroughputDirection::Flat
+                } else {
+                    ThroughputDirection::Unknown
+                },
+                delta_percent: usual
+                    .filter(|(usual, _)| *usual > 0.0)
+                    .map(|(usual, _)| (speed - usual) / usual * 100.0),
+                usual_speed: usual,
+                usual_for: usual_for.clone(),
+                slow: low.is_some(),
+                unusual,
+                notes,
+                earlier: against.unwrap_or_default(),
+                ..CorrelationInsight::default()
+            }
         };
         let watched = self.watched(&current, thresholds);
 
@@ -943,7 +1073,7 @@ impl CorrelationEngine {
             (None, Some(reference)) => {
                 self.pending.push(current.clone());
                 if self.pending.len() < SLOW_SAMPLES {
-                    return steady(usual, watched);
+                    return steady(usual, watched, against);
                 }
                 let speeds: Vec<f64> = self
                     .pending
@@ -964,6 +1094,7 @@ impl CorrelationEngine {
                     silent: false,
                     quiet: Vec::new(),
                     reason: None,
+                    earlier: false,
                 }
             }
             (None, None) => {
@@ -972,7 +1103,7 @@ impl CorrelationEngine {
                     self.keep_pending(thresholds);
                     self.learn(&current, thresholds);
                 }
-                return steady(usual, watched);
+                return steady(usual, watched, None);
             }
         };
         while open.lows.len() > SLOW_SAMPLES {
@@ -992,12 +1123,16 @@ impl CorrelationEngine {
 
         // Back at its usual speed for three samples: it recovered.
         if open.back.len() >= SLOW_SAMPLES {
+            // Told below earlier sessions once: the session judges itself.
+            if open.earlier {
+                self.speed.forget_earlier();
+            }
             for observation in &open.back {
                 self.learn(observation, thresholds);
             }
             return CorrelationInsight {
                 ended: ended(false, &open),
-                ..steady(usual, watched)
+                ..steady(usual, watched, None)
             };
         }
 
@@ -1021,6 +1156,11 @@ impl CorrelationEngine {
                 .filter_map(|o| o.generation_tps.map(|speed| (speed, Work::of(o))))
                 .collect();
             self.speed.settle(&quiet);
+            // Settled below earlier sessions' usual: this session runs
+            // otherwise, and is judged against itself from now on.
+            if open.earlier {
+                self.speed.forget_earlier();
+            }
             for usual in &mut self.host {
                 usual.relearn(std::iter::empty());
             }
@@ -1030,7 +1170,7 @@ impl CorrelationEngine {
             }
             return CorrelationInsight {
                 ended: ended(true, &open),
-                ..steady(slow_range(&self.speed.usual(work)), Vec::new())
+                ..steady(slow_range(&self.speed.usual(work)), Vec::new(), None)
             };
         }
 
@@ -1061,6 +1201,16 @@ impl CorrelationEngine {
         if let Some((was, _)) = &earlier {
             cause = *was;
         }
+        // Judged against earlier sessions alone, with nothing else unusual:
+        // that this work now runs below them is the finding.
+        let sentence = match &sessions {
+            Some(then) if cause == CorrelationCause::None => {
+                cause = CorrelationCause::EarlierSessions;
+                open.earlier = true;
+                self.earlier_sentence(-percent, then)
+            }
+            _ => String::new(),
+        };
         // One Journal row per reason in a slowdown, and none for a slowdown
         // that repeats the last one's reason within a minute.
         let same_story = self.told.is_some_and(|(told, at)| {
@@ -1087,6 +1237,8 @@ impl CorrelationEngine {
             cause,
             summary: if let Some((_, text)) = &earlier {
                 format!("{rate_label} · {text}")
+            } else if cause == CorrelationCause::EarlierSessions {
+                format!("{rate_label} · {}", cause.label())
             } else if texts.is_empty() {
                 format!("{rate_label} · nothing else unusual")
             } else {
@@ -1109,6 +1261,7 @@ impl CorrelationEngine {
                 .first()
                 .map(|text| (*text).to_owned())
                 .or_else(|| earlier.as_ref().map(|(_, text)| text.clone()))
+                .or_else(|| (!sentence.is_empty()).then(|| cause.label().to_owned()))
                 .unwrap_or_default(),
             stall_seconds: None,
             event_key: Some(CorrelationKey {
@@ -1129,9 +1282,21 @@ impl CorrelationEngine {
             notes: texts.iter().map(|text| (*text).to_owned()).collect(),
             usual_speed: usual,
             usual_for,
+            earlier: sentence,
         };
         self.episode = Some(open);
         insight
+    }
+
+    /// The finding against earlier sessions' usual, `percent` below it:
+    /// with the update between where the runtime's version then and now
+    /// are known and differ.
+    fn earlier_sentence(&self, percent: f64, then: &Option<String>) -> String {
+        let now = self
+            .baselines
+            .as_deref()
+            .and_then(|baselines| baselines.runtime());
+        crate::baseline_store::sentence(percent, then.as_deref(), now)
     }
 
     /// The signals that are unusual in this sample, the most telling first.
@@ -1179,7 +1344,13 @@ impl CorrelationEngine {
     /// usual, it is how the signal now runs.
     fn learn(&mut self, observation: &CorrelationObservation, thresholds: Thresholds) {
         if let Some(speed) = observation.generation_tps {
-            self.speed.learn(speed, Work::of(observation));
+            let work = Work::of(observation);
+            self.speed.learn(speed, work);
+            // What is learned outside a slowdown is what later sessions
+            // judge against; what the settle rule adopts never is.
+            if let Some(baselines) = self.baselines.as_deref_mut() {
+                baselines.learned(work.kind(), work.kept(speed), observation.at);
+            }
         }
         self.learn_host(observation, thresholds);
     }
@@ -1324,6 +1495,7 @@ impl CorrelationEngine {
             notes: Vec::new(),
             usual_speed: slow_range(&self.speed.usual(self.work)),
             usual_for: self.work.label(),
+            earlier: String::new(),
         }
     }
 
@@ -1352,8 +1524,51 @@ impl CorrelationEngine {
             >= 2
     }
 
+    /// Start over: everything learned goes, saved first where usual speeds
+    /// are kept across sessions, which stay kept.
     pub(crate) fn reset(&mut self) {
+        let mut baselines = self.baselines.take();
+        if let Some(baselines) = baselines.as_deref_mut() {
+            baselines.restart();
+        }
         *self = Self::default();
+        self.baselines = baselines;
+    }
+
+    /// An engine that judges what this session has not yet learned against
+    /// usual speeds kept across sessions in `baselines`.
+    pub(crate) fn with_baselines(baselines: Baselines) -> Self {
+        Self {
+            baselines: Some(Box::new(baselines)),
+            ..Self::default()
+        }
+    }
+
+    /// Follow the model being served in the kept speeds: judge against
+    /// earlier sessions' when it is first seen or better known, start over
+    /// when the runtime or model changed under the same name, and save what
+    /// was learned when it is due.
+    fn follow_baselines(&mut self, sample: &Sample, at: Option<SystemTime>) {
+        let Some(baselines) = self.baselines.as_deref_mut() else {
+            return;
+        };
+        match baselines.follow(sample) {
+            Follow::Same => {}
+            Follow::Seed(seeds) => self.speed.earlier = seeds,
+            Follow::Restart(seeds) => {
+                // What was learned is of the old runtime, and was saved as
+                // its own.
+                let model = self.model.take();
+                let baselines = self.baselines.take();
+                *self = Self::default();
+                self.model = model;
+                self.baselines = baselines;
+                self.speed.earlier = seeds;
+            }
+        }
+        if let Some(baselines) = self.baselines.as_deref_mut() {
+            baselines.save_if_due(at);
+        }
     }
 }
 

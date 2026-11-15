@@ -78,6 +78,8 @@ pub(crate) enum CliAction {
     /// Read a recording back through today's rules and report what fires.
     Replay {
         path: std::path::PathBuf,
+        /// Judge it against the usual speeds kept in this file.
+        baselines: Option<std::path::PathBuf>,
     },
     /// Replace this binary with the newest release (`rc`: or release candidate).
     Update {
@@ -87,12 +89,13 @@ pub(crate) enum CliAction {
 
 pub(crate) fn help_text(platform: Platform) -> String {
     format!(
-        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop stream [--interval N] [--schema 1]\n       mlxtop serve [--listen ADDR] [--interval N]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE\n\n\
+        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop stream [--interval N] [--schema 1]\n       mlxtop serve [--listen ADDR] [--interval N]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n       mlxtop replay FILE [--baselines KEPT]\n\n\
          stream writes the --json snapshot of every sample, a line each, until stopped\n\
          serve answers /metrics (Prometheus), /snapshot and /health on loopback only;\n\
          \x20 another machine reaches it with ssh -L {port}:127.0.0.1:{port} HOST\n\
          update installs the latest release in place; --rc includes release candidates\n\
-         replay reads a recording back through the detection rules and counts what fires\n\
+         replay reads a recording back through the detection rules and counts what fires;\n\
+         \x20 --baselines judges it against the usual speeds kept in KEPT, read only\n\
          Options:\n\
          \x20 -i, --interval N  refresh interval in seconds, 1–60 (default 1)\n\
          \x20 -n, --history N   chart and journal history, 20–3600 samples\n\
@@ -106,7 +109,8 @@ pub(crate) fn help_text(platform: Platform) -> String {
          Runtime selection: MLXTOP_PROVIDER, MLXTOP_PROVIDER_PORT, MLXTOP_PROVIDER_URL,\n\
          \x20 MLXTOP_PROVIDER_API_KEY, MLXTOP_USAGE_FILE (see mlxtop doctor)\n\
          Config file: {}\n\
-         Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
+         Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\
+         Usual speeds: {} (numbers only; \"baselines\": false keeps none)\n\n\
          Interactive keys: q quit · 1 overview · 2 processes · 3 journal · 4 settings · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · p pause · r reset · a acknowledge alarm · d diagnostics · u session summary · ? help",
         crate::export::SCHEMA_VERSION,
         if platform == Platform::Windows {
@@ -115,6 +119,11 @@ pub(crate) fn help_text(platform: Platform) -> String {
             "~/.config/mlxtop/config.json"
         },
         diagnostics_default_hint(platform),
+        match platform {
+            Platform::MacOs => "~/Library/Application Support/mlxtop/baselines.json",
+            Platform::Linux => "~/.local/state/mlxtop/baselines.json",
+            Platform::Windows => r"%LOCALAPPDATA%\mlxtop\baselines.json",
+        },
         port = crate::exporter::DEFAULT_LISTEN.port(),
         listen = crate::exporter::DEFAULT_LISTEN,
     )
@@ -152,7 +161,17 @@ pub(crate) fn parse_args(
             [flag] if flag == "-h" || flag == "--help" => {
                 Ok(CliAction::Print(help_text(Platform::current())))
             }
-            [path] => Ok(CliAction::Replay { path: path.into() }),
+            [path] => Ok(CliAction::Replay {
+                path: path.into(),
+                baselines: None,
+            }),
+            [path, flag, kept] if flag == "--baselines" => Ok(CliAction::Replay {
+                path: path.into(),
+                baselines: Some(kept.into()),
+            }),
+            [_, flag] if flag == "--baselines" => {
+                Err("--baselines needs the file usual speeds are kept in".into())
+            }
             [] => Err("replay needs a recording: mlxtop replay FILE".into()),
             [_, option, ..] => Err(format!("unknown option for replay: {option}").into()),
         };
@@ -368,9 +387,14 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         CliAction::Update { rc } => return update(rc),
-        CliAction::Replay { path } => {
+        CliAction::Replay { path, baselines } => {
             let thresholds = crate::config::Thresholds::from_config(&config);
-            crate::recording::run(&path, thresholds, &mut PlainText(stdout().lock()))?;
+            crate::recording::run(
+                &path,
+                thresholds,
+                baselines.as_deref(),
+                &mut PlainText(stdout().lock()),
+            )?;
             return Ok(());
         }
         CliAction::Stream {

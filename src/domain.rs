@@ -222,6 +222,10 @@ pub(crate) struct MetalTelemetry {
     pub(crate) renderer_util: Option<u8>,
     pub(crate) tiler_util: Option<u8>,
     pub(crate) resource_limit: Option<u64>,
+    /// The machine's model identifier (`Mac16,9`, a PC's DMI product
+    /// name): with the chip and RAM, what usual speeds are kept for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_model: Option<String>,
 }
 
 /// macOS's thermal pressure level, as `OSThermalNotification.h` names it.
@@ -364,6 +368,9 @@ pub(crate) enum CorrelationCause {
     DraftAcceptance,
     /// The runtime recomputed requests because its KV cache was full.
     KvPreemption,
+    /// Below the usual speed earlier sessions kept for this work, with
+    /// nothing else unusual: judged against them alone.
+    EarlierSessions,
 }
 
 impl CorrelationCause {
@@ -384,6 +391,7 @@ impl CorrelationCause {
             Self::GpuIdle => "GPU underused",
             Self::DraftAcceptance => "draft acceptance",
             Self::KvPreemption => "KV cache full",
+            Self::EarlierSessions => "below earlier sessions",
         }
     }
 
@@ -399,7 +407,8 @@ impl CorrelationCause {
             | Self::Cpu
             | Self::GpuIdle
             | Self::DraftAcceptance
-            | Self::KvPreemption => Tone::Yellow,
+            | Self::KvPreemption
+            | Self::EarlierSessions => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -473,6 +482,10 @@ pub(crate) struct CorrelationInsight {
     /// The work that usual speed is for (`1 request · 40k context`), or
     /// empty when it is taken over every kind of work.
     pub(crate) usual_for: String,
+    /// When speed is judged against earlier sessions' usual alone and is
+    /// below it, that in one sentence: `This model now generates 31% below
+    /// its usual from earlier sessions at this depth`. Empty otherwise.
+    pub(crate) earlier: String,
 }
 
 /// One slowdown, from the sample where speed first fell to now. The speed

@@ -545,6 +545,9 @@ pub(crate) fn offline_config() -> Config {
             host: Some("127.0.0.1".into()),
             port: Some(port),
         }),
+        // A test that starts the real sampler must not keep usual speeds
+        // in the user's own state folder.
+        baselines: Some(false),
         ..Config::default()
     }
 }

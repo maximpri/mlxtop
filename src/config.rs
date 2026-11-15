@@ -61,6 +61,9 @@ pub(crate) struct Config {
     pub(crate) gpu_warn_exit: Option<u64>,
     /// `false` silences the critical-condition bell and banner.
     pub(crate) alarms: Option<bool>,
+    /// `false` keeps no usual speeds across sessions: the baseline file is
+    /// neither read nor written. Unset keeps them.
+    pub(crate) baselines: Option<bool>,
     pub(crate) journal: Option<JournalConfig>,
 }
 
