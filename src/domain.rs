@@ -684,6 +684,8 @@ pub(crate) struct LlmTelemetry {
     pub(crate) model_facts: crate::model_facts::ModelFacts,
     /// What llama-server says of its slots, sleep and speculative decoding.
     pub(crate) llama: crate::providers::llama::LlamaReadings,
+    /// Timings finished requests reported beside their counts.
+    pub(crate) request_timings: Vec<RequestTiming>,
 }
 
 /// The recording format samples are written in. 1: each sample carries `ts`
@@ -819,6 +821,10 @@ pub(crate) struct Sample {
     /// What llama-server says of its slots, sleep and speculative decoding.
     #[serde(default)]
     pub(crate) llama: crate::providers::llama::LlamaReadings,
+    /// Timings finished requests reported beside their counts: prompt
+    /// speed and model load, matched to `llm_requests` by request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) llm_request_timings: Vec<RequestTiming>,
     pub(crate) llm_active_requests: Option<u64>,
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
@@ -1051,6 +1057,7 @@ impl Default for Sample {
             llm_kv_free_bytes: None,
             llm_preemptions_total: None,
             llama: Default::default(),
+            llm_request_timings: Vec::new(),
             llm_active_requests: None,
             llm_waiting_requests: None,
             llm_model_memory: None,
@@ -1117,4 +1124,29 @@ pub(crate) struct RequestUsage {
     /// runtime reports it. A generating request that stops is stalled.
     pub idle_for: Option<Duration>,
     pub observed_at: Option<SystemTime>,
+}
+
+/// What a finished request's runtime reported of its timing beyond its
+/// counts: how fast it read the prompt, and how long the request waited for
+/// the model to load. It names its request as `RequestUsage` does.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct RequestTiming {
+    pub provider: String,
+    pub model: String,
+    pub id: String,
+    /// Prompt tokens per second over the part of the prompt the runtime
+    /// computed (cached tokens are not read again).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_tps: Option<f64>,
+    /// Milliseconds the request waited for the runtime to load the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_ms: Option<u64>,
+}
+
+impl RequestTiming {
+    /// Whether this is the timing of `request`.
+    pub(crate) fn belongs_to(&self, request: &RequestUsage) -> bool {
+        self.id == request.id && self.provider == request.provider && self.model == request.model
+    }
 }

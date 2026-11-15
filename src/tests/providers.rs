@@ -336,14 +336,12 @@ fn completed_request_speeds_use_decode_timing_and_reject_missing_or_invalid_data
     );
     value["timings"] = json!({"output_tokens_per_second":-1});
     assert_eq!(parse_usage(&value).unwrap().requests[0].output_tps, None);
-    // llama-server's own completion timings, written as the client received them.
+    // llama-server's own completion timings, written as the client received
+    // them, whatever runtime sent them: Splash and proxies send the same shape.
     value["timings"] = json!({"predicted_per_second":41.5, "cache_n":60});
     let request = parse_usage(&value).unwrap().requests.remove(0);
-    assert_eq!(
-        request.output_tps, None,
-        "only llama.cpp records use its names"
-    );
-    assert_eq!(request.cached, None);
+    assert_eq!(request.output_tps, Some(41.5));
+    assert_eq!(request.cached, Some(60));
     let mut value = record(
         "llama.cpp",
         json!({"prompt_tokens":100,"completion_tokens":80}),
@@ -1471,4 +1469,170 @@ fn a_sleeping_llama_server_is_never_asked_for_its_slots() {
     assert_eq!(busy.model.as_deref(), Some("tiny.gguf"));
     drop(std::net::TcpStream::connect(("127.0.0.1", port)));
     server.join().unwrap();
+}
+
+/// A chat completion's final reply from llama-server, as
+/// server-task.cpp@v1.0.0 `usage_json_oaicompat` and server-common.cpp@v1.0.0
+/// `server_slot_stats::to_json` write its counts and `timings` (`draft_n`
+/// only when a draft ran), copied into a usage record as a client receives it.
+fn llama_server_record(provider: &str) -> Value {
+    let mut value = record(
+        provider,
+        json!({"completion_tokens": 512, "prompt_tokens": 30720, "total_tokens": 31232,
+               "prompt_tokens_details": {"cached_tokens": 24576}}),
+    );
+    value["timings"] = json!({
+        "cache_n": 24576, "prompt_n": 6144, "prompt_ms": 7680.0,
+        "prompt_per_token_ms": 1.25, "prompt_per_second": 800.0,
+        "predicted_n": 512, "predicted_ms": 12800.0,
+        "predicted_per_token_ms": 25.0, "predicted_per_second": 40.0,
+        "draft_n": 600, "draft_n_accepted": 420
+    });
+    value
+}
+
+#[test]
+fn llama_server_timings_give_prefill_speed_whatever_runtime_sent_them() {
+    for provider in ["llama.cpp", "splash", "omlx", "tensorfold"] {
+        let usage = parse_usage(&llama_server_record(provider)).unwrap();
+        let request = &usage.requests[0];
+        assert_eq!(request.output_tps, Some(40.0), "{provider}");
+        assert_eq!(request.cached, Some(24576), "{provider}");
+        assert_eq!(
+            usage.request_timings,
+            [RequestTiming {
+                provider: request.provider.clone(),
+                model: "test-model".into(),
+                id: "req-1".into(),
+                prefill_tps: Some(800.0),
+                load_ms: None,
+            }],
+            "{provider}"
+        );
+        assert!(usage.request_timings[0].belongs_to(request));
+    }
+    // The cached count comes from the timings when the usage lacks it.
+    let mut value = llama_server_record("splash");
+    value["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("prompt_tokens_details");
+    assert_eq!(parse_usage(&value).unwrap().requests[0].cached, Some(24576));
+    // A speed of zero means the server had no time to divide by.
+    value["timings"]["prompt_per_second"] = json!(0.0);
+    assert!(parse_usage(&value).unwrap().request_timings.is_empty());
+    value["timings"]["prompt_per_second"] = json!(-5.0);
+    assert!(parse_usage(&value).unwrap().request_timings.is_empty());
+    // mlxtop's own recorder field wins.
+    value["timings"]["prompt_tokens_per_second"] = json!(640.5);
+    assert_eq!(
+        parse_usage(&value).unwrap().request_timings[0].prefill_tps,
+        Some(640.5)
+    );
+}
+
+#[test]
+fn ollama_reports_prefill_speed_over_uncached_tokens_and_its_model_load() {
+    // A final `/api/chat` reply: `api.Metrics` in types.go@v0.40.16, every
+    // duration in nanoseconds.
+    let value = record(
+        "ollama",
+        json!({"total_duration": 9_500_000_000_u64, "load_duration": 3_250_000_000_u64,
+               "prompt_eval_count": 2048, "prompt_eval_cached_count": 1024,
+               "prompt_eval_duration": 2_000_000_000_u64,
+               "eval_count": 100, "eval_duration": 4_000_000_000_u64}),
+    );
+    let usage = parse_usage(&value).unwrap();
+    assert_eq!(usage.requests[0].output_tps, Some(25.0));
+    let timing = &usage.request_timings[0];
+    // 1,024 tokens computed in two seconds; the cached half was not read.
+    assert_eq!(timing.prefill_tps, Some(512.0));
+    assert_eq!(timing.load_ms, Some(3250));
+    // A warm model still reports its few milliseconds of hand-over.
+    let mut warm = value.clone();
+    warm["usage"]["load_duration"] = json!(12_400_000);
+    assert_eq!(
+        parse_usage(&warm).unwrap().request_timings[0].load_ms,
+        Some(12)
+    );
+    // A prompt served whole from the cache was not timed; a bad duration
+    // is not a duration.
+    let mut cached = value.clone();
+    cached["usage"]["prompt_eval_cached_count"] = json!(2048);
+    assert_eq!(
+        parse_usage(&cached).unwrap().request_timings[0].prefill_tps,
+        None
+    );
+    for duration in [json!(0), json!(-1), json!(1.5), json!("2s")] {
+        let mut bad = value.clone();
+        bad["usage"]["prompt_eval_duration"] = duration.clone();
+        bad["usage"]["load_duration"] = duration;
+        assert!(parse_usage(&bad).unwrap().request_timings.is_empty());
+    }
+    // Ollama's names mean nothing from another runtime.
+    let mut other = value.clone();
+    other["provider"] = json!("mlx-lm");
+    assert!(parse_usage(&other).unwrap().request_timings.is_empty());
+}
+
+#[test]
+fn lm_studio_reports_a_model_load_only_after_one() {
+    // A `/api/v1/chat` reply's `stats`: `model_load_time_seconds` is sent
+    // only when the model was not already loaded (LM Studio REST chat).
+    let mut value = json!({"provider": "lmstudio", "request_id": "r", "observed_at": 1700000000,
+        "stats": {"input_tokens": 40, "total_output_tokens": 10, "tokens_per_second": 25.0,
+                  "time_to_first_token_seconds": 4.75, "model_load_time_seconds": 4.5}});
+    let usage = parse_usage(&value).unwrap();
+    assert_eq!(usage.request_timings[0].load_ms, Some(4500));
+    assert_eq!(usage.request_timings[0].prefill_tps, None);
+    assert_eq!(usage.requests[0].ttft_ms, Some(4750));
+    value["stats"]
+        .as_object_mut()
+        .unwrap()
+        .remove("model_load_time_seconds");
+    assert!(parse_usage(&value).unwrap().request_timings.is_empty());
+    value["stats"]["model_load_time_seconds"] = json!(-1);
+    assert!(parse_usage(&value).unwrap().request_timings.is_empty());
+    // The recorder's own field, from any runtime.
+    let mut recorded = record("mlx-lm", json!({"prompt_tokens": 10}));
+    recorded["timings"] = json!({"model_load_ms": 1800});
+    assert_eq!(
+        parse_usage(&recorded).unwrap().request_timings[0].load_ms,
+        Some(1800)
+    );
+}
+
+#[test]
+fn usage_files_keep_each_request_s_timing_with_its_last_record() {
+    let dir = TempDir::new("usage-timings");
+    let mut first = llama_server_record("llama.cpp");
+    first["request_id"] = json!("a");
+    let mut second = record("llama.cpp", json!({"prompt_tokens": 50}));
+    second["request_id"] = json!("b");
+    second["observed_at"] = json!(1700000001);
+    // `a` written again without its timings: the last record wins.
+    let mut again = record("llama.cpp", json!({"prompt_tokens": 30720}));
+    again["request_id"] = json!("a");
+    again["observed_at"] = json!(1700000002);
+    let mut third = llama_server_record("llama.cpp");
+    third["request_id"] = json!("c");
+    third["observed_at"] = json!(1700000003);
+    let path = dir.write(
+        "usage.jsonl",
+        &format!("{first}\n{second}\n{again}\n{third}\n"),
+    );
+    let usage = read_usage_file(&path, Some("llama.cpp")).unwrap();
+    let ids: Vec<_> = usage.requests.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["b", "a", "c"]);
+    assert_eq!(usage.request_timings.len(), 1);
+    assert_eq!(usage.request_timings[0].id, "c");
+    // Beside live slots, the recorder's requests bring their timings.
+    let mut adapter = diagnostic_adapter("llama.cpp", 1);
+    adapter.selected(None);
+    adapter.usage_file = Some(path);
+    adapter.cached = llama::parse_llama_slots(&json!([{"is_processing": false}]));
+    let merged = adapter.with_usage().unwrap();
+    assert_eq!(merged.source, TelemetrySource::Live);
+    assert_eq!(merged.requests.len(), 3);
+    assert_eq!(merged.request_timings.len(), 1);
 }

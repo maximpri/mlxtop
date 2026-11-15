@@ -974,6 +974,17 @@ A later observation without timing retains the previous speed and its original
 age, labeled `LAST`. Request speed uses the existing prompt metadata rows;
 small panels prioritize it over the clock and optional comparison details.
 
+A completed request whose runtime reported more of its timing adds it to the
+same line, each detail shown whole or not at all:
+**OUT 512 · AVG 40.0 tok/s · MODEL LOAD 3.2s · PREFILL 812 tok/s**.
+`MODEL LOAD` is how long the request waited for the model to load (Ollama's
+`load_duration`, LM Studio's `model_load_time_seconds`); a load under a second
+is not shown, since Ollama reports a few milliseconds even for a loaded model.
+`PREFILL` is how fast the prompt was read, over the tokens the runtime
+computed rather than took from its cache (llama-server's `prompt_per_second`,
+Ollama's `prompt_eval_duration`); a request that computed fewer than 512 prompt
+tokens, one batch, shows none, since fixed costs dominate its time.
+
 Prompt counts, output-speed observations, chart samples and Journal events are
 kept in memory for this mlxtop session. After a restart, the prompt panel waits
 for new requests; the server's aggregate averages may still be available.
@@ -983,9 +994,11 @@ per-request `decode_tps`. These rates cover output generation. Once an oMLX
 request disappears between polls, the retained sample is not a final average.
 KoboldCpp supplies `last_eval_speed`. A completed Ollama usage record can supply
 `eval_count` and `eval_duration` (nanoseconds); their ratio yields output tok/s.
-Total request duration and prompt-evaluation duration are not decode timing.
-llama.cpp's live requests come from `/slots` (see Provider endpoints): each
-answering request's own speed is its output's growth between samples.
+Total request duration and prompt-evaluation duration are not decode timing;
+prompt-evaluation duration over the uncached prompt tokens is the request's
+`PREFILL` speed. llama.cpp's live requests come from `/slots` (see Provider
+endpoints): each answering request's own speed is its output's growth between
+samples.
 
 
 The colored bar chart reads older to newer, with the selected request marked
@@ -1083,10 +1096,14 @@ existing usage JSONL envelope:
 ```
 
 `output_tokens_per_second` is an optional finite, nonnegative completed-request
-output average. It does not change the live generation chart. A `llama.cpp`
-record may instead carry llama-server's own `timings` as the client received
-them: `predicted_per_second` is read as the output speed and `cache_n` as the
-cached prompt tokens.
+output average. It does not change the live generation chart. The envelope may
+also carry `prompt_tokens_per_second`, the prompt's speed over the tokens the
+runtime computed, and `model_load_ms`, how long the request waited for the
+model to load; prompt load shows them as `PREFILL` and `MODEL LOAD`. A record
+of any runtime may instead carry llama-server's own `timings` as the client
+received them (Splash and proxies send the same shape): `predicted_per_second`
+is read as the output speed, `prompt_per_second` as the prompt speed and
+`cache_n` as the cached prompt tokens.
 
 Use a nonnegative integer measured from request dispatch to the first generated
 token. Add this field alongside `provider`, `request_id`, `observed_at` and
@@ -1368,8 +1385,9 @@ Copy only usage counters from the response, with the required envelope above:
 | --- | --- |
 | OpenAI-compatible usage, including MLX-LM | `usage.prompt_tokens`, `usage.completion_tokens`, optional `usage.prompt_tokens_details.cached_tokens` |
 | Responses-style usage | `usage.input_tokens`, `usage.output_tokens`, optional `usage.input_tokens_details.cached_tokens` |
-| Ollama native | `prompt_eval_count`, `eval_count`, optional `prompt_eval_cached_count`; decode speed from `eval_count / eval_duration` (nanoseconds) |
-| LM Studio native | `stats.input_tokens`, `stats.total_output_tokens`, `stats.tokens_per_second`, `stats.time_to_first_token_seconds`; `model_instance_id` is accepted as the model |
+| Ollama native | `prompt_eval_count`, `eval_count`, optional `prompt_eval_cached_count`; decode speed from `eval_count / eval_duration`, prompt speed from the uncached prompt tokens over `prompt_eval_duration`, model load from `load_duration` (all nanoseconds) |
+| LM Studio native | `stats.input_tokens`, `stats.total_output_tokens`, `stats.tokens_per_second`, `stats.time_to_first_token_seconds`, `stats.model_load_time_seconds` (sent only after a load); `model_instance_id` is accepted as the model |
+| llama-server `timings`, from any runtime | `predicted_per_second`, `prompt_per_second`, `cache_n` |
 
 For MLX-LM streaming, request `stream_options: {"include_usage": true}` and copy
 the final usage chunk. Other streaming APIs may likewise require usage to be

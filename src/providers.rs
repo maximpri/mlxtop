@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Read-only provider adapters. Only counters and identifiers cross into samples.
-use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
+use crate::domain::{LlmTelemetry, RequestTiming, RequestUsage, TelemetrySource};
 use crate::json::{json_value, request_rate};
 use crate::runtime_diagnostics::{default_port, default_ports, ProbeIssue, RuntimeReport};
 use serde_json::Value;
@@ -614,6 +614,7 @@ impl Adapter {
                 // Completed prompt counts belong in request history. Never attach
                 // them to the output/queue of an unrelated active request.
                 native.requests.extend(reported.requests);
+                native.request_timings.extend(reported.request_timings);
                 Some(native)
             }
             (native, reported) => reported.or(native),
@@ -793,6 +794,10 @@ fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
     })
 }
 
+/// One finished request's usage record: its counts, and the timings its
+/// runtime sent with them. llama-server's own `timings` are read whatever
+/// runtime the record names, since Splash and proxies send the same shape;
+/// Ollama's and LM Studio's native fields only from those runtimes.
 fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
     if record.get("done").and_then(Value::as_bool) == Some(false) {
         return None;
@@ -808,6 +813,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .get("usage")
         .or_else(|| record.get("stats"))
         .unwrap_or(record);
+    let timings = record.get("timings");
     let prompt = counter(usage, &["prompt_tokens"])
         .or_else(|| counter(usage, &["input_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_count"]))?;
@@ -819,24 +825,18 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         .or_else(|| counter(usage, &["input_tokens_details", "cached_tokens"]))
         .or_else(|| counter(usage, &["cached_tokens"]))
         .or_else(|| counter(usage, &["prompt_eval_cached_count"]))
-        .or_else(|| {
-            (provider == "llama.cpp")
-                .then(|| counter(record, &["timings", "cache_n"]))
-                .flatten()
-        })
+        .or_else(|| timings.and_then(|timings| counter(timings, &["cache_n"])))
         .filter(|n| *n <= prompt);
     let model = identifier(record, "model")
         .or_else(|| identifier(record, "model_instance_id"))
         .unwrap_or_else(|| "unknown".into());
-    let output_tps = record
-        .get("timings")
+    let output_tps = timings
         .and_then(|timings| {
-            request_rate(timings, &["output_tokens_per_second"]).or_else(|| {
-                // llama-server's own completion timings.
-                (provider == "llama.cpp")
-                    .then(|| request_rate(timings, &["predicted_per_second"]))
-                    .flatten()
-            })
+            // mlxtop's own field, else llama-server's completion timings.
+            request_rate(
+                timings,
+                &["output_tokens_per_second", "predicted_per_second"],
+            )
         })
         .or_else(|| {
             (provider == "LM Studio")
@@ -853,6 +853,57 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             let count = counter(usage, &["eval_count"])?;
             Some(count as f64 / duration as f64 * 1_000_000_000.0)
         });
+    // How fast the prompt was read, over the tokens the runtime computed:
+    // mlxtop's own field, llama-server's, or Ollama's prompt time
+    // (nanoseconds) over its uncached tokens. A speed of zero is a divisor
+    // the runtime did not have, not a measurement.
+    let prefill_tps = timings
+        .and_then(|timings| {
+            request_rate(timings, &["prompt_tokens_per_second", "prompt_per_second"])
+        })
+        .or_else(|| {
+            if provider != "Ollama" {
+                return None;
+            }
+            let duration =
+                counter(usage, &["prompt_eval_duration"]).filter(|duration| *duration > 0)?;
+            let computed = prompt.saturating_sub(cached.unwrap_or(0));
+            Some(computed as f64 / duration as f64 * 1_000_000_000.0)
+        })
+        .filter(|speed| *speed > 0.0);
+    // How long the request waited for the model to load: mlxtop's own field,
+    // Ollama's `load_duration` (nanoseconds), or LM Studio's
+    // `model_load_time_seconds`, which it sends only after a load.
+    let load_ms = timings
+        .and_then(|timings| counter(timings, &["model_load_ms"]))
+        .or_else(|| {
+            // Ollama leaves out a zero duration: one that is sent is a load.
+            (provider == "Ollama")
+                .then(|| {
+                    counter(usage, &["load_duration"])
+                        .filter(|nanos| *nanos > 0)
+                        .map(|nanos| nanos / 1_000_000)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            (provider == "LM Studio")
+                .then(|| {
+                    request_rate(usage, &["model_load_time_seconds"])
+                        .and_then(native::seconds_to_ms)
+                })
+                .flatten()
+        });
+    let request_timings = (prefill_tps.is_some() || load_ms.is_some())
+        .then(|| RequestTiming {
+            provider: provider.into(),
+            model: model.clone(),
+            id: id.clone(),
+            prefill_tps,
+            load_ms,
+        })
+        .into_iter()
+        .collect();
     Some(LlmTelemetry {
         source: TelemetrySource::Report,
         observed_at: Some(observed_at),
@@ -861,6 +912,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
         status: Some("last result".into()),
         prompt_tokens: Some(prompt),
         output_tokens: output,
+        request_timings,
         requests: vec![RequestUsage {
             provider: provider.into(),
             model,
@@ -912,7 +964,9 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
         return None;
     }
     let mut latest: Option<LlmTelemetry> = None;
-    let mut requests = Vec::new();
+    // Each request with the timing its own record carried, so a request
+    // written twice keeps its last record's timing too.
+    let mut requests: Vec<(RequestUsage, Option<RequestTiming>)> = Vec::new();
     for line in bytes[start..end].split(|b| *b == b'\n') {
         let Some(record) = serde_json::from_slice::<Value>(line)
             .ok()
@@ -923,7 +977,14 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
         if provider.is_some_and(|selected| record.provider.as_deref() != Some(selected)) {
             continue;
         }
-        requests.extend(record.requests.clone());
+        requests.extend(record.requests.iter().map(|request| {
+            let timing = record
+                .request_timings
+                .iter()
+                .find(|timing| timing.belongs_to(request))
+                .cloned();
+            (request.clone(), timing)
+        }));
         if latest
             .as_ref()
             .is_none_or(|old| record.observed_at >= old.observed_at)
@@ -934,11 +995,11 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
     let mut latest = latest?;
     let selected = latest.provider.as_deref();
     let mut seen = std::collections::HashSet::new();
-    latest.requests = requests
+    let mut kept: Vec<_> = requests
         .into_iter()
         .rev()
-        .filter(|request| Some(request.provider.as_str()) == selected)
-        .filter(|request| {
+        .filter(|(request, _)| Some(request.provider.as_str()) == selected)
+        .filter(|(request, _)| {
             seen.insert((
                 request.provider.clone(),
                 request.model.clone(),
@@ -947,7 +1008,12 @@ fn read_usage_file(path: &Path, provider: Option<&str>) -> Option<LlmTelemetry> 
         })
         .take(128)
         .collect();
-    latest.requests.reverse();
+    kept.reverse();
+    latest.request_timings = kept
+        .iter()
+        .filter_map(|(_, timing)| timing.clone())
+        .collect();
+    latest.requests = kept.into_iter().map(|(request, _)| request).collect();
     Some(latest)
 }
 

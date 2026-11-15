@@ -668,6 +668,8 @@ impl Collector {
         sample.llm_model_size = llm_stats.and_then(|stats| stats.model_size);
         sample.model = llm_stats.map_or_else(Default::default, |stats| stats.model_facts.clone());
         sample.llama = prefill_progress.map_or_else(Default::default, |stats| stats.llama.clone());
+        sample.llm_request_timings =
+            llm_stats.map_or_else(Vec::new, |stats| stats.request_timings.clone());
         if process_snapshot.hosted_splash_cpu.is_some() {
             apply_hosted_splash(&mut sample, self.thresholds);
         }
