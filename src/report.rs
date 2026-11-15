@@ -94,6 +94,9 @@ pub(crate) fn write_static(
         for line in gpu_dashboard::static_lines(&sample.gpus, thresholds) {
             writeln!(out, "{line}")?;
         }
+        for line in crate::gpu_findings::evidence(sample) {
+            writeln!(out, "GPU LIMIT    {line}")?;
+        }
     } else if platform == Platform::MacOs {
         writeln!(
             out,
@@ -272,6 +275,8 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
         ));
     }
     lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
+    // What holds each card back, in words: never a finding of its own.
+    lines.extend(crate::gpu_findings::evidence(sample));
     lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));
     lines

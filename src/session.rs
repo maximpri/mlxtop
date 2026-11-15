@@ -24,8 +24,12 @@ pub(crate) struct Session {
     pub(crate) prefilling: f64,
     /// Tokens written, from the measured speed over each interval.
     pub(crate) tokens: f64,
-    /// Energy the machine drew while the model worked, in joules.
+    /// Energy drawn while the model worked, in joules: the whole machine's
+    /// where the OS reports it, else the GPUs'.
     pub(crate) joules: f64,
+    /// Some of that energy is the GPUs' own power reading, where no reading
+    /// of the whole machine exists (Linux and Windows).
+    pub(crate) gpu_power: bool,
     /// Seconds of work a slowdown or stall cost, by its reason: the share
     /// of each interval the model ran below its usual speed.
     pub(crate) lost: BTreeMap<&'static str, f64>,
@@ -64,8 +68,17 @@ impl Session {
             self.prefilling += seconds;
         }
         if writing || stalled || reading {
-            if let Some(milliwatts) = sample.system_power_mw {
+            // The whole machine where the OS reports it (macOS), else the
+            // power the GPUs report: every card's, or none.
+            let power = sample
+                .system_power_mw
+                .map(|milliwatts| (milliwatts, false))
+                .or_else(|| {
+                    crate::gpu::board_power_mw(&sample.gpus).map(|milliwatts| (milliwatts, true))
+                });
+            if let Some((milliwatts, gpu)) = power {
                 self.joules += milliwatts as f64 / 1000.0 * seconds;
+                self.gpu_power |= gpu;
             }
         }
         if !insight.is_material_drop() {
@@ -184,8 +197,21 @@ pub(crate) fn lines(
         });
     }
     if let Some(joules) = session.joules_per_token() {
+        // A GPU's reading leaves out the rest of the machine; an APU's
+        // covers its CPU cores as well.
+        let apu = sample
+            .gpus
+            .iter()
+            .any(|gpu| gpu.unified && gpu.vendor == crate::gpu::Vendor::Amd);
+        let scope = if !session.gpu_power {
+            ""
+        } else if apu {
+            " · APU power only"
+        } else {
+            " · GPU power only"
+        };
         lines.push(format!(
-            "Energy: {:.2} J per token written · {:.1} Wh while working",
+            "Energy: {:.2} J per token written · {:.1} Wh while working{scope}",
             joules,
             session.joules / 3600.0
         ));

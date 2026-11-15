@@ -55,9 +55,10 @@ one line, and the host charts get its rows.
 **Memory** says what holds memory and how close it is to a limit, with the
 OS **PRESSURE** label in the reading slot. It is laid out as the hardware is.
 
-Where the GPU has no memory of its own (Apple Silicon, and NVIDIA's
-integrated GPUs such as DGX Spark and Jetson, which report no device memory)
-there is one pool, and one bar:
+Where the GPU has no memory of its own (Apple Silicon, NVIDIA's integrated
+GPUs such as DGX Spark and Jetson, which report no device memory, and AMD
+APUs such as Strix Halo, whose model lives in GTT) there is one pool, and one
+bar:
 
 - **RAM** is memory in use (wired, app and compressed) against all of RAM,
   with the file cache as the bar's last segment. What the GPU holds is part
@@ -68,9 +69,11 @@ there is one pool, and one bar:
 - Under the bar: how near GPU memory is to its limit (`GPU at 75% of 32.0
   GiB limit`) and what is left for a model to grow into. That is free memory
   plus the cache, which the OS gives back on demand, or the room under the
-  GPU limit where that is less (`2.0 GiB to GPU limit`). An integrated
-  NVIDIA GPU, whose part of RAM the driver does not count, reads `GPU shares
-  this RAM`.
+  GPU limit where that is less (`2.0 GiB to GPU limit`). On Linux the GPU's
+  part is what an AMD APU holds (its BIOS carve-out and GTT), or what the
+  processes on an integrated NVIDIA GPU hold (`nvidia-smi
+  --query-compute-apps`); where that count is missing the line reads `GPU
+  shares this RAM`.
 - Then each part's size. A narrow panel wraps them onto a second row; it
   does not drop the sizes.
 - **By app** names the runtime's own footprint and the largest other app.
@@ -344,34 +347,68 @@ NVIDIA GPU or the amdgpu driver exposes at least one AMD card, and on Windows
 when `nvidia-smi` detects an NVIDIA GPU. macOS and systems without detected
 cards use the standard Overview. Overview's **GPU
 DEVICES** panel lists every detected card with its index, name,
-utilization, VRAM used/total and temperature. Wide terminals add a VRAM bar
-and a textual load state. Use `[` / `]` to select a card; when the list is
-taller than the panel, the selected card scrolls into view and the footer
-shows the visible range. At 80×24, status, throughput, prompt sizes, GPU readings
-and prompt history remain visible; historical charts return with more space.
+utilization, VRAM used/total and temperature. Wider terminals add, in
+order, a textual load state (from 104 columns), the card's power against its
+cap (`183/450 W`, from 114), a VRAM bar (from 124), the graphics clock
+against its maximum (`2520/3105 MHz`) and memory activity (`MEM BUSY`, the
+share of time the card's memory was read or written; near 100% while
+decoding means memory bandwidth is the limit) from 154, and the PCIe link
+the card and its slot allow (`Gen4 x16`) from 184. A column appears only
+when a card reports its reading, and a card without it shows `—`. Use `[` /
+`]` to select a card; when the list is taller than the panel, the selected
+card scrolls into view and the footer shows the visible range. At 80×24,
+status, throughput, prompt sizes, GPU readings and prompt history remain
+visible; historical charts return with more space. The **GPU** panel's
+bottom edge adds what the cards draw together against their caps, and a
+lone card's memory activity, while the edge has room.
+
+Power, clocks, memory activity and the link come from an `nvidia-smi
+--query-gpu` call of their own, apart from the core counters and the
+clock-limit reasons (`power.draw`,
+`enforced.power.limit`, `clocks.sm`, `clocks.max.sm`, `utilization.memory`
+and the current and maximum `pcie.link.gen` and `pcie.link.width`): a field
+a driver does not know fails the whole query, and the core readings must not
+go with it. It runs every five seconds and its readings are kept between,
+like a Mac's power reading; a query that fails outright is tried again a
+minute later. `[N/A]`, `[Not Supported]` and anything else that is not a
+number read as unknown, field by field. On Linux, `nvidia-smi
+--query-compute-apps` lists the GPU memory each process holds, but only
+where that answers a question: on an integrated GPU, and on a card at 94% of
+its VRAM or more, where Diagnostics names who holds it.
 
 AMD cards are read on Linux from the amdgpu driver's sysfs files under
 `/sys/class/drm/card*/device`, with no ROCm install or extra tool:
-`mem_info_vram_used` and `mem_info_vram_total`, `gpu_busy_percent`, and the
-`edge` temperature from the card's hwmon sensors (the junction sensor runs
-hotter; edge is the closest match to the core temperature NVIDIA reports).
-Names come from the driver's `product_name` when present, otherwise from the
-system's `pci.ids` (`AMD Radeon RX 9070/9070 XT/9070 GRE`). AMD cards follow
-NVIDIA cards in the list and are identified as `AMD-` plus the driver's
-`unique_id`, or the PCI slot when the card has none. Integrated GPUs whose
-reported VRAM is under 1 GiB are skipped: that is the BIOS carve-out, and it
-would read as a full card on an idle desktop. Clock-limit reasons are not read
-on AMD, so the STATE column shows load only.
+`mem_info_vram_used` and `mem_info_vram_total`, `gpu_busy_percent`,
+`mem_busy_percent` (memory activity), `mem_info_gtt_used` and
+`mem_info_gtt_total` (system RAM the GPU maps), the top level of
+`pp_dpm_sclk`, and from the card's hwmon sensors the `edge` temperature (the
+junction sensor runs hotter; edge is the closest match to the core
+temperature NVIDIA reports), `power1_average` (or `power1_input`) against
+`power1_cap`, and the graphics clock `freq1_input`. Names come from the
+driver's `product_name` when present, otherwise from the system's `pci.ids`
+(`AMD Radeon RX 9070/9070 XT/9070 GRE`). AMD cards follow NVIDIA cards in the
+list and are identified as `AMD-` plus the driver's `unique_id`, or the PCI
+slot when the card has none. Clock-limit reasons are not read on AMD, so the
+STATE column shows load only.
 
 A card the kernel has put to sleep (`power/runtime_status` other than
 `active`), such as a hybrid laptop's idle dGPU, stays listed with its VRAM
-but without utilization or temperature readings. On kernels before 6.13 those
-two files wake the card when read, so polling them once a second would keep it
-powered and drain the battery; VRAM counters never wake it.
+but without any other reading. On kernels before 6.13 the busy, sensor and
+clock files wake the card when read, so polling them once a second would
+keep it powered and drain the battery; and while it sleeps its VRAM is moved
+to GTT, which would read as its own work. VRAM counters never wake it.
 
-APUs with a large carve-out, such as Strix Halo, are listed as cards. A model
-on such a machine may live in GTT (system memory the GPU maps) rather than in
-the carve-out, so VRAM can read low while the model is loaded.
+An APU (Strix Halo, and the Ryzen APUs before it) has no memory of its own:
+its VRAM is a BIOS carve-out of system RAM, and a model on it lives mostly in
+GTT. It is recognised by a carve-out under 1 GiB, or by the northbridge
+voltage sensor (`in1_label` = `vddnb`) amdgpu gives APUs alone, so a large
+carve-out is recognised too. Its memory reads as the RAM it holds, carve-out
+and GTT together, against the most it may hold (`RAM USED / LIMIT`, `58.4/112.5
+GiB`), and the memory panel draws one pool with the GPU's part inside RAM,
+never a near-empty VRAM meter. An APU is listed only on a machine without a
+card of its own: beside an NVIDIA or AMD card it drives the desktop, as
+before. Its power reading covers the whole chip, CPU cores included, and
+amdgpu offers APUs no memory activity and, on most, no power cap.
 
 Cards are tracked by UUID, following [NVIDIA's guidance on stable device
 identity](https://docs.nvidia.com/deploy/nvidia-smi/), so identical model names remain distinct and a
@@ -389,8 +426,9 @@ the per-card fields; the current Overview layout is described above.
 
 VRAM is shown separately for each card; any **VRAM sum** in the summary is an
 inventory total, not a shared allocation pool. `--once` lists all cards and
-their UUIDs without pagination. These are physical-device readings, not
-per-process measurements or a breakdown of MIG instances. Renderer/tiler splits
+their UUIDs without pagination, with every reading each card gives. These
+are physical-device readings; per-process memory is read only where it
+answers a question (above), and MIG instances are not broken down. Renderer/tiler splits
 and core counts are Apple-only and stay unavailable. Thermals come from
 `/sys/class/thermal` (plus the NVIDIA or AMD card temperature when available).
 
@@ -528,7 +566,31 @@ still shows utilization, VRAM and temperature. AMD cards report no
 clock-limit reasons, so on AMD the findings are placement and VRAM only. On Windows a full card may
 spill into shared system memory, which the driver does not report; the
 finding says so. Offload is not reported for a remote runtime, whose
-placement says nothing about local cards.
+placement says nothing about local cards. An APU's memory is RAM, so it
+never reads as `VRAM full`.
+
+What else holds a card back is evidence, said in words in Diagnostics (`d`)
+and under `GPU LIMIT` in `--once`, never a finding or a colour of its own:
+
+- a busy card's clock-limit reason, with its power against the cap or its
+  temperature, and its clock (`GPU 0 clocks limited by power cap · 448/450 W ·
+  2010/3105 MHz`);
+- a busy card's clock under two thirds of its maximum with no reason given;
+- a busy card's PCIe link below what it and its slot allow (an idle card
+  slows its link on purpose);
+- who holds a card's memory, where that was read (`GPU 0 memory by process:
+  ollama (77) 18.0 GiB · pid 912 4.0 GiB`);
+- the system RAM (GTT) an AMD card with VRAM of its own holds beyond 1 GiB of
+  staging buffers: a model spilling out of VRAM.
+
+A thermal slowdown on an NVIDIA card is the thermal input the slowdown
+detector judges, as a Mac's thermal state is: if generation slows while a
+card is held for heat, and it was not while generation ran at its usual
+speed, the slowdown's reason is `thermal limit` and the next step names that
+card's cooling. While generation keeps its speed it is only listed under
+`Unusual:`. A power cap is not that input: compute-heavy work such as a
+prompt read beside the answer reaches it, and that work is the better
+reason.
 
 ### Processes
 
@@ -558,7 +620,10 @@ that a corresponding process exists on the machine running mlxtop.
 worked, the speed each cause cost, where requests' time went (queue, prompt,
 answer) with the slowest answers, the time the prompt cache saved and the
 energy per token. The same summary is printed when mlxtop exits, if the model
-did any work.
+did any work. Energy is the whole machine's power where macOS reports it;
+on Linux and Windows it is the power every GPU reports (none if one card
+gives no reading), labelled `GPU power only`, or `APU power only` for an AMD
+APU, whose reading covers its CPU cores too.
 
 ### Journal
 
@@ -1279,7 +1344,9 @@ looks smaller than the whole.
 
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 `ioreg`, `notifyutil`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
-`/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present),
+`/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present:
+the core counters and clock-limit reasons each poll, power, clocks and links
+every five seconds, and per-process GPU memory where described above),
 the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for

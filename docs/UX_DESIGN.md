@@ -138,9 +138,14 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   request IDs or raw payloads in Overview; use Journal for request detail.
 - For NVIDIA devices, put a compact per-card comparison directly below the
   operational summary. Preserve utilization, VRAM used/total and temperature
-  on narrow terminals; add load state and a VRAM bar when width permits. Use
+  on narrow terminals; add load state and a VRAM bar when width permits, then
+  power against its cap, clock against its maximum, memory activity and the
+  PCIe link, each only when a card reports it. A GPU without memory of its
+  own (an AMD APU, DGX Spark) shows the RAM it holds, never a VRAM meter. Use
   `[` / `]` to select cards and reveal overflow, with the visible range labeled.
   Keep card identities distinct and label the combined utilization `GPU max`.
+  What holds a card back (its power cap, a low clock, a slow link, who holds
+  its memory) is said in Diagnostics, never painted.
 - At narrower widths, remove secondary detail before clipping primary values.
   Keep status, throughput, request sizes and resource readings available. Avoid wrapping chart
   headers or allowing long identifiers to displace readings.

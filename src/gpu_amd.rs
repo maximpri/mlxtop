@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 //! Per-device AMD counters from the amdgpu kernel driver's sysfs files.
 //! Collected on Linux only, without extra tools: the driver publishes VRAM,
-//! utilization and temperatures under `/sys/class/drm/card*/device`.
+//! GTT, utilization, memory activity, power, clocks and temperatures under
+//! `/sys/class/drm/card*/device`.
 
-use crate::gpu::{Device, Vendor};
+use crate::gpu::{Device, Limits, Vendor};
 use crate::host::Host;
 use std::path::{Path, PathBuf};
 
 const DRM: &str = "/sys/class/drm";
 const AMD_VENDOR: &str = "0x1002";
-/// Integrated GPUs report their small BIOS carve-out as VRAM; it would read
-/// as a full card on an idle desktop. Discrete cards and large carve-outs pass.
+/// A dedicated card has at least this much VRAM. Less is an integrated GPU's
+/// BIOS carve-out of system RAM.
 const MIN_VRAM: u64 = 1 << 30;
 /// pci.ids locations on Debian/Ubuntu/Fedora and Arch, tried in order.
 const PCI_IDS: [&str; 2] = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"];
@@ -21,6 +22,14 @@ pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
     if !cfg!(target_os = "linux") {
         return Vec::new();
     }
+    cards(host, previous)
+}
+
+/// `collect` on any host. An APU (Strix Halo and the like) is marked
+/// `unified`: its VRAM is a carve-out of system RAM, and a model on it lives
+/// mostly in GTT, the system RAM the GPU maps. Its memory is then the RAM it
+/// holds, carve-out and GTT together, never a near-empty VRAM meter.
+pub(crate) fn cards(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
     let mut cards: Vec<PathBuf> = host
         .read_dir(Path::new(DRM))
         .into_iter()
@@ -37,16 +46,47 @@ pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
             continue;
         };
         let total = number(host, &dev.join("mem_info_vram_total"));
-        if total.is_some_and(|total| total < MIN_VRAM) {
-            continue;
-        }
-        let used = number(host, &dev.join("mem_info_vram_used"));
+        let used = number(host, &dev.join("mem_info_vram_used"))
+            .filter(|used| total.is_none_or(|total| *used <= total));
         let awake = awake(host, &dev);
+        // Every sensor and the GTT counters are read only while the card is
+        // awake: see `awake`. While a card sleeps its VRAM is evicted to GTT,
+        // which would read as the card's own work.
+        let hwmon = if awake {
+            host.read_dir(&dev.join("hwmon"))
+        } else {
+            Vec::new()
+        };
+        // amdgpu gives the northbridge voltage sensor to APUs alone, so a
+        // large carve-out is recognised as well as the usual small one.
+        let unified = total.is_some_and(|total| total < MIN_VRAM)
+            || hwmon
+                .iter()
+                .any(|dir| read(host, &dir.join("in1_label")).as_deref() == Some("vddnb"));
         let name = previous
             .iter()
             .find(|gpu| gpu.uuid == uuid)
             .map(|gpu| gpu.name.clone())
             .unwrap_or_else(|| device_name(host, &dev));
+        let mut limits = if awake {
+            readings(host, &dev, &hwmon)
+        } else {
+            Limits::default()
+        };
+        let gtt = |file: &str| awake.then(|| number(host, &dev.join(file))).flatten();
+        let (gtt_used, gtt_total) = (gtt("mem_info_gtt_used"), gtt("mem_info_gtt_total"));
+        if unified {
+            // The carve-out is RAM too: what the GPU holds of RAM is both.
+            limits.ram_used = used
+                .zip(gtt_used)
+                .map(|(vram, gtt)| vram.saturating_add(gtt));
+            limits.ram_limit = total
+                .zip(gtt_total)
+                .map(|(vram, gtt)| vram.saturating_add(gtt));
+        } else {
+            limits.ram_used = gtt_used;
+            limits.ram_limit = gtt_total;
+        }
         devices.push(Device {
             index: devices.len() as u32,
             uuid,
@@ -57,13 +97,58 @@ pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
                 .flatten()
                 .filter(|n| *n <= 100)
                 .map(|n| n as u8),
-            used: used.filter(|used| total.is_none_or(|total| *used <= total)),
-            total,
-            temperature: awake.then(|| temperature(host, &dev)).flatten(),
+            used: used.filter(|_| !unified),
+            total: total.filter(|_| !unified),
+            temperature: awake.then(|| temperature(host, &hwmon)).flatten(),
             throttle_reasons: None,
+            unified,
+            limits,
         });
     }
     devices
+}
+
+/// Memory activity, power against its cap, and the graphics clock against
+/// its top level. APUs report no memory activity and most no power cap.
+fn readings(host: &dyn Host, dev: &Path, hwmon: &[PathBuf]) -> Limits {
+    let sensor = |file: &str| hwmon.iter().find_map(|dir| number(host, &dir.join(file)));
+    // Microwatts; newer cards report the instant reading only.
+    let milliwatts = |microwatts: u64| (microwatts > 0).then(|| (microwatts + 500) / 1000);
+    Limits {
+        power_mw: sensor("power1_average")
+            .or_else(|| sensor("power1_input"))
+            .and_then(milliwatts),
+        power_cap_mw: sensor("power1_cap").and_then(milliwatts),
+        // Hertz.
+        clock_mhz: sensor("freq1_input")
+            .map(|hertz| (hertz + 500_000) / 1_000_000)
+            .and_then(|mhz| u32::try_from(mhz).ok())
+            .filter(|mhz| *mhz > 0),
+        clock_max_mhz: read(host, &dev.join("pp_dpm_sclk"))
+            .as_deref()
+            .and_then(top_level_mhz),
+        memory_busy: number(host, &dev.join("mem_busy_percent"))
+            .filter(|n| *n <= 100)
+            .map(|n| n as u8),
+        ..Limits::default()
+    }
+}
+
+/// The highest clock level in a `pp_dpm_*` table (`0: 500Mhz`, `1: 2482Mhz
+/// *`, a deep-sleep `S: 19Mhz`), in MHz.
+pub(crate) fn top_level_mhz(table: &str) -> Option<u32> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let (_, level) = line.split_once(':')?;
+            let digits: String = level
+                .trim()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse::<u32>().ok().filter(|mhz| *mhz > 0)
+        })
+        .max()
 }
 
 /// Whether the card is powered up for counter reads. Before Linux 6.13 the
@@ -169,9 +254,9 @@ pub(crate) fn pci_ids_name(ids: &str, device: &str) -> Option<String> {
 
 /// The edge sensor, the closest match to the core temperature NVIDIA
 /// reports; the first hwmon reading when no sensor is labelled.
-fn temperature(host: &dyn Host, dev: &Path) -> Option<u64> {
+fn temperature(host: &dyn Host, hwmon: &[PathBuf]) -> Option<u64> {
     let mut first = None;
-    for hwmon in host.read_dir(&dev.join("hwmon")) {
+    for hwmon in hwmon {
         for sensor in 1..=3 {
             let Some(millidegrees) = number(host, &hwmon.join(format!("temp{sensor}_input")))
             else {

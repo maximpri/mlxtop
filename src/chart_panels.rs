@@ -230,9 +230,29 @@ impl App {
                 (sampled || usual.is_some() || unit != "tok/s").then(|| usual.unwrap_or(unit))
             }
             ChartMetric::Memory => None,
-            // At 0% the title has said it; a label only for a load.
-            ChartMetric::Gpu => (current != Some(0))
-                .then(|| gpu_load_label(sample.gpu_util, self.thresholds).into()),
+            // At 0% the title has said it; a label only for a load. Then
+            // what the cards draw against their caps, and a lone card's
+            // memory activity, while the edge has room (fields drop whole).
+            ChartMetric::Gpu => {
+                let mut fields = Vec::new();
+                if current != Some(0) {
+                    fields.push(gpu_load_label(sample.gpu_util, self.thresholds).to_owned());
+                }
+                if let Some(power) = crate::gpu::board_power_mw(&sample.gpus) {
+                    fields.push(crate::gpu::power_label(
+                        Some(power),
+                        crate::gpu::power_cap_mw(&sample.gpus),
+                    ));
+                }
+                if let [gpu] = sample.gpus.as_slice() {
+                    fields.extend(
+                        gpu.limits
+                            .memory_busy
+                            .map(|busy| format!("mem busy {busy}%")),
+                    );
+                }
+                (!fields.is_empty()).then(|| fields.join(" · "))
+            }
             // A short panel's title already has the rate; the split would
             // only repeat it.
             ChartMetric::Compression if area.height < 7 => None,

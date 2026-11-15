@@ -329,7 +329,9 @@ pub(crate) fn sample_linux_gpu_thermal(
     sample.gpu_util = gpu::peak_utilization(&sample.gpus);
     // VRAM remains per-card. A sum would falsely suggest a single allocation
     // pool and feed discrete GPU memory into the Apple Metal correlation rules.
-    sample.gpu_in_use = None;
+    // A GPU without memory of its own (an APU, DGX Spark) holds part of RAM:
+    // that part is drawn inside the one RAM bar, as on a Mac.
+    sample.gpu_in_use = gpu::shared_in_use(&sample.gpus);
     sample.gpu_alloc = None;
     sample.metal.renderer_util = None;
     sample.metal.tiler_util = None;

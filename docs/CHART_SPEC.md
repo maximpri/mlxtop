@@ -43,7 +43,7 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 | prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling; generated tokens under the sizes when the panel keeps four bar rows |
 | memory | PRESSURE in the reading slot; a GPU meter of wired memory against the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set), orange from 90% and red from 97% or over it; a RAM meter of wired, app, compressed and cache with what is left (free plus cache); a trace of what was left, in each sample's pressure colour |
 | compression | macOS compress + decompress traffic bars (B/s, axis at least `compression_warn_rate`), stored/compressor bytes and ratio, compressing/decompressing rates and the compressor's share of RAM; orange from `compression_warn_rate`, never red |
-| GPU | Utilization area and load state; hardware belongs in the runtime card |
+| GPU | Utilization area and load state; on the bottom edge, while it has room, the cards' power against their caps and a lone card's memory activity; hardware belongs in the runtime card |
 | paging / I/O | Paging-rate bars (axis at least `swap_warn_rate`), page-in/page-out rates and a horizontal swap used/total capacity bar, `swap off` without swap |
 | cache | Interval hit % bars with reuse since start and prefix hit kept in fixed text positions |
 | queue | Independent active/waiting request history and counts; request marks when compact; on Overview, while the runtime reports per-request speeds, a list of running requests with their own speeds in the panel's own rows |

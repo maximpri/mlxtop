@@ -47,6 +47,9 @@ pub(crate) struct CorrelationObservation {
     pub(crate) pressure: u8,
     /// What macOS says about heat; unknown off macOS.
     pub(crate) thermal: ThermalState,
+    /// A GPU card is held back for heat (NVIDIA clock-limit reasons);
+    /// `None` when no card reports why its clocks are held.
+    pub(crate) gpu_heat: Option<bool>,
     pub(crate) model_memory: Option<u64>,
     pub(crate) model_memory_max: Option<u64>,
     pub(crate) metal_in_use: Option<u64>,
@@ -200,7 +203,12 @@ impl Signal {
         match self {
             // Judged in the pressure level's steps, so heat that rises from
             // a level held while speed was usual counts too.
-            Self::Thermal => o.thermal.rank().map(f64::from),
+            // A card held back for heat counts as heavy pressure.
+            Self::Thermal => o
+                .thermal
+                .rank()
+                .max(o.gpu_heat.map(|hot| if hot { 2 } else { 0 }))
+                .map(f64::from),
             Self::Pressure => Some(f64::from(o.pressure)),
             Self::Paging => Some(o.paging_rate as f64),
             // Cache blocks moved count as disk work whatever the byte rate.
@@ -1301,6 +1309,13 @@ impl CorrelationObservation {
             compression_rate: sample.compress.saturating_add(sample.decompress),
             pressure: pressure_rank(&sample.pressure),
             thermal: sample.thermal_state,
+            // A card holding its clocks down for heat, where the cards say
+            // why they are held back; unknown without such a card.
+            gpu_heat: sample
+                .gpus
+                .iter()
+                .any(|gpu| gpu.throttle_reasons.is_some())
+                .then(|| crate::gpu::heat_limited(&sample.gpus)),
             model_memory: sample.llm_model_memory,
             model_memory_max: sample.llm_model_memory_max,
             metal_in_use: sample.gpu_in_use,
