@@ -91,8 +91,8 @@
   },
   "runtime": {
     "source": "runtime",
-    "provider": "oMLX",
-    "engine": "Splash",
+    "provider": "Splash",
+    "engine": null,
     "model": "Qwen3.8-27B-oQ4e-mtp",
     "status": "generating",
     "telemetry": "live_api",
@@ -100,12 +100,15 @@
     "observed_at_ms": 1763190206873,
     "connected": null,
     "remote": false,
-    "details": "context capacity 262144 tokens · server TTFT 1.8s",
+    "details": "DFlash draft acceptance 78% · server TTFT 1.8s",
     "model_memory_bytes": 17179869184,
     "model_memory_ceiling_bytes": 32212254720,
     "model_size_bytes": null,
     "model_offloaded_bytes": null,
     "context_allowed_tokens": 131072,
+    "kv_free_tokens": 110528,
+    "kv_free_bytes": 3678371840,
+    "preemptions_total": 2,
     "model_facts": {
       "source": "estimate",
       "weight_bytes_per_pass": 15020479488,
@@ -159,8 +162,27 @@
       "ssd_capacity_bytes": 107374182400
     },
     "draft": {
-      "acceptance_ratio": 0.78
+      "acceptance_ratio": 0.78,
+      "tokens_per_pass": 7.8
     }
+  },
+  "efficiency": {
+    "source": "estimate",
+    "draft": true,
+    "verify_passes_per_s": 7.92,
+    "tokens_per_pass": 7.8,
+    "bytes_per_pass": 16545763840,
+    "bandwidth_share_ratio": 0.3197,
+    "best_bandwidth_share_ratio": 0.6364,
+    "no_draft_ceiling_tok_per_s": 24.78
+  },
+  "context_left": {
+    "source": "estimate",
+    "tokens_per_request": 90049,
+    "requests": 1,
+    "by_memory_tokens": 110528,
+    "by_window_tokens": 90049,
+    "limited_by": "window"
   },
   "usual_speed": {
     "source": "estimate",

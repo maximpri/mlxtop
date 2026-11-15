@@ -10,7 +10,8 @@ use crate::cli::{help_text, parse_args, CliAction};
 use crate::config::Config;
 use crate::domain::Sample;
 use crate::export::tests::{
-    linux_workstation, mac_no_runtime, mac_studio_slowdown, mac_studio_stall,
+    linux_workstation, mac_no_runtime, mac_studio_slowdown, mac_studio_stall, splash_slowdown,
+    watched, watching,
 };
 use crate::host::Platform;
 use crate::test_support::{linux_host, offline_config, FakeHost};
@@ -28,6 +29,16 @@ fn taken(sample: &Sample, platform: Platform) -> Taken {
 /// The text for `sample`, a quarter of a second after it was taken.
 fn text(sample: &Sample, platform: Platform) -> String {
     let taken = taken(sample, platform);
+    metrics(Some(&taken), taken.at + Duration::from_millis(250))
+}
+
+/// The text `serve` answers for `sample` on a Mac whose session has watched
+/// decode reach its best, a quarter of a second after the sample.
+fn served(sample: &Sample) -> String {
+    let taken = Taken {
+        snapshot: crate::export::session_snapshot(&watching(watched()), sample, 1),
+        at: Instant::now(),
+    };
     metrics(Some(&taken), taken.at + Duration::from_millis(250))
 }
 
@@ -52,7 +63,8 @@ fn families(text: &str) -> Vec<&str> {
 
 #[test]
 fn the_metrics_match_the_golden_text() {
-    let actual = text(&mac_studio_slowdown(), Platform::MacOs);
+    // Every reading known: Splash's own counts, and a session's best.
+    let actual = served(&splash_slowdown());
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/fixtures/metrics_v1.prom");
     if std::env::var_os("MLXTOP_BLESS").is_some() {
         std::fs::write(&path, &actual).unwrap();
@@ -143,13 +155,45 @@ fn a_reading_the_snapshot_holds_is_written_with_its_value_and_unit() {
         Some(&1890.0)
     );
     assert!(!log.contains_key("mlxtop_llm_generation_tokens_per_second"));
+    // What Splash counts of its own work, and what mlxtop estimates from
+    // it, served from a session that knows the best decode reached here.
+    let splash = values(&served(&splash_slowdown()));
+    for (series, value) in [
+        (
+            "mlxtop_llm_model_info{provider=\"Splash\",model=\"Qwen3.8-27B-oQ4e-mtp\"}",
+            1.0,
+        ),
+        ("mlxtop_llm_tokens_per_verify_pass", 7.8),
+        ("mlxtop_llm_kv_free_tokens", 110_528.0),
+        ("mlxtop_llm_kv_free_bytes", 3_678_371_840.0),
+        ("mlxtop_llm_preemptions_total", 2.0),
+        ("mlxtop_llm_decode_verify_passes_per_second", 7.92),
+        ("mlxtop_llm_decode_bytes_per_pass", 16_545_763_840.0),
+        ("mlxtop_llm_decode_bandwidth_share_ratio", 0.3197),
+        ("mlxtop_llm_decode_best_bandwidth_share_ratio", 0.6364),
+        (
+            "mlxtop_llm_decode_no_draft_ceiling_tokens_per_second",
+            24.78,
+        ),
+        ("mlxtop_llm_context_left_tokens", 90_049.0),
+        ("mlxtop_llm_context_left_requests", 1.0),
+        ("mlxtop_llm_context_left_by_memory_tokens", 110_528.0),
+        ("mlxtop_llm_context_left_by_window_tokens", 90_049.0),
+    ] {
+        assert_eq!(splash.get(series), Some(&value), "{series}");
+    }
+    // A snapshot with no session behind it knows no best.
+    let once = values(&text(&splash_slowdown(), Platform::MacOs));
+    assert!(once.contains_key("mlxtop_llm_decode_bandwidth_share_ratio"));
+    assert!(!once.contains_key("mlxtop_llm_decode_best_bandwidth_share_ratio"));
 }
 
 #[test]
 fn metric_names_follow_prometheus_conventions() {
     let written = text(&mac_studio_slowdown(), Platform::MacOs)
         + &text(&linux_workstation(), Platform::Linux)
-        + &text(&mac_studio_stall(), Platform::MacOs);
+        + &text(&mac_studio_stall(), Platform::MacOs)
+        + &served(&splash_slowdown());
     let names: Vec<&str> = READINGS
         .iter()
         .map(|metric| metric.name)
@@ -274,6 +318,29 @@ fn unknown_readings_are_left_out_never_written_as_zero() {
     ] {
         assert!(!linux.contains(absent), "{absent}");
     }
+    // oMLX keeps Splash's counts private: nothing is written for them, nor
+    // for the estimates that need them, even from a session.
+    let private = served(&mac_studio_slowdown());
+    for absent in [
+        "mlxtop_llm_tokens_per_verify_pass",
+        "mlxtop_llm_kv_free_",
+        "mlxtop_llm_preemptions_total",
+        "mlxtop_llm_decode_",
+        "mlxtop_llm_context_left_",
+    ] {
+        assert!(!private.contains(absent), "{absent}");
+    }
+    // None preempted is a reading, written as 0.
+    let mut none = splash_slowdown();
+    none.llm_preemptions_total = Some(0);
+    let none = self::values(&self::text(&none, Platform::MacOs));
+    assert_eq!(none.get("mlxtop_llm_preemptions_total"), Some(&0.0));
+    // Where only the window limits the context left, memory gives no figure.
+    let mut sized = splash_slowdown();
+    sized.llm_provider = "llama.cpp".into();
+    let sized = self::values(&self::text(&sized, Platform::MacOs));
+    assert!(!sized.contains_key("mlxtop_llm_context_left_by_memory_tokens"));
+    assert_eq!(sized.get("mlxtop_llm_context_left_tokens"), Some(&90_049.0));
 }
 
 #[test]
@@ -400,6 +467,7 @@ fn the_user_guide_lists_every_metric() {
     for platform_text in [
         text(&mac_studio_slowdown(), Platform::MacOs),
         text(&linux_workstation(), Platform::Linux),
+        served(&splash_slowdown()),
     ] {
         for name in families(&platform_text) {
             assert!(guide.contains(&format!("`{name}`")), "{name}");

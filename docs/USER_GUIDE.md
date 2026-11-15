@@ -297,7 +297,9 @@ Draft: 7.8 tokens per pass; without it, at most an estimated 27 tok/s.
 
 `--once` prints the same on `DECODE` and `DRAFT` lines beside the usual speed,
 without a best, and the [session summary](#session-summary) gives decode by
-context.
+context. The [JSON snapshot](#json-output) carries it as `efficiency`, and the
+[Prometheus endpoint](#prometheus-endpoint) as `mlxtop_llm_decode_*`, with the
+best from `mlxtop stream` and `mlxtop serve`, which watch the session.
 
 ## oMLX telemetry
 
@@ -1014,10 +1016,18 @@ rates are measured. `mlxtop stream` takes a first sample to start the rates,
 then writes a line every `--interval` seconds, or at the configured interval,
 as the dashboard does, until it is stopped. It ends with exit status 0 and
 says nothing when whatever reads it goes away (`mlxtop stream | head -3`) and
-on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.6–3.7 KB: about 3.1 KB for
-a machine serving a model whose facts are known, about 3.7 KB while a slowdown
-and its request are named. Standard output carries only JSON; a config file that was ignored is
+on Ctrl-C, SIGTERM or SIGHUP. A line is about 2.7–4.2 KB: about 3.2 KB for
+a machine serving a model whose facts are known, about 3.8 KB while a slowdown
+and its request are named, and about 4.2 KB when the runtime also counts its
+KV room and draft, so decode efficiency and the context left are known too.
+Standard output carries only JSON; a config file that was ignored is
 said on standard error.
+
+`mlxtop stream` and [`mlxtop serve`](#prometheus-endpoint) watch the session
+as the dashboard does, so their snapshots carry what only a session knows:
+the best decode reached here (`efficiency.best_bandwidth_share_ratio`), and
+the note a healthy verdict gains near it (`verdict.next`). `--once --json`
+watches no session, so it has neither.
 
 The layout carries a `schema_version`, now 1, and is **experimental through
 3.4**: until then a field may still change without a new number. After that,
@@ -1042,7 +1052,8 @@ Every field follows the same rules:
   operating system), `runtime` (reported by the runtime, through its API, its
   log or a usage file) or `estimate` (mlxtop's own judgement from other
   readings: the usual speed and what is slow against it, which chip this is
-  and so its published bandwidth, and what the model costs). A figure whose
+  and so its published bandwidth, what the model costs, how much of that
+  bandwidth decode reads, and how much more context fits). A figure whose
   source is not its object's names its own beside it: the GPU memory limit,
   which can come from either side, in `limit_source`; the published bandwidth
   in `published_bandwidth_source`; KV bytes per token, which the runtime may
@@ -1142,6 +1153,9 @@ Every field follows the same rules:
 | `runtime.model_size_bytes` | The loaded model's size (Ollama) |
 | `runtime.model_offloaded_bytes` | The part of the model it placed outside GPU memory (Ollama) |
 | `runtime.context_allowed_tokens` | The context it allows for the model |
+| `runtime.kv_free_tokens` | KV-cache room it reports left, in tokens: a pool its requests share (vLLM, SGLang, Splash), or for llama.cpp the room of the running slot nearest its limit |
+| `runtime.kv_free_bytes` | KV-cache room it reports left, in bytes: what Splash's memory plan has left, or SGLang's free tokens at the bytes a token costs |
+| `runtime.preemptions_total` | Requests it preempted (vLLM, TensorFold), retracted (SGLang) or suspended (Splash) for want of KV cache, its own count since it started |
 | `runtime.model_facts` | What the model costs a pass, a token and a sequence, as mlxtop works it out from the model's own files (see [Model facts](#model-facts)); `null` when none of it is known |
 | `runtime.model_facts.source` | `estimate` |
 | `runtime.model_facts.weight_bytes_per_pass` | Weight bytes one forward pass reads for a token: the decoder layers and the output head; for MoE, the experts one token uses |
@@ -1188,6 +1202,23 @@ Every field follows the same rules:
 | `runtime.cache.ssd_used_bytes` | Its prompt cache on disk (oMLX) |
 | `runtime.cache.ssd_capacity_bytes` | That cache's size |
 | `runtime.draft.acceptance_ratio` | The share of drafted tokens accepted since the last poll (speculative decoding) |
+| `runtime.draft.tokens_per_pass` | Tokens one verify pass emitted since the last poll: the drafted tokens it accepted and the model's own |
+| `efficiency` | Decode per verify pass against the chip's published peak, as Diagnostics gives it (see [Decode efficiency](#decode-efficiency)): only while one request decodes alone on this machine and every input is known; else `null` |
+| `efficiency.source` | `estimate` |
+| `efficiency.draft` | A draft proposes the tokens a pass verifies, so the share is counted per verify pass, the draft's own reads left out |
+| `efficiency.verify_passes_per_s` | Verify passes a second: the generation speed over tokens per pass |
+| `efficiency.tokens_per_pass` | Tokens a pass emits: the runtime's count with a draft, 1 without |
+| `efficiency.bytes_per_pass` | What one pass reads: the weights, the KV cache of the context it decodes and the sequence's fixed state |
+| `efficiency.bandwidth_share_ratio` | The share of the chip's published peak those passes read |
+| `efficiency.best_bandwidth_share_ratio` | The best share decode has reached for similar work this session while generation kept its usual speed; `null` until there are twenty such samples, and always from `--once`, which watches no session |
+| `efficiency.no_draft_ceiling_tok_per_s` | The speed this machine could not exceed without a draft: one token a pass at the chip's full peak |
+| `context_left` | How much more context fits, as Diagnostics works it out (see [Diagnostics and runtime setup](#diagnostics-and-runtime-setup)): only while the runtime, its window, the requests in flight and where the room comes from are known; else `null` |
+| `context_left.source` | `estimate` |
+| `context_left.tokens_per_request` | Tokens each request can still add: the smaller of the two limits below |
+| `context_left.requests` | The requests it is for: those in flight, or with none in flight the next one |
+| `context_left.by_memory_tokens` | What memory alone leaves each request: the KV room the runtime reports in tokens, else the bytes its memory plan or the machine (less 1 GiB) has left at the KV bytes a token costs; `null` where only the window limits it: a runtime that sized its KV cache for the window when it loaded the model, or a model with no KV cache |
+| `context_left.by_window_tokens` | What the context window alone leaves each request: the window less the most context one of them holds |
+| `context_left.limited_by` | `memory` or `window`: the limit `tokens_per_request` is (`memory` where the two are equal) |
 | `usual_speed` | The usual speed for the work being done, once there is one; else `null` |
 | `usual_speed.source` | `estimate` |
 | `usual_speed.phase` | `generation` or `prefill` |
@@ -1234,7 +1265,7 @@ curl -s localhost:10063/snapshot | jq .verdict
 | Path | Answer |
 | --- | --- |
 | `/metrics` | The newest sample in Prometheus's text format (`text/plain; version=0.0.4`, which Prometheus 3 requires) |
-| `/snapshot` | The JSON snapshot `--once --json` prints, as one line; 503 before the first sample |
+| `/snapshot` | The newest sample's [JSON snapshot](#json-output), one line as `mlxtop stream` writes it; 503 before the first sample |
 | `/health` | `ok` while sampling is current; 503 and how long there has been no sample otherwise |
 
 Every answer comes from the newest sample, taken every `--interval` seconds
@@ -1356,6 +1387,9 @@ the model it was measured for, join the info metric:
 | `mlxtop_llm_model_size_bytes` | gauge | The loaded model's size (Ollama) |
 | `mlxtop_llm_model_offloaded_bytes` | gauge | The part of the model placed outside GPU memory (Ollama) |
 | `mlxtop_llm_context_allowed_tokens` | gauge | The context the runtime allows for the model |
+| `mlxtop_llm_kv_free_tokens` | gauge | KV-cache room the runtime reports left, in tokens: a pool its requests share, or llama.cpp's running slot nearest its limit |
+| `mlxtop_llm_kv_free_bytes` | gauge | KV-cache room the runtime reports left, in bytes: Splash's memory plan, or SGLang's free tokens at its bytes a token |
+| `mlxtop_llm_preemptions_total` | counter | Requests the runtime preempted, retracted or suspended for want of KV cache, by its own count since it started |
 | `mlxtop_llm_weight_bytes_per_pass` | gauge | Estimate: weight bytes one forward pass reads for a token |
 | `mlxtop_llm_bits_per_weight` | gauge | Estimate: bits per parameter a pass reads, scales and biases included |
 | `mlxtop_llm_kv_bytes_per_token` | gauge | KV-cache bytes one more token of context costs: the runtime's figure where it reports one, else an estimate from the model's layers |
@@ -1374,6 +1408,16 @@ the model it was measured for, join the info metric:
 | `mlxtop_llm_ssd_cache_used_bytes` | gauge | The runtime's prompt cache on disk (oMLX) |
 | `mlxtop_llm_ssd_cache_capacity_bytes` | gauge | The size of that cache |
 | `mlxtop_llm_draft_acceptance_ratio` | gauge | The share of drafted tokens accepted since the last poll (speculative decoding) |
+| `mlxtop_llm_tokens_per_verify_pass` | gauge | Tokens one verify pass emitted since the last poll: the drafted tokens accepted and the model's own (speculative decoding) |
+| `mlxtop_llm_decode_verify_passes_per_second` | gauge | Estimate: verify passes a second while one request decodes alone: generation speed over tokens per pass |
+| `mlxtop_llm_decode_bytes_per_pass` | gauge | Estimate: what one decode pass reads: the weights, the KV cache of its context and the sequence's state |
+| `mlxtop_llm_decode_bandwidth_share_ratio` | gauge | Estimate: the share of the chip's published peak bandwidth decode reads, per verify pass where a draft runs (its own reads left out) |
+| `mlxtop_llm_decode_best_bandwidth_share_ratio` | gauge | Estimate: the best share decode has reached for similar work this session, while generation kept its usual speed |
+| `mlxtop_llm_decode_no_draft_ceiling_tokens_per_second` | gauge | Estimate: the generation speed this machine could not exceed without a draft: one token a pass at the chip's full peak |
+| `mlxtop_llm_context_left_tokens` | gauge | Estimate: tokens each request in flight can still add, or the next with none in flight: the smaller of what memory and the context window allow |
+| `mlxtop_llm_context_left_requests` | gauge | Estimate: the requests that context is for: those in flight, or 1 for the next |
+| `mlxtop_llm_context_left_by_memory_tokens` | gauge | Estimate: what memory alone leaves each request; left out where only the context window limits it |
+| `mlxtop_llm_context_left_by_window_tokens` | gauge | Estimate: what the context window alone leaves each request: the window less the most context one holds |
 | `mlxtop_llm_usual_generation_tokens_per_second` | gauge | Estimate: the speed earlier samples of similar generation ran at |
 | `mlxtop_llm_generation_slow_below_tokens_per_second` | gauge | Estimate: below this speed, this generation is slow |
 | `mlxtop_llm_usual_prefill_tokens_per_second` | gauge | Estimate: the speed earlier samples of similar prompt reading ran at |

@@ -28,7 +28,7 @@ mlxtop_bottleneck{limiter="vram_full"} 0
 mlxtop_bottleneck{limiter="gpu_throttled"} 0
 # HELP mlxtop_llm_model_info The runtime found and the model it serves
 # TYPE mlxtop_llm_model_info gauge
-mlxtop_llm_model_info{provider="oMLX",model="Qwen3.8-27B-oQ4e-mtp"} 1
+mlxtop_llm_model_info{provider="Splash",model="Qwen3.8-27B-oQ4e-mtp"} 1
 # HELP mlxtop_interval_seconds Seconds between samples: the span each rate is measured over
 # TYPE mlxtop_interval_seconds gauge
 mlxtop_interval_seconds 1
@@ -170,6 +170,15 @@ mlxtop_llm_model_memory_ceiling_bytes 32212254720
 # HELP mlxtop_llm_context_allowed_tokens The context the runtime allows for the model
 # TYPE mlxtop_llm_context_allowed_tokens gauge
 mlxtop_llm_context_allowed_tokens 131072
+# HELP mlxtop_llm_kv_free_tokens KV-cache room the runtime reports left, in tokens: a pool its requests share, or llama.cpp's running slot nearest its limit
+# TYPE mlxtop_llm_kv_free_tokens gauge
+mlxtop_llm_kv_free_tokens 110528
+# HELP mlxtop_llm_kv_free_bytes KV-cache room the runtime reports left, in bytes: Splash's memory plan, or SGLang's free tokens at its bytes a token
+# TYPE mlxtop_llm_kv_free_bytes gauge
+mlxtop_llm_kv_free_bytes 3678371840
+# HELP mlxtop_llm_preemptions_total Requests the runtime preempted, retracted or suspended for want of KV cache, by its own count since it started
+# TYPE mlxtop_llm_preemptions_total counter
+mlxtop_llm_preemptions_total 2
 # HELP mlxtop_llm_weight_bytes_per_pass Estimate: weight bytes one forward pass reads for a token
 # TYPE mlxtop_llm_weight_bytes_per_pass gauge
 mlxtop_llm_weight_bytes_per_pass 15020479488
@@ -209,6 +218,36 @@ mlxtop_llm_ssd_cache_capacity_bytes 107374182400
 # HELP mlxtop_llm_draft_acceptance_ratio The share of drafted tokens accepted since the last poll (speculative decoding)
 # TYPE mlxtop_llm_draft_acceptance_ratio gauge
 mlxtop_llm_draft_acceptance_ratio 0.78
+# HELP mlxtop_llm_tokens_per_verify_pass Tokens one verify pass emitted since the last poll: the drafted tokens accepted and the model's own (speculative decoding)
+# TYPE mlxtop_llm_tokens_per_verify_pass gauge
+mlxtop_llm_tokens_per_verify_pass 7.8
+# HELP mlxtop_llm_decode_verify_passes_per_second Estimate: verify passes a second while one request decodes alone: generation speed over tokens per pass
+# TYPE mlxtop_llm_decode_verify_passes_per_second gauge
+mlxtop_llm_decode_verify_passes_per_second 7.92
+# HELP mlxtop_llm_decode_bytes_per_pass Estimate: what one decode pass reads: the weights, the KV cache of its context and the sequence's state
+# TYPE mlxtop_llm_decode_bytes_per_pass gauge
+mlxtop_llm_decode_bytes_per_pass 16545763840
+# HELP mlxtop_llm_decode_bandwidth_share_ratio Estimate: the share of the chip's published peak bandwidth decode reads, per verify pass where a draft runs (its own reads left out)
+# TYPE mlxtop_llm_decode_bandwidth_share_ratio gauge
+mlxtop_llm_decode_bandwidth_share_ratio 0.3197
+# HELP mlxtop_llm_decode_best_bandwidth_share_ratio Estimate: the best share decode has reached for similar work this session, while generation kept its usual speed
+# TYPE mlxtop_llm_decode_best_bandwidth_share_ratio gauge
+mlxtop_llm_decode_best_bandwidth_share_ratio 0.6364
+# HELP mlxtop_llm_decode_no_draft_ceiling_tokens_per_second Estimate: the generation speed this machine could not exceed without a draft: one token a pass at the chip's full peak
+# TYPE mlxtop_llm_decode_no_draft_ceiling_tokens_per_second gauge
+mlxtop_llm_decode_no_draft_ceiling_tokens_per_second 24.78
+# HELP mlxtop_llm_context_left_tokens Estimate: tokens each request in flight can still add, or the next with none in flight: the smaller of what memory and the context window allow
+# TYPE mlxtop_llm_context_left_tokens gauge
+mlxtop_llm_context_left_tokens 90049
+# HELP mlxtop_llm_context_left_requests Estimate: the requests that context is for: those in flight, or 1 for the next
+# TYPE mlxtop_llm_context_left_requests gauge
+mlxtop_llm_context_left_requests 1
+# HELP mlxtop_llm_context_left_by_memory_tokens Estimate: what memory alone leaves each request; left out where only the context window limits it
+# TYPE mlxtop_llm_context_left_by_memory_tokens gauge
+mlxtop_llm_context_left_by_memory_tokens 110528
+# HELP mlxtop_llm_context_left_by_window_tokens Estimate: what the context window alone leaves each request: the window less the most context one holds
+# TYPE mlxtop_llm_context_left_by_window_tokens gauge
+mlxtop_llm_context_left_by_window_tokens 90049
 # HELP mlxtop_llm_usual_generation_tokens_per_second Estimate: the speed earlier samples of similar generation ran at
 # TYPE mlxtop_llm_usual_generation_tokens_per_second gauge
 mlxtop_llm_usual_generation_tokens_per_second 123

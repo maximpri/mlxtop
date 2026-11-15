@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The JSON snapshot and the stream: the schema against a golden file, the
-// privacy promise, unknown readings as null, and the stream's ending. The
+// privacy promise, unknown readings as null, the estimates beside what the
+// runtime counts, what only a session knows, and the stream's ending. The
 // static report's text is pinned here too, from the same fixtures, so the
 // JSON work cannot move a byte of `--once`.
 use crate::domain::{
@@ -349,6 +350,80 @@ pub(crate) fn mac_remote_runtime() -> Sample {
     sample
 }
 
+/// Splash's memory plan for the owner's model (tests/fixtures/splash_status.json):
+/// KV pages of 32 tokens at 33,280 bytes a token, 4,736 of them. The one
+/// request in flight, 41,023 tokens deep, holds 1,282.
+const SPLASH_PAGE_TOKENS: u64 = 32;
+const SPLASH_FREE_PAGES: u64 = 4_736 - 1_282;
+
+/// The same slowdown with Splash serving the model on its own, so mlxtop
+/// reads what Splash counts of its work, which oMLX keeps private: 7.8
+/// tokens a verify pass, the KV room its memory plan has left and the
+/// requests it suspended for room. Every estimate is known for it, so the
+/// golden files are of this sample.
+pub(crate) fn splash_slowdown() -> Sample {
+    let mut sample = mac_studio_slowdown();
+    sample.llm_provider = "Splash".into();
+    sample.llm_engine = None;
+    sample.llm_details = Some("DFlash draft acceptance 78% · server TTFT 1.8s".into());
+    sample.llm_requests[0].provider = "Splash".into();
+    sample.llm_tokens_per_pass = Some(7.8);
+    sample.llm_kv_free_tokens = Some(SPLASH_FREE_PAGES * SPLASH_PAGE_TOKENS);
+    sample.llm_kv_free_bytes = Some(SPLASH_FREE_PAGES * SPLASH_PAGE_TOKENS * 33_280);
+    sample.llm_preemptions_total = Some(2);
+    sample
+}
+
+/// The same server writing the same answer at its usual 123 tok/s, with
+/// nothing unusual on the machine.
+pub(crate) fn splash_decoding() -> Sample {
+    let mut sample = splash_slowdown();
+    sample.swap_in = 0;
+    sample.swap_out = 0;
+    sample.swap_growth = 0;
+    sample.page_in = 0;
+    sample.impact = "LLM READY".into();
+    sample.impact_tone = Tone::Green;
+    sample.grade = "HEALTHY".into();
+    sample.health = Some(100);
+    sample.limiter = "none".into();
+    sample.llm_generation_tps = Some(123.0);
+    sample.llm_requests[0].output_tps = Some(123.0);
+    sample.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Flat,
+        usual_speed: Some((123.0, 98.4)),
+        usual_for: "1 request · 41.0k context".into(),
+        ..CorrelationInsight::default()
+    };
+    sample
+}
+
+/// What a session's decode record holds once it has watched the server
+/// decode at its usual speed for twenty samples, the fewest that give a
+/// best: 64% of 410 GB/s per verify pass.
+pub(crate) fn watched() -> crate::efficiency::Record {
+    let decoding = splash_decoding();
+    let mut record = crate::efficiency::Record::default();
+    for _ in 0..20 {
+        record.observe(&decoding);
+    }
+    record
+}
+
+/// A collector on a recorded Mac whose session's decode record is
+/// `decode`: what `stream` and `serve` judge each sample beside.
+pub(crate) fn watching(decode: crate::efficiency::Record) -> crate::collector::Collector {
+    let mut collector = crate::collector::Collector::with_host(
+        60,
+        crate::test_support::offline_config(),
+        Box::new(crate::test_support::macos_host()),
+        Platform::MacOs,
+        None,
+    );
+    collector.session.decode = decode;
+    collector
+}
+
 /// Where the golden files live, for reading and for `MLXTOP_BLESS=1`.
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -484,9 +559,11 @@ fn golden_json(name: &str, snapshot: &super::Snapshot) {
 
 #[test]
 fn the_snapshot_matches_the_golden_schema_field_by_field() {
+    // A sample with a value in every field the others leave null: Splash's
+    // own counts, and a session that knows the best decode reached here.
     golden_json(
         "export_v1.json",
-        &snapshot(&mac_studio_slowdown(), Platform::MacOs, 1),
+        &super::session_snapshot(&watching(watched()), &splash_slowdown(), 1),
     );
 }
 
@@ -506,6 +583,20 @@ fn every_line_is_one_json_object_of_about_three_kilobytes() {
     assert!(
         (2_500..=3_500).contains(&idle) && busy <= 4_000 && quiet < idle && idle < busy,
         "busy {busy}, idle {idle}, quiet {quiet} bytes"
+    );
+    // The fullest line has its own bound, about 4.2 KB: on top of the busy
+    // one, the runtime counts its own KV room and draft, so decode
+    // efficiency, the context left and the session's best are known too.
+    let mut full = Vec::new();
+    write_line(
+        &mut full,
+        &super::session_snapshot(&watching(watched()), &splash_slowdown(), 1),
+    )
+    .unwrap();
+    assert!(
+        busy < full.len() && full.len() <= 4_500,
+        "busy {busy}, full {} bytes",
+        full.len()
     );
 }
 
@@ -584,7 +675,13 @@ fn unknown_readings_are_null_never_zero() {
         "/host/published_bandwidth_bytes_per_s",
         "/host/published_bandwidth_source",
         "/runtime/context_allowed_tokens",
+        "/runtime/kv_free_tokens",
+        "/runtime/kv_free_bytes",
+        "/runtime/preemptions_total",
+        "/runtime/draft/tokens_per_pass",
         "/runtime/model_facts",
+        "/efficiency",
+        "/context_left",
         "/usual_speed",
         "/slowdown",
         "/slowdown_ended",
@@ -1175,6 +1272,180 @@ fn model_facts_are_an_estimate_that_names_the_runtimes_own_figures() {
     assert_eq!(value["runtime"]["context_allowed_tokens"], 8_192);
 }
 
+#[test]
+fn decode_and_context_left_are_estimates_beside_what_the_runtime_counts() {
+    let sample = splash_slowdown();
+    let value = json(&sample, Platform::MacOs);
+    // What Splash counts of its own work is the runtime's.
+    let runtime = &value["runtime"];
+    assert_eq!(runtime["source"], "runtime");
+    assert_eq!(runtime["draft"]["tokens_per_pass"], 7.8);
+    assert_eq!(runtime["kv_free_tokens"], 110_528);
+    assert_eq!(runtime["kv_free_bytes"], 110_528_u64 * 33_280);
+    assert_eq!(runtime["preemptions_total"], 2);
+    // Decode per verify pass is mlxtop's estimate, as Diagnostics gives it:
+    // 61.8 tok/s at 7.8 tokens a pass is 7.92 passes a second, each reading
+    // the weights, 41,023 tokens of KV cache and the state: 32% of 410 GB/s.
+    let decode = &value["efficiency"];
+    assert_eq!(decode["source"], "estimate");
+    assert_eq!(decode["draft"], true);
+    assert_eq!(decode["verify_passes_per_s"], 7.92);
+    assert_eq!(decode["tokens_per_pass"], 7.8);
+    assert_eq!(
+        decode["bytes_per_pass"],
+        15_020_479_488_u64 + 41_023 * 33_280 + 160_038_912
+    );
+    assert_eq!(decode["bandwidth_share_ratio"], 0.3197);
+    assert_eq!(decode["no_draft_ceiling_tok_per_s"], 24.78);
+    let estimate = crate::efficiency::of_sample(&sample).unwrap();
+    assert!(crate::efficiency::share_line(&estimate, None)
+        .starts_with("Decode estimate: 32% of 410 GB/s per verify pass"));
+    // `--once` watches no session, so it knows no best.
+    assert_eq!(decode["best_bandwidth_share_ratio"], Value::Null);
+    // Without a draft a pass emits one token; a share above the peak means
+    // an input is wrong, and is unknown.
+    let mut plain = sample.clone();
+    plain.model.draft = Some(false);
+    plain.llm_tokens_per_pass = None;
+    plain.llm_draft_acceptance = None;
+    plain.llm_generation_tps = Some(20.0);
+    let decode = &json(&plain, Platform::MacOs)["efficiency"];
+    assert_eq!(decode["draft"], false);
+    assert_eq!(decode["tokens_per_pass"], 1.0);
+    assert_eq!(decode["verify_passes_per_s"], 20.0);
+    assert_eq!(decode["bandwidth_share_ratio"], 0.8071);
+    plain.llm_generation_tps = Some(61.8);
+    assert_eq!(json(&plain, Platform::MacOs)["efficiency"], Value::Null);
+    // The context left is a forecast: Splash's 110.5k free tokens are more
+    // than the 131.1k window less the 41.0k the request holds.
+    let left = &value["context_left"];
+    assert_eq!(left["source"], "estimate");
+    assert_eq!(left["requests"], 1);
+    assert_eq!(left["by_memory_tokens"], 110_528);
+    assert_eq!(left["by_window_tokens"], 131_072 - 41_023);
+    assert_eq!(left["tokens_per_request"], 131_072 - 41_023);
+    assert_eq!(left["limited_by"], "window");
+}
+
+#[test]
+fn the_context_left_names_the_limit_that_gives_it() {
+    let left = |sample: &Sample| json(sample, Platform::MacOs)["context_left"].clone();
+    // Less room than the window leaves: memory is the limit, and where the
+    // two tie it is memory, as Diagnostics calls it the smaller.
+    let mut sample = splash_slowdown();
+    for (free, limited_by) in [(20_000, "memory"), (90_049, "memory"), (90_050, "window")] {
+        sample.llm_kv_free_tokens = Some(free);
+        let left = left(&sample);
+        assert_eq!(left["tokens_per_request"], free.min(90_049), "{free}");
+        assert_eq!(left["limited_by"], limited_by, "{free}");
+    }
+    // Two requests in flight share the room, and each has the window less
+    // the longer of them.
+    sample.llm_kv_free_tokens = Some(110_528);
+    sample.llm_requests.push(RequestUsage {
+        id: "req-8b2c".into(),
+        prompt: 60_000,
+        output: Some(1_000),
+        ..RequestUsage::default()
+    });
+    let two = left(&sample);
+    assert_eq!(two["requests"], 2);
+    assert_eq!(two["by_memory_tokens"], 110_528 / 2);
+    assert_eq!(two["by_window_tokens"], 131_072 - 61_000);
+    assert_eq!(two["limited_by"], "memory");
+    // llama.cpp sized its KV cache for the window when it loaded the model:
+    // only the window limits it, and memory gives no figure.
+    let mut sized = splash_slowdown();
+    sized.llm_provider = "llama.cpp".into();
+    let sized = left(&sized);
+    assert_eq!(sized["by_memory_tokens"], Value::Null);
+    assert_eq!(sized["tokens_per_request"], 131_072 - 41_023);
+    assert_eq!(sized["limited_by"], "window");
+}
+
+#[test]
+fn only_a_session_that_watched_similar_work_knows_the_best_decode() {
+    let best = |decode: crate::efficiency::Record| {
+        let snapshot = super::session_snapshot(&watching(decode), &splash_slowdown(), 1);
+        serde_json::to_value(snapshot).unwrap()["efficiency"]["best_bandwidth_share_ratio"].clone()
+    };
+    let seen = |sample: &Sample, times: usize| {
+        let mut record = crate::efficiency::Record::default();
+        for _ in 0..times {
+            record.observe(sample);
+        }
+        record
+    };
+    // Twenty samples at the usual 123 tok/s read 64% of 410 GB/s, against
+    // the 32% the slowdown reads.
+    assert_eq!(best(watched()), 0.6364);
+    // Nineteen are too few; work at a quarter of the depth is not similar;
+    // and another model's decode says nothing of this one's.
+    assert_eq!(best(seen(&splash_decoding(), 19)), Value::Null);
+    let mut shallow = splash_decoding();
+    shallow.llm_requests[0].prompt = 10_000;
+    assert_eq!(best(seen(&shallow, 20)), Value::Null);
+    let mut other = splash_decoding();
+    other.llm_model = "Qwen3.8-27B-oQ8".into();
+    assert_eq!(best(seen(&other, 20)), Value::Null);
+}
+
+#[test]
+fn with_a_session_the_verdict_is_the_one_the_dashboard_shows() {
+    // Decoding near the best this session has seen, the dashboard notes
+    // what would make it faster; `--once` has no session to know that.
+    let sample = splash_decoding();
+    let streamed =
+        serde_json::to_value(super::session_snapshot(&watching(watched()), &sample, 1)).unwrap();
+    let finding = crate::diagnosis::assess_session(&sample, &watched());
+    assert_eq!(streamed["verdict"]["state"], "healthy");
+    assert_eq!(streamed["verdict"]["next"], finding.next.as_str());
+    assert_eq!(
+        streamed["verdict"]["next"],
+        "Decode is near its estimated limit: fewer bytes/token or a better draft."
+    );
+    assert_eq!(streamed["verdict"]["actionable"], false);
+    assert_eq!(
+        streamed["efficiency"]["best_bandwidth_share_ratio"],
+        streamed["efficiency"]["bandwidth_share_ratio"]
+    );
+    let once = json(&sample, Platform::MacOs);
+    assert_eq!(once["verdict"]["state"], "healthy");
+    assert_eq!(once["verdict"]["next"], Value::Null);
+}
+
+#[test]
+fn without_the_runtimes_own_counts_the_estimates_are_null() {
+    // oMLX keeps Splash's status private: with a draft but no tokens per
+    // pass there is no decode estimate, and with no KV room no context
+    // left, session or not.
+    let snapshot = super::session_snapshot(&watching(watched()), &mac_studio_slowdown(), 1);
+    let value = serde_json::to_value(snapshot).unwrap();
+    for pointer in [
+        "/efficiency",
+        "/context_left",
+        "/runtime/kv_free_tokens",
+        "/runtime/kv_free_bytes",
+        "/runtime/preemptions_total",
+        "/runtime/draft/tokens_per_pass",
+    ] {
+        assert_eq!(value.pointer(pointer), Some(&Value::Null), "{pointer}");
+    }
+    // A pass emits at least the token the model adds: fewer is no count.
+    let mut odd = splash_slowdown();
+    odd.llm_tokens_per_pass = Some(0.5);
+    let value = json(&odd, Platform::MacOs);
+    assert_eq!(value["runtime"]["draft"]["tokens_per_pass"], Value::Null);
+    assert_eq!(value["efficiency"], Value::Null);
+    // None preempted is a count, not an unknown.
+    let mut none = splash_slowdown();
+    none.llm_preemptions_total = Some(0);
+    assert_eq!(
+        json(&none, Platform::MacOs)["runtime"]["preemptions_total"],
+        0
+    );
+}
+
 /// Every field path in `value`: `memory.ram.left_bytes`, `gpus[].name`.
 fn field_paths(prefix: &str, value: &Value, paths: &mut BTreeSet<String>) {
     match value {
@@ -1215,6 +1486,7 @@ fn the_user_guide_lists_every_field() {
     let mut paths = BTreeSet::new();
     for (sample, platform) in [
         (mac_studio_slowdown(), Platform::MacOs),
+        (splash_slowdown(), Platform::MacOs),
         (ended, Platform::MacOs),
         (linux_workstation(), Platform::Linux),
     ] {
