@@ -4,7 +4,7 @@ use crate::config::OmxConfig;
 use crate::domain::MIB;
 use crate::model_facts::{read_mlx_model, weight_shards};
 use crate::test_support::{
-    owner_models, reply, serve, Exchange, FakeHost, TempDir, OWNER_DRAFT, OWNER_MODEL,
+    on_this_host, owner_models, reply, serve, Exchange, FakeHost, TempDir, OWNER_DRAFT, OWNER_MODEL,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -94,7 +94,8 @@ fn models_status_names_each_models_files_engine_and_context() {
 
 #[test]
 fn model_settings_say_how_omlx_serves_each_model() {
-    let all = parse_model_settings(&serde_json::from_str(MODEL_SETTINGS).unwrap()).unwrap();
+    let all = parse_model_settings(&serde_json::from_str(&on_this_host(MODEL_SETTINGS)).unwrap())
+        .unwrap();
     assert_eq!(
         all[MODEL],
         ModelSettings {
@@ -284,7 +285,8 @@ fn client(port: u16, home: &TempDir, files: &FakeHost) -> LlmTelemetryClient {
 fn the_client_reads_the_served_models_facts_once_and_checks_them_each_minute() {
     let home = TempDir::new("omlx-facts");
     home.write(".config/omlx-coding/server.env", "API_KEY=facts-key\n");
-    let files = owner_models(FakeHost::default()).file("/omlx/model_settings.json", MODEL_SETTINGS);
+    let files = owner_models(FakeHost::default())
+        .file("/omlx/model_settings.json", &on_this_host(MODEL_SETTINGS));
     let health = json!({"status": "healthy", "default_model": MODEL}).to_string();
     let stats = json!({
         "active_models": {"models": [loaded(MODEL)]},
@@ -430,14 +432,17 @@ fn the_owners_status_endpoints_read_as_served() {
         }
     );
     assert_eq!(server.slowing(MODEL, true), None);
-    let status = parse_models_status(&serde_json::from_str(OWNER_MODELS_STATUS).unwrap());
+    let status =
+        parse_models_status(&serde_json::from_str(&on_this_host(OWNER_MODELS_STATUS)).unwrap());
     assert_eq!(status.len(), 4);
     let served = status.iter().find(|status| status.id == MODEL).unwrap();
     assert_eq!(
         served,
         &ModelStatus {
             id: MODEL.into(),
-            path: Some(PathBuf::from("/omlx/models/Jundot/Qwen3.8-27B-oQ4e-mtp")),
+            path: Some(PathBuf::from(on_this_host(
+                "/omlx/models/Jundot/Qwen3.8-27B-oQ4e-mtp"
+            ))),
             engine: Some("splash".into()),
             context: Some(131_072),
             trained: Some(262_144),

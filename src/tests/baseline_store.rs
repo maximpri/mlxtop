@@ -73,9 +73,12 @@ fn the_file_lives_where_each_platform_keeps_an_apps_own_state() {
         )),
         "a Mac keeps it in Application Support whatever XDG says"
     );
+    // XDG_STATE_HOME counts when it is absolute on the machine running the
+    // test: on Windows a path from `/` names no drive, so it is not.
+    let state = if cfg!(windows) { r"C:\state" } else { "/state" };
     assert_eq!(
-        path_from(Some("/state".into()), home.clone(), Platform::Linux),
-        Some(PathBuf::from("/state/mlxtop/baselines.json"))
+        path_from(Some(state.into()), home.clone(), Platform::Linux),
+        Some(Path::new(state).join("mlxtop").join("baselines.json"))
     );
     // Unset, blank or relative, XDG_STATE_HOME falls back to its default.
     for state in [None, Some("  ".into()), Some("relative/state".into())] {

@@ -559,9 +559,31 @@ pub(crate) fn empty_view() -> CollectorView {
     }
 }
 
-/// Where `owner_models` puts the owner's model and its draft.
-pub(crate) const OWNER_MODEL: &str = "/omlx/models/Qwen3.8-27B-oQ4e-mtp";
-pub(crate) const OWNER_DRAFT: &str = "/omlx/models/Qwen3.8-27B-DFlash2-incoai";
+/// Where `owner_models` puts the owner's model and its draft: where oMLX
+/// served them on his Mac, on drive `C:` on Windows (see `on_this_host`).
+pub(crate) const OWNER_MODEL: &str = if cfg!(windows) {
+    "C:/omlx/models/Qwen3.8-27B-oQ4e-mtp"
+} else {
+    "/omlx/models/Qwen3.8-27B-oQ4e-mtp"
+};
+pub(crate) const OWNER_DRAFT: &str = if cfg!(windows) {
+    "C:/omlx/models/Qwen3.8-27B-DFlash2-incoai"
+} else {
+    "/omlx/models/Qwen3.8-27B-DFlash2-incoai"
+};
+
+/// `recorded`, an oMLX answer or file from the owner's Mac or one path in
+/// it, with its models under `/omlx/models` where `owner_models` puts
+/// them. oMLX serves only on macOS, and mlxtop reads a model's files only
+/// at an absolute path: on Windows a path from `/` names no drive, so
+/// there the models are on `C:`.
+pub(crate) fn on_this_host(recorded: &str) -> String {
+    if cfg!(windows) {
+        recorded.replace("/omlx/models/", "C:/omlx/models/")
+    } else {
+        recorded.to_owned()
+    }
+}
 
 /// The owner's Qwen3.8-27B-oQ4e-mtp and its DFlash2 draft as served on his
 /// Mac Studio, as header-only fixtures: each `config.json` and the JSON
