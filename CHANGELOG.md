@@ -9,8 +9,36 @@ the same context depth, keeps it across sessions, says how much more context
 fits, and names what first tokens lose to cache misses, model loads and
 overlapping requests. It also carries every fix from the review of 3.3.0
 (3.3.1 was never released; its fixes ship here). **Update with the install
-script or Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS
-crates this release replaces.
+script or Homebrew:** 3.3.0's updater runs on the TLS crates this release
+replaces; if you use it anyway, check what it installed as shown below.
+
+### Updating from 3.3.0 with `mlxtop update`
+
+`mlxtop update` in 3.3.0 still works, but it downloads over the TLS crates
+this release replaces. The install script or Homebrew avoid them. If you use
+`mlxtop update` anyway, confirm afterwards with your system's own tools that
+the installed binary is the published one (macOS on Apple Silicon, Linux):
+
+```sh
+mlxtop update
+v=3.4.0
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) t=aarch64-apple-darwin ;;
+  Linux-x86_64) t=x86_64-unknown-linux-musl ;;
+  Linux-aarch64) t=aarch64-unknown-linux-musl ;;
+esac
+a="mlxtop-$v-$t.tar.gz"; u="https://github.com/maximpri/mlxtop/releases/download/v$v"
+d="$(mktemp -d)" && cd "$d" &&
+curl -fsSLO "$u/$a" &&
+curl -fsSL "$u/SHA256SUMS" | grep " $a\$" | shasum -a 256 -c - &&
+tar -xzf "$a" &&
+cmp "mlxtop-$v-$t/mlxtop" "$(command -v mlxtop)" &&
+echo "OK: the installed mlxtop is the published $v"
+```
+
+It prints `OK` only when the binary `mlxtop update` installed is byte for byte
+the one in the release; otherwise reinstall with the install script. From 3.4.0
+on, `mlxtop update` is safe again.
 
 ### Is this speed normal?
 

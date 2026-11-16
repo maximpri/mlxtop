@@ -44,7 +44,8 @@ context fits, names heat on Apple Silicon, and tells what first tokens lose to
 cache misses, model loads and overlapping requests. `--once --json`, `mlxtop
 stream` and `mlxtop serve` (Prometheus, loopback only) bring it to scripts and
 dashboards. 3.4.0 also carries every fix from the review of 3.3.0: if you run
-3.3.0, update with the install script or Homebrew, not `mlxtop update`.
+3.3.0, update with the install script or Homebrew, or [check what `mlxtop
+update` installed](CHANGELOG.md#updating-from-330-with-mlxtop-update).
 [Release notes →](CHANGELOG.md)
 
 ## Install
