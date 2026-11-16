@@ -185,6 +185,29 @@ fn safe_error_messages_preserve_actionable_failure_categories() {
 }
 
 #[test]
+fn a_local_connect_that_times_out_found_no_server() {
+    let timed_out = || std::io::Error::from(std::io::ErrorKind::TimedOut);
+    // Windows retries a refused local connect for seconds: still a refusal.
+    for local in ["127.0.0.1:8000", "[::1]:8000"] {
+        assert_eq!(
+            ProbeIssue::from_connect(timed_out(), &local.parse().unwrap()),
+            ProbeIssue::Transport,
+            "{local}"
+        );
+    }
+    let local = "127.0.0.1:8000".parse().unwrap();
+    assert_eq!(
+        ProbeIssue::from_connect(std::io::ErrorKind::ConnectionRefused.into(), &local),
+        ProbeIssue::Transport
+    );
+    // A remote host that does not answer may be down or dropping packets.
+    assert_eq!(
+        ProbeIssue::from_connect(timed_out(), &"192.0.2.1:8000".parse().unwrap()),
+        ProbeIssue::Timeout
+    );
+}
+
+#[test]
 fn capability_freshness_belongs_to_its_source() {
     let mut sample = Sample {
         llm_source: TelemetrySource::Live,

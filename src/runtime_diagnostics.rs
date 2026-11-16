@@ -3,6 +3,7 @@
 use crate::domain::{Sample, TelemetrySource};
 use crate::formatting::telemetry_age;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -49,6 +50,20 @@ impl ProbeIssue {
         match error.kind() {
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Self::Timeout,
             _ => Self::Transport,
+        }
+    }
+
+    /// Why a connection to `address` was not made. On a loopback address
+    /// the operating system completes the handshake for a listening server,
+    /// hung or not, so a connect that times out there found no server:
+    /// Windows retries a refused connect for about two seconds before it
+    /// says so. That is a refusal, retried within seconds. A hung server
+    /// accepts and times out when read; a connect to it times out only once
+    /// its queue of waiting connections is full, which a retry does not add to.
+    pub(crate) fn from_connect(error: std::io::Error, address: &SocketAddr) -> Self {
+        match Self::from_io(error) {
+            Self::Timeout if address.ip().is_loopback() => Self::Transport,
+            issue => issue,
         }
     }
 }

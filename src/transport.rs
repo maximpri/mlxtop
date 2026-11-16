@@ -61,7 +61,7 @@ pub(crate) fn http_request(
             return Err(ProbeIssue::Timeout);
         }
         connected = TcpStream::connect_timeout(address, left.min(Duration::from_millis(250)))
-            .map_err(ProbeIssue::from_io);
+            .map_err(|error| ProbeIssue::from_connect(error, address));
         if connected.is_ok() {
             break;
         }

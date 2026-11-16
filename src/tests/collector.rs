@@ -901,6 +901,19 @@ fn omlx_client_backs_off_while_the_server_is_unreachable() {
 }
 
 #[test]
+fn omlx_client_waits_longer_for_a_runtime_that_accepts_and_never_answers() {
+    // The operating system completes the handshake for a server that
+    // listens but never accepts: a hung runtime. It times out when read,
+    // on every platform, and is asked again later than a refused one.
+    let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = omlx_client(hung.local_addr().unwrap().port(), None);
+    client.retry_backoff = Duration::from_secs(16);
+    assert!(client.poll(None).is_none());
+    assert_eq!(client.retry_backoff, Duration::from_secs(30));
+    drop(hung);
+}
+
+#[test]
 fn omlx_login_requires_a_loopback_host_and_a_key() {
     let home = TempDir::new("omlx-remote");
     home.write(".config/omlx-coding/server.env", "API_KEY=k\n");
