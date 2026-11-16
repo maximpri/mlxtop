@@ -1899,6 +1899,10 @@ fn an_unread_view_channel_holds_one_snapshot() {
         collector(host, Platform::Linux, None)
     });
     thread::sleep(Duration::from_millis(300));
+    // Pause before counting: a sampler still writing every 5 ms can add a
+    // snapshot while the queue is being read, which a slow runner counts.
+    sampler.send(SamplerCommand::SetPaused(true));
+    thread::sleep(Duration::from_millis(200));
     let waiting = sampler.views.try_iter().count();
     assert!(waiting <= 1, "{waiting} snapshots queued");
 }
