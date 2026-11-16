@@ -23,15 +23,24 @@ pub(crate) fn write_static(
     writeln!(out, "mlxtop · static report ({interval}s sample)\n")?;
     writeln!(out, "SIGNAL       {} · {}", sample.impact, sample.grade)?;
     writeln!(out, "PRESSURE     {}", pressure_state_label(sample))?;
-    writeln!(
-        out,
-        "MEMORY       {} resident / {} total · includes file cache",
-        sample
-            .resident_memory
-            .map(bytes)
-            .unwrap_or_else(|| "—".into()),
-        bytes(sample.total_memory)
-    )?;
+    // In use and what is left, as the dashboard says it; the resident
+    // figure only where the OS gives no breakdown by kind.
+    match crate::memory_composition::segments(sample) {
+        Some(_) => writeln!(
+            out,
+            "MEMORY       {} (free and file cache)",
+            sample.memory_use_label().trim_start_matches("RAM ")
+        )?,
+        None => writeln!(
+            out,
+            "MEMORY       {} resident / {} total · includes file cache",
+            sample
+                .resident_memory
+                .map(bytes)
+                .unwrap_or_else(|| "—".into()),
+            bytes(sample.total_memory)
+        )?,
+    }
     // Windows has no paging counters: unknown, not zero.
     // All disk paging: swap plus file page-ins/outs, then the file share and
     // whether it counts (only while memory is tight).
@@ -85,16 +94,23 @@ pub(crate) fn write_static(
         for line in gpu_dashboard::static_lines(&sample.gpus, thresholds) {
             writeln!(out, "{line}")?;
         }
+        for line in crate::gpu_findings::evidence(sample) {
+            writeln!(out, "GPU LIMIT    {line}")?;
+        }
     } else if platform == Platform::MacOs {
         writeln!(
             out,
-            "METAL        {} · {} cores · GPU {} · renderer {} · tiler {}",
+            "METAL        {} · {} cores{} · GPU {} · renderer {} · tiler {}",
             sample.metal.device_name.as_deref().unwrap_or("unavailable"),
             sample
                 .metal
                 .gpu_cores
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "—".into()),
+            // The chip's peak bandwidth, left out where the chip is unknown.
+            crate::chip_facts::of_sample(sample)
+                .map(|bandwidth| format!(" · {}", bandwidth.label()))
+                .unwrap_or_default(),
             sample
                 .gpu_util
                 .map(|v| format!("{v}%"))
@@ -113,14 +129,23 @@ pub(crate) fn write_static(
         optional_bytes(sample.mlx.process_footprint),
         optional_bytes(sample.metal.resource_limit)
     )?;
-    writeln!(
-        out,
-        "LLM          {} · {} · {} · {}",
-        llm_runtime_label(sample),
-        sample.llm_status,
-        telemetry_source(sample),
-        llm_model_label(sample, 40)
-    )?;
+    if matches!(sample.llm_provider.as_str(), "none" | "not detected") {
+        writeln!(out, "LLM          none detected")?;
+    } else {
+        // Empty fields are left out rather than joined.
+        let fields = [
+            llm_runtime_label(sample),
+            sample.llm_status.clone(),
+            telemetry_source(sample),
+            llm_model_label(sample, 40),
+        ];
+        let fields: Vec<&str> = fields
+            .iter()
+            .map(String::as_str)
+            .filter(|field| !field.trim().is_empty())
+            .collect();
+        writeln!(out, "LLM          {}", fields.join(" · "))?;
+    }
     if let Some(details) = &sample.llm_details {
         writeln!(out, "PROVIDER     {details}")?;
     }
@@ -197,6 +222,17 @@ pub(crate) fn write_static(
             usual_for(&sample.correlation)
         )?;
     }
+    // Decode per verify pass, an estimate, and what a draft pays.
+    if let Some(estimate) = crate::efficiency::of_sample(sample) {
+        writeln!(
+            out,
+            "DECODE       estimate {}",
+            crate::efficiency::share_text(&estimate, None)
+        )?;
+        if let Some(draft) = crate::efficiency::draft_text(&estimate) {
+            writeln!(out, "DRAFT        {draft}")?;
+        }
+    }
     let finding = diagnosis::assess(sample);
     writeln!(out, "DIAGNOSIS    {}", finding.title)?;
     writeln!(
@@ -224,9 +260,16 @@ fn usual_for(insight: &crate::domain::CorrelationInsight) -> String {
     }
 }
 
-/// The expanded panel and doctor report share facts and wording.
-pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
-    let finding = diagnosis::assess(sample);
+/// The expanded panel and doctor report share facts and wording. The panel
+/// passes the session's `decode` record, for the best decode reached here.
+pub(crate) fn diagnostic_lines(
+    sample: &Sample,
+    decode: Option<&crate::efficiency::Record>,
+) -> Vec<String> {
+    let finding = match decode {
+        Some(decode) => diagnosis::assess_session(sample, decode),
+        None => diagnosis::assess(sample),
+    };
     let mut lines = vec![
         "ASSESSMENT".into(),
         finding.title,
@@ -244,11 +287,23 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
     let insight = &sample.correlation;
     if let Some((usual, slow_below)) = insight.usual_speed {
         lines.push(format!(
-            "Usual generation speed {usual:.1} tok/s{} · slow below {slow_below:.1}",
+            "Usual {} speed {usual:.1} tok/s{} · slow below {slow_below:.1}",
+            insight.phase.word(),
             usual_for(insight)
         ));
     }
+    if let Some(estimate) = crate::efficiency::of_sample(sample) {
+        let best = decode.and_then(|decode| decode.best(sample, &estimate));
+        lines.push(crate::efficiency::share_line(&estimate, best));
+        lines.extend(
+            crate::efficiency::draft_text(&estimate).map(|draft| format!("Draft: {draft}.")),
+        );
+    }
     lines.extend(insight.notes.iter().map(|note| format!("Unusual: {note}")));
+    // What holds each card back, in words: never a finding of its own.
+    lines.extend(crate::gpu_findings::evidence(sample));
+    // GPU memory near its wired limit, unless the next step says it.
+    lines.extend(diagnosis::wired_limit_note(sample, &finding.next));
     lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));
     lines
@@ -269,8 +324,42 @@ pub(crate) fn write_doctor(out: &mut dyn Write, sample: &Sample) -> io::Result<b
             "incomplete"
         }
     )?;
-    for line in diagnostic_lines(sample) {
+    for line in diagnostic_lines(sample, None) {
         writeln!(out, "{line}")?;
     }
     Ok(host_ready && !sample.runtime.failed())
+}
+
+/// Standard output for text that came from outside the program (a runtime's
+/// model name, a recording someone sent): control characters other than a
+/// newline are dropped, so nothing can drive the user's terminal.
+pub(crate) struct PlainText<W: std::io::Write>(pub(crate) W);
+
+impl<W: std::io::Write> std::io::Write for PlainText<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut clean = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            // C1 controls (U+0080..U+009F) are 0xC2 0x80..0x9F in UTF-8.
+            if byte == 0xC2
+                && bytes
+                    .get(index + 1)
+                    .is_some_and(|next| (0x80..=0x9F).contains(next))
+            {
+                index += 2;
+                continue;
+            }
+            if byte == b'\n' || byte == b'\t' || (byte >= 0x20 && byte != 0x7F) {
+                clean.push(byte);
+            }
+            index += 1;
+        }
+        self.0.write_all(&clean)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
 }

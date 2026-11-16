@@ -38,7 +38,7 @@ impl App {
             ),
             Span::styled(" help ", Style::default().fg(MUTED)),
             Span::styled(
-                "q",
+                " q",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),

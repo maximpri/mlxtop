@@ -237,15 +237,15 @@ mod end_to_end {
             let json = serde_json::json!([
                 {"tag_name": "v2.0.0", "prerelease": false, "assets": []},
                 {"tag_name": tag, "prerelease": version.contains("-rc."), "assets": [
-                    {"name": archive, "browser_download_url": "https://dl/archive"},
-                    {"name": "SHA256SUMS", "browser_download_url": "https://dl/sums"},
+                    {"name": archive, "browser_download_url": "https://github.com/dl/archive"},
+                    {"name": "SHA256SUMS", "browser_download_url": "https://github.com/dl/sums"},
                 ]},
             ]);
             Self {
                 responses: HashMap::from([
                     (RELEASES_URL.to_string(), json.to_string().into_bytes()),
-                    ("https://dl/archive".to_string(), bytes),
-                    ("https://dl/sums".to_string(), sums.into_bytes()),
+                    ("https://github.com/dl/archive".to_string(), bytes),
+                    ("https://github.com/dl/sums".to_string(), sums.into_bytes()),
                 ]),
             }
         }
@@ -332,6 +332,27 @@ mod end_to_end {
     }
 
     #[test]
+    fn assets_outside_github_https_are_refused_with_nothing_downloaded() {
+        let dir = TempDir::new("update-host");
+        let executable = installed(&dir);
+        for url in [
+            "http://github.com/dl/archive",
+            "https://example.com/dl/archive",
+        ] {
+            let mut release = FakeRelease::new(&dir, "v3.1.0", "mlxtop 3.1.0");
+            let json = String::from_utf8(release.responses[RELEASES_URL].clone())
+                .unwrap()
+                .replace("https://github.com/dl/archive", url);
+            release
+                .responses
+                .insert(RELEASES_URL.to_string(), json.into_bytes());
+            let (result, _) = release.run(&executable, "3.0.0", false);
+            assert!(result.unwrap_err().contains("outside github.com"), "{url}");
+            assert_eq!(fs::read_to_string(&executable).unwrap(), "old binary");
+        }
+    }
+
+    #[test]
     fn failed_checks_leave_the_installed_binary_untouched() {
         let dir = TempDir::new("update-fail");
         let executable = installed(&dir);
@@ -343,7 +364,7 @@ mod end_to_end {
         let mut tampered = FakeRelease::new(&dir, "v3.1.0", "mlxtop 3.1.0");
         tampered
             .responses
-            .get_mut("https://dl/archive")
+            .get_mut("https://github.com/dl/archive")
             .unwrap()
             .push(0);
         let (result, _) = tampered.run(&executable, "3.0.0", false);
@@ -356,9 +377,10 @@ mod end_to_end {
         untouched(&dir);
 
         let mut unsummed = FakeRelease::new(&dir, "v3.1.0", "mlxtop 3.1.0");
-        unsummed
-            .responses
-            .insert("https://dl/sums".into(), b"nothing here".to_vec());
+        unsummed.responses.insert(
+            "https://github.com/dl/sums".into(),
+            b"nothing here".to_vec(),
+        );
         let (result, _) = unsummed.run(&executable, "3.0.0", false);
         assert!(result.unwrap_err().contains("SHA256SUMS lists no checksum"));
 
@@ -367,10 +389,10 @@ mod end_to_end {
         let sums = format!("{}  mlxtop-3.1.0-{TARGET}.tar.gz\n", sha256_hex(&garbage));
         corrupt
             .responses
-            .insert("https://dl/archive".into(), garbage);
+            .insert("https://github.com/dl/archive".into(), garbage);
         corrupt
             .responses
-            .insert("https://dl/sums".into(), sums.into_bytes());
+            .insert("https://github.com/dl/sums".into(), sums.into_bytes());
         let (result, _) = corrupt.run(&executable, "3.0.0", false);
         assert!(result.unwrap_err().contains("could not unpack"));
 

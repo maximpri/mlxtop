@@ -89,9 +89,11 @@ fn gpu_memory(sample: &Sample) -> Option<String> {
         return gpu::memory_totals(&sample.gpus)
             .map(|(used, total)| format!("VRAM sum {} / {}", bytes(used), bytes(total)));
     }
+    // Against a limit, or no denominator at all: the driver's current
+    // allocation grows with use and is not a limit.
     match (
         sample.gpu_in_use,
-        crate::memory_composition::gpu_limit(sample).or(sample.gpu_alloc),
+        crate::memory_composition::gpu_limit(sample),
     ) {
         (Some(used), Some(total)) => Some(format!("GPU mem {} / {}", bytes(used), bytes(total))),
         (Some(used), None) => Some(format!("GPU mem {}", bytes(used))),
@@ -121,9 +123,9 @@ fn cpu(sample: &Sample) -> String {
 
 fn rss(sample: &Sample) -> String {
     format!(
-        "LLM RSS {}",
+        "LLM {}",
         if sample.llm_count > 0 {
-            bytes(sample.llm_rss)
+            bytes(sample.runtime_memory())
         } else {
             "—".into()
         }
@@ -132,11 +134,9 @@ fn rss(sample: &Sample) -> String {
 
 /// Thermal state only when it is news: normal is the default.
 fn thermal_note(sample: &Sample) -> Option<String> {
-    (!matches!(
-        sample.thermal.as_str(),
-        "no warning" | "nominal" | "unavailable"
-    ))
-    .then(|| format!("THERMAL {}", sample.thermal))
+    sample
+        .thermal_news()
+        .then(|| format!("THERMAL {}", sample.thermal))
 }
 
 /// Thermal state, always, with the power the machine draws beside it.
@@ -175,7 +175,7 @@ fn plain(value: String, color: Color) -> Line<'static> {
 
 fn identity(sample: &Sample, width: usize) -> Line<'static> {
     // With no runtime found, one statement, not "not detected" twice.
-    let text = if sample.llm_provider == "not detected" {
+    let text = if matches!(sample.llm_provider.as_str(), "not detected" | "none") {
         "No LLM runtime detected".to_owned()
     } else {
         format!("{} · {}", llm_runtime_label(sample), sample.llm_model)
@@ -191,6 +191,17 @@ fn identity(sample: &Sample, width: usize) -> Line<'static> {
 fn state(sample: &Sample) -> Line<'static> {
     // Prompt load shows prefill progress with its time left; the badge
     // names the state only.
+    // A runtime that stopped answering is unreachable; its last readings are
+    // not live, however recent they once were.
+    if sample.llm_status == "stale" {
+        return Line::from(vec![
+            tone_badge(llm_status_tone(&sample.llm_status), "UNREACHABLE"),
+            Span::styled(
+                format!("  {}", telemetry_age(sample.llm_observed_at)),
+                Style::default().fg(MUTED),
+            ),
+        ]);
+    }
     let status = sample.llm_status.to_ascii_uppercase();
     let badge = if llm_is_working(&sample.llm_status) {
         format!("{} {status}", activity_frame(sample))
@@ -218,7 +229,7 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
     } else {
         (
             sample.gpu_in_use?,
-            crate::memory_composition::gpu_limit(sample).or(sample.gpu_alloc)?,
+            crate::memory_composition::gpu_limit(sample)?,
         )
     };
     if total == 0 {
@@ -241,7 +252,17 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
             },
             Style::default().fg(MUTED),
         ),
-        Span::styled(meter_cells(percent, 5), Style::default().fg(color).bg(EDGE)),
+        // The memory panel's GPU bar, in small: the same fill colour.
+        Span::styled(
+            meter_cells(percent, 5),
+            Style::default()
+                .fg(if color == CYAN && !sample.has_discrete_gpus() {
+                    crate::memory_headroom::gpu_fill()
+                } else {
+                    color
+                })
+                .bg(EDGE),
+        ),
         Span::styled(
             format!(" {} / {}", bytes(used), bytes(total)),
             Style::default().fg(color),
@@ -251,10 +272,14 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
 
 /// The card's bottom edge: the machine, then what the runtime uses of it.
 /// Whole fields fit or drop, least important last; thermal only when it is
-/// not normal.
+/// not normal. The chip's peak bandwidth sits beside the chip and is the
+/// first field to go.
 fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     let muted = |text: String| vec![Span::styled(text, Style::default().fg(MUTED))];
-    let mut fields: Vec<Vec<Span<'static>>> = vec![muted(hardware_parts(sample).join(" · "))];
+    let hardware = muted(hardware_parts(sample).join(" · "));
+    let after_hardware =
+        (hardware.iter().map(Span::width).sum::<usize>() <= width).then_some(hardware.len());
+    let mut fields: Vec<Vec<Span<'static>>> = vec![hardware];
     // A reading that is unusual takes the anomaly colour here, where it is
     // shown, with its usual value.
     let insight = &sample.correlation;
@@ -270,7 +295,7 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
     }
     fields.extend(gpu_memory_meter(sample));
     if sample.llm_count > 0 {
-        let mut field = muted(format!("LLM {} · ", bytes(sample.llm_rss)));
+        let mut field = muted(format!("LLM {} · ", bytes(sample.runtime_memory())));
         field.push(match insight.impact(CorrelationCause::Cpu) {
             Some(note) => Span::styled(
                 note.trim_start_matches("runtime ").to_owned(),
@@ -295,6 +320,20 @@ fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
                 .push(Span::styled(" · ", Style::default().fg(DIM)));
         }
         line.spans.extend(field);
+    }
+    // A fact about the hardware, so muted: it goes in only where every other
+    // field still fits.
+    if let (Some(at), Some(bandwidth)) = (after_hardware, crate::chip_facts::of_sample(sample)) {
+        let bandwidth = bandwidth.label();
+        if line.width() + 3 + Line::from(bandwidth.as_str()).width() <= width {
+            line.spans.splice(
+                at..at,
+                [
+                    Span::styled(" · ", Style::default().fg(DIM)),
+                    Span::styled(bandwidth, Style::default().fg(MUTED)),
+                ],
+            );
+        }
     }
     line
 }

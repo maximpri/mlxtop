@@ -20,10 +20,10 @@ fn queue_keeps_idle_zero_but_gaps_stale_and_reported_values() {
     let mut sample = live();
     history.observe(&sample, 10);
     assert_eq!(history.points.back().unwrap().active, Some(0));
-    sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(20));
+    sample.llm_status = "stale".into();
     history.observe(&sample, 10);
     assert_eq!(history.points.back().unwrap().active, None);
-    sample.llm_observed_at = Some(SystemTime::now());
+    sample.llm_status = "idle".into();
     sample.llm_source = TelemetrySource::Report;
     history.observe(&sample, 10);
     assert_eq!(history.points.back().unwrap().waiting, None);

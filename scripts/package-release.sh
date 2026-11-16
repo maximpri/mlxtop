@@ -62,7 +62,8 @@ cat > "$stage/BUILD-INFO.json" <<JSON
   "version": "$version",
   "target": "$target",
   "source_commit": "$commit",
-  "binary_sha256": "$sha"
+  "binary_sha256": "$sha",
+  "rustc": "$(rustc --version 2>/dev/null || echo unknown)"
 }
 JSON
 if [[ "$extension" == zip ]]; then

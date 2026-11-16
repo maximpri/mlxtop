@@ -26,7 +26,7 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Every line of text must tell the operator something the screen does not
   already show. Delete labels that describe the interface ("Includes file
   cache", "older → now", "auto", a SCOPE line), restate a chart, or report a
-  normal state ("THERMAL no warning", "0s old").
+  normal state ("THERMAL nominal", "0s old").
 - Prefer a graphic to words: an icon for a verdict (✓ ▲ ✖, → for an action),
   a meter for a share of capacity, a mark per item for small counts (`●`/`○`),
   a progress bar with time left for work under way, and a spinner for
@@ -50,11 +50,15 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Use one border per chart. Place a dense full-width runtime card above the
   histories; do not wrap charts in another throughput box.
   The runtime card owns the provider, engine, model and status badge, and on
-  its bottom edge the hardware identity, cores, GPU memory meter and the
-  runtime's memory and CPU; thermal state appears only when it is not normal.
+  its bottom edge the hardware identity, cores, the chip's published peak
+  memory bandwidth (a muted fact, the first field to drop), GPU memory meter
+  and the runtime's memory and CPU; thermal state appears only when it is not
+  normal.
   Put a fixed borderless assessment below it: an icon and the finding, with
   evidence only when something is wrong, then a second line only for the next
-  check (→) or a missing reading worth knowing about. Lead with the verdict:
+  check (→), a missing reading worth knowing about, or, under a healthy
+  verdict while decode runs near the best this machine has reached, what
+  would make it faster (a muted note). Lead with the verdict:
   when nothing is actionable and OS pressure is normal, say
   `✓ Healthy · no bottleneck` in green; high GPU use is evidence, never the
   headline. Findings use sentence case. Use `d` for full evidence and runtime
@@ -69,9 +73,12 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   cache is full and whose pressure is normal: a GPU meter of wired memory
   against the GPU wired limit, with what is left under it; a RAM meter of
   what is in use (wired, app, compressed) with file cache as its last
-  segment, and what is left (free plus cache); and a trace of what was left
-  over time, each sample in its pressure colour. Short panels keep the two
-  meters. Without composition counters it is an occupancy area.
+  segment, and what is left (free plus cache); under it, how much more
+  context fits, in tokens per request in flight (`≈37k tokens at 2
+  requests`): a forecast in muted text, never a grade, and the first row to
+  go when rows run short; and a trace of what was left over time, each
+  sample in its pressure colour. Short panels keep the two meters. Without
+  composition counters it is an occupancy area.
   Compression charts compress + decompress traffic (the compressor's size is
   in the memory legend, not repeated as a share of RAM); paging includes the
   swap capacity bar. Prompt history spans two
@@ -136,9 +143,14 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   request IDs or raw payloads in Overview; use Journal for request detail.
 - For NVIDIA devices, put a compact per-card comparison directly below the
   operational summary. Preserve utilization, VRAM used/total and temperature
-  on narrow terminals; add load state and a VRAM bar when width permits. Use
+  on narrow terminals; add load state and a VRAM bar when width permits, then
+  power against its cap, clock against its maximum, memory activity and the
+  PCIe link, each only when a card reports it. A GPU without memory of its
+  own (an AMD APU, DGX Spark) shows the RAM it holds, never a VRAM meter. Use
   `[` / `]` to select cards and reveal overflow, with the visible range labeled.
   Keep card identities distinct and label the combined utilization `GPU max`.
+  What holds a card back (its power cap, a low clock, a slow link, who holds
+  its memory) is said in Diagnostics, never painted.
 - At narrower widths, remove secondary detail before clipping primary values.
   Keep status, throughput, request sizes and resource readings available. Avoid wrapping chart
   headers or allowing long identifiers to displace readings.
@@ -216,6 +228,12 @@ colors in time-series history instead of recoloring old samples on refresh.
   average since the request began, which hides a stall. A generating request
   with no token for 1.5 s has stalled: say so first, with what the host was
   doing meanwhile, and journal its end with its length.
+- Count decode efficiency per verify pass, never per token: with a draft a
+  pass emits several tokens, and per token a healthy server reads 450% of its
+  chip's peak. It is an estimate: say so in its words, never colour it, and
+  show nothing when an input is unknown or it comes out above 100%. Judge it
+  against the best this machine has reached with the model, not the
+  published peak, which no chip reaches.
 - Find slowdowns by anomaly detection, with one rule for every signal. A
   signal has a usual value (the middle of its last 300 samples taken while
   generation ran at its usual speed) and a usual spread (how far it
@@ -237,6 +255,23 @@ colors in time-series history instead of recoloring old samples on refresh.
   until eight samples of it have been: it is learned, never judged against
   different work. Request count and prompt size are therefore never a
   slowdown's reason.
+- Compare like with like within similar work, one sentence per rule. "With a
+  draft model, speed is judged per verify pass, so a change in how well the
+  draft guesses is reported as the text, not as a slowdown": where the
+  runtime counts tokens per pass, earlier speeds are taken at this sample's
+  count. On one Mac Studio thinking off ran 123 tok/s at 7.8 tokens a pass
+  and thinking on 88 at 5.55, both about 15.8 passes a second; over 8,088 of
+  its requests the passes a second within a context band did not move with
+  tokens per pass. "Speed is compared with earlier work at a similar depth,
+  after allowing for the cache each token reads": with the model's weight
+  and KV bytes known, earlier speeds are scaled by
+  (W + kv·t_then) ÷ (W + kv·t_now), since a KV-heavy model loses about a
+  quarter from 16k to 32k inside one factor of two. The bytes model, not a
+  slope learned from the session, because it needs no depth spread to learn
+  from and cannot learn a slowdown as depth; on a hybrid model it explains
+  half of what depth costs and leaves at most 8% per doubling. Judged per
+  pass, the usual speed on the edge follows the text, beside the draft's
+  share (`draft 64% · usual 87.5`).
 - Generation is slow when it is unusually far below the usual speed for its
   work, by at least a fifth and 2 tok/s, for three samples in a row. A slowdown ends
   after three samples back at the usual speed (`RECOVERED`). The usual
@@ -245,9 +280,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   over after 30 idle seconds.
 - A slowdown's reason is whatever else is unusual at the same time, judged
   by the same rule against its own usual value: thermal limiting, memory
-  pressure, paging, the runtime's disk work, a prompt prefilling beside the
-  answer, compression, the queue, model and Metal memory, the runtime's CPU,
-  and a GPU left idle. The host's limits
+  pressure, paging, requests recomputed because the KV cache was full (a rise
+  in the runtime's count of preempted requests), the runtime's disk work, a
+  prompt prefilling beside the answer, compression, the queue, model and
+  Metal memory, the runtime's CPU, and a GPU left idle. The host's limits
   come first when several are unusual; an idle GPU comes last, because it is
   what a slowdown looks like and a reason only by itself. Each
   is said beside its usual value (`paging 96.0 MiB/s (usual 2.0 MiB/s)`,
@@ -255,6 +291,20 @@ colors in time-series history instead of recoloring old samples on refresh.
   however high that level is. With nothing else unusual, say so
   (`nothing else unusual`): never guess. Such a slowdown becomes the usual
   speed for that work after 30 s (`SETTLED`).
+- Usual speeds are kept across sessions, numbers only, in one private file
+  per user: for each machine, runtime, model and quantization, runtime
+  version, draft, band of context and number of requests writing, the latest
+  speeds held outside slowdowns, never one adopted by the settle rule; with a
+  draft, verify passes only, since tokens a second are also the text. Work a
+  session has not yet done is judged against them from its first sample,
+  until the session has its own usual for it (eight samples). One
+  sentence: "This model now generates N% below its usual from earlier
+  sessions at this depth, since <runtime> <old> became <new>", the update
+  named only when the version is known then and now and differs. It is said
+  in Diagnostics from the first judged sample and becomes a slowdown, with
+  its colour and Journal row, only as any other does; once it ends, the
+  session judges itself and it is not told again. The first time the file is
+  created one `SYSTEM` row says where it is and that Settings turns it off.
 - Journal writes a slowdown's start once, each further reason once, and its
   end. A slowdown that repeats the last one's reason within a minute is the
   same story: no new rows.
@@ -304,13 +354,19 @@ colors in time-series history instead of recoloring old samples on refresh.
   prefilling and generating are those requests' own work and get no rows;
   conditions worth inspecting still do. Wrap advice instead of
   truncating it. Avoid generic tuning advice when no problem is established.
+- What a request loses before its first token is said in words, never in
+  colour, which is for generation speed: a long prompt read in full right
+  after a cached one of similar length, a model load, two requests at once
+  that bought no throughput (once a session), and a full KV cache each get
+  a Journal row; the session summary adds the time first tokens lost, and
+  Diagnostics the evidence.
 - Ring the terminal bell once when critical memory pressure or severe paging
   begins. Keep a visible, acknowledgeable banner. High GPU utilization alone
   must never trigger an alarm. Missing counters do not establish recovery.
 
 ## Interaction and review
 
-- Preserve the three views: Overview, Processes and Journal. Place request load
+- Preserve the four views: Overview, Processes, Journal and Settings. Place request load
   in Overview, with contextual history controls and a clear selected marker.
 - Tab/Shift-Tab switch views globally, including from an expanded chart or
   an active process filter. In Overview, arrow keys select charts. Mouse clicks select,
@@ -325,7 +381,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   assigning a model/state to every process. Do not repeat Overview charts.
 - Preserve 1/2/3 for views and p for pause. `d` opens read-only Diagnostics
   outside text entry; Esc/d closes it, and view switching dismisses it. Keep
-  quit and alarm acknowledgment available and label retained paused observations. Shift-↑↓ and Home/End inspect prompt
+  quit and alarm acknowledgment available and label retained paused observations.
+  What cannot be undone asks first: Esc before quitting, and `r` before it
+  clears the session (`y`), where `f` also forgets the usual speeds kept
+  across sessions; any other key keeps everything. Shift-↑↓ and Home/End inspect prompt
   history. Use { / } for sampling cadence. Show contextual controls.
 - Review at 80×24, a medium terminal, and a wide terminal. Check empty, live,
   idle/historical, unavailable and large-value states when affected.

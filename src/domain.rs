@@ -52,7 +52,9 @@ impl EventKind {
     pub(crate) fn from_state(state: &str) -> Self {
         match state {
             "LLM" | "PROMPT" | "DONE" | "SLOWDOWN" | "STALL" | "RESUMED" | "RECOVERED"
-            | "SETTLED" => Self::Llm,
+            | "ENDED" | "SETTLED" | "CACHE MISS" | "MODEL LOAD" | "OVERLAP" | "KV CACHE FULL" => {
+                Self::Llm
+            }
             "QUEUE" => Self::Queue,
             "PRESSURE" | "MEMORY BOTTLENECK" | "MEMORY STRESS" => Self::Pressure,
             "PAGING" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY" | "PAGING ACTIVE"
@@ -152,8 +154,13 @@ pub(crate) struct LlmProcess {
     pub(crate) state: String,
     pub(crate) pageins: Option<u64>,
     pub(crate) pagein_rate: Option<f64>,
+    /// What the OS charges the process for, GPU memory included; resident
+    /// size leaves that out. `None` where the OS gives no such figure.
+    #[serde(default)]
+    pub(crate) footprint: Option<u64>,
 }
 
+#[derive(Clone)]
 pub(crate) struct ProcessSnapshot {
     pub(crate) llm_count: u32,
     pub(crate) llm_rss: u64,
@@ -161,6 +168,8 @@ pub(crate) struct ProcessSnapshot {
     pub(crate) top_llm: Option<LlmProcess>,
     pub(crate) provider: Option<String>,
     pub(crate) largest_consumer: Option<String>,
+    /// The app holding the most memory that is not the runtime, and how much.
+    pub(crate) largest_other: Option<(String, u64)>,
     pub(crate) llm_processes: Vec<LlmProcess>,
     /// CPU % of a Splash engine running beside another runtime: oMLX serves
     /// models through Splash as an external engine.
@@ -215,6 +224,117 @@ pub(crate) struct MetalTelemetry {
     pub(crate) renderer_util: Option<u8>,
     pub(crate) tiler_util: Option<u8>,
     pub(crate) resource_limit: Option<u64>,
+    /// The machine's model identifier (`Mac16,9`, a PC's DMI product
+    /// name): with the chip and RAM, what usual speeds are kept for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_model: Option<String>,
+}
+
+/// macOS's thermal pressure level, as `OSThermalNotification.h` names it.
+/// Nominal is the only level at which macOS holds nothing back for heat;
+/// each one above it is a threshold macOS announces so that work backs off.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub(crate) enum ThermalLevel {
+    Nominal = 0,
+    Moderate = 1,
+    Heavy = 2,
+    Trapping = 3,
+    Sleeping = 4,
+}
+
+impl ThermalLevel {
+    /// The level a notify state stands for. macOS numbers the levels 0–4;
+    /// the header numbers them 0, 10 … 50 on Apple's other systems, where
+    /// Light (10) comes below Moderate: like Nominal, it names nothing.
+    /// Any other number is not a level.
+    pub(crate) fn from_state(state: u64) -> Option<Self> {
+        Some(match state {
+            0 | 10 => Self::Nominal,
+            1 | 20 => Self::Moderate,
+            2 | 30 => Self::Heavy,
+            3 | 40 => Self::Trapping,
+            4 | 50 => Self::Sleeping,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::Moderate => "moderate",
+            Self::Heavy => "heavy",
+            Self::Trapping => "trapping",
+            Self::Sleeping => "sleeping",
+        }
+    }
+}
+
+/// What macOS says about heat, read every few seconds: its thermal pressure
+/// level and, on Intel Macs, the CPU speed limit `pmset` reports. Each is
+/// `None` when it could not be read: unknown is not nominal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct ThermalState {
+    pub(crate) level: Option<ThermalLevel>,
+    /// The share of full CPU speed macOS allows, in percent.
+    pub(crate) cpu_speed_limit: Option<u8>,
+}
+
+impl ThermalState {
+    /// How far macOS holds the machine back for heat, in the pressure
+    /// level's steps (0 nominal … 4 sleeping); a CPU speed limit below full
+    /// speed counts as one step. `None` when nothing was read.
+    pub(crate) fn rank(&self) -> Option<u8> {
+        let level = self.level.map(|level| level as u8);
+        let limited = self.cpu_speed_limit.map(|limit| u8::from(limit < 100));
+        // `None` ranks below any reading.
+        level.max(limited)
+    }
+
+    /// macOS is holding the machine back for heat: a pressure level from
+    /// Heavy up, where Apple says performance is reduced, or a CPU speed
+    /// limit below full speed. Moderate is only "slightly elevated": it is
+    /// named when generation slows while it rises, never on its own.
+    pub(crate) fn limited(&self) -> bool {
+        self.level.is_some_and(|level| level >= ThermalLevel::Heavy)
+            || self.cpu_speed_limit.is_some_and(|limit| limit < 100)
+    }
+
+    /// In words, as recorded and shown: `nominal`, `heavy`, `limited 70%`,
+    /// or `unavailable` when nothing was read.
+    pub(crate) fn label(&self) -> String {
+        let limit = self
+            .cpu_speed_limit
+            .filter(|limit| *limit < 100)
+            .map(|limit| format!("limited {limit}%"));
+        match (self.level, limit) {
+            (Some(level), Some(limit)) if level > ThermalLevel::Nominal => {
+                format!("{}, {limit}", level.label())
+            }
+            (_, Some(limit)) => limit,
+            (Some(level), None) => level.label().into(),
+            (None, None) if self.cpu_speed_limit.is_some() => "no limit".into(),
+            (None, None) => "unavailable".into(),
+        }
+    }
+
+    /// What macOS reported, as a slowdown's reason: `thermal pressure heavy`.
+    pub(crate) fn reason(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(level) = self.level.filter(|level| *level > ThermalLevel::Nominal) {
+            parts.push(format!("thermal pressure {}", level.label()));
+        }
+        if let Some(limit) = self.cpu_speed_limit.filter(|limit| *limit < 100) {
+            parts.push(format!("CPU speed limit {limit}%"));
+        }
+        if parts.is_empty() {
+            "thermal limit".into()
+        } else {
+            parts.join(", ")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -248,6 +368,11 @@ pub(crate) enum CorrelationCause {
     GpuIdle,
     /// Speculative decoding accepting unusually few draft tokens.
     DraftAcceptance,
+    /// The runtime recomputed requests because its KV cache was full.
+    KvPreemption,
+    /// Below the usual speed earlier sessions kept for this work, with
+    /// nothing else unusual: judged against them alone.
+    EarlierSessions,
 }
 
 impl CorrelationCause {
@@ -267,6 +392,8 @@ impl CorrelationCause {
             Self::Cpu => "runtime CPU",
             Self::GpuIdle => "GPU underused",
             Self::DraftAcceptance => "draft acceptance",
+            Self::KvPreemption => "KV cache full",
+            Self::EarlierSessions => "below earlier sessions",
         }
     }
 
@@ -281,7 +408,9 @@ impl CorrelationCause {
             | Self::DiskIo
             | Self::Cpu
             | Self::GpuIdle
-            | Self::DraftAcceptance => Tone::Yellow,
+            | Self::DraftAcceptance
+            | Self::KvPreemption
+            | Self::EarlierSessions => Tone::Yellow,
             Self::None => Tone::Muted,
         }
     }
@@ -355,6 +484,11 @@ pub(crate) struct CorrelationInsight {
     /// The work that usual speed is for (`1 request · 40k context`), or
     /// empty when it is taken over every kind of work.
     pub(crate) usual_for: String,
+    /// When speed is judged against earlier sessions' usual alone and is
+    /// below it: how far, and the runtime's version then and now. Its
+    /// sentence reads `This model now generates 31% below its usual from
+    /// earlier sessions at this depth`.
+    pub(crate) earlier: Option<crate::baseline_store::BelowEarlier>,
 }
 
 /// One slowdown, from the sample where speed first fell to now. The speed
@@ -375,6 +509,8 @@ pub(crate) struct DropEpisode {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DropEnd {
     pub(crate) settled: bool,
+    /// The request ended while still slow: nothing came back or settled.
+    pub(crate) finished: bool,
     pub(crate) seconds: f64,
     pub(crate) low: f64,
     pub(crate) rate: f64,
@@ -522,6 +658,20 @@ pub(crate) struct LlmTelemetry {
     /// The share of draft tokens accepted since the last poll (speculative
     /// decoding), 0–1.
     pub(crate) draft_acceptance: Option<f64>,
+    /// Tokens one verify pass emits with speculative decoding (the draft
+    /// tokens accepted plus the one the model adds), averaged since the last
+    /// poll; `None` without a draft or when the runtime does not say.
+    pub(crate) tokens_per_pass: Option<f64>,
+    /// KV-cache room the runtime reports left, in tokens.
+    pub(crate) kv_free_tokens: Option<u64>,
+    /// Memory the runtime's own plan has left for KV cache, in bytes.
+    pub(crate) kv_free_bytes: Option<u64>,
+    /// Requests the runtime preempted or recomputed for want of KV cache,
+    /// counted since it started.
+    pub(crate) preemptions_total: Option<u64>,
+    /// Requests the runtime is set to run at once, where its settings say:
+    /// oMLX's `max_concurrent_requests`.
+    pub(crate) max_concurrent: Option<u64>,
     pub(crate) source: TelemetrySource,
     pub(crate) observed_at: Option<SystemTime>,
     pub(crate) provider: Option<String>,
@@ -553,7 +703,17 @@ pub(crate) struct LlmTelemetry {
     pub(crate) remote: bool,
     pub(crate) cache_interval_efficiency: Option<f64>,
     pub(crate) mlx: MlxTelemetry,
+    /// What the model reads per pass and holds per token and sequence.
+    pub(crate) model_facts: crate::model_facts::ModelFacts,
+    /// What llama-server says of its slots, sleep and speculative decoding.
+    pub(crate) llama: crate::providers::llama::LlamaReadings,
+    /// Timings finished requests reported beside their counts.
+    pub(crate) request_timings: Vec<RequestTiming>,
 }
+
+/// The recording format samples are written in. 1: each sample carries `ts`
+/// and this number; recordings made before carry neither and read as 0.
+pub(crate) const SAMPLE_SCHEMA: u32 = 1;
 
 /// One poll of the machine and the runtime. It is written to a recording
 /// as it is and read back for replay; what is derived from it (the
@@ -564,6 +724,9 @@ pub(crate) struct Sample {
     #[serde(skip)]
     pub(crate) runtime: crate::runtime_diagnostics::RuntimeReport,
     pub(crate) updated: String,
+    /// Which sample of the session this is; turns the heartbeat.
+    #[serde(skip)]
+    pub(crate) sequence: u64,
     /// Local offset from UTC in seconds, read alongside `updated`. Request
     /// times use it so every clock on screen shares the Journal's zone.
     pub(crate) utc_offset: Option<i32>,
@@ -604,7 +767,16 @@ pub(crate) struct Sample {
     pub(crate) gpus: Vec<gpu::Device>,
     pub(crate) metal: MetalTelemetry,
     pub(crate) mlx: MlxTelemetry,
+    /// The serving model's facts: bytes per pass, KV per token, state.
+    #[serde(default)]
+    pub(crate) model: crate::model_facts::ModelFacts,
+    /// The thermal state in words, as recorded and shown: macOS's pressure
+    /// level or CPU speed limit, or a temperature measured elsewhere.
     pub(crate) thermal: String,
+    /// What macOS says about heat. Recordings made before it was read have
+    /// none: unknown, not nominal.
+    #[serde(default)]
+    pub(crate) thermal_state: ThermalState,
     /// Power the whole machine draws, in milliwatts, where macOS reports it.
     pub(crate) system_power_mw: Option<u64>,
     /// The vm_stat counters the memory reading parsed, handed on to the
@@ -620,8 +792,12 @@ pub(crate) struct Sample {
     pub(crate) disk: DiskActivity,
     pub(crate) ssd_cache: Option<SsdCache>,
     pub(crate) llm_cpu: f64,
+    /// Process rows carry full command lines, which can hold paths and
+    /// keys; they are shown on screen but never written to a recording.
+    #[serde(skip)]
     pub(crate) llm_processes: Vec<LlmProcess>,
     pub(crate) largest_consumer: Option<String>,
+    pub(crate) largest_other: Option<(String, u64)>,
     pub(crate) llm_model: String,
     pub(crate) llm_provider: String,
     pub(crate) llm_status: String,
@@ -651,6 +827,33 @@ pub(crate) struct Sample {
     /// speculative decoding earned. Low acceptance is slow decoding on a
     /// healthy machine.
     pub(crate) llm_draft_acceptance: Option<f64>,
+    /// Tokens one verify pass emitted with speculative decoding, since the
+    /// last poll: the text's share of the speed. `None` without a draft.
+    #[serde(default)]
+    pub(crate) llm_tokens_per_pass: Option<f64>,
+    /// KV-cache room the runtime reports left, in tokens: a pool its
+    /// requests share (vLLM, SGLang), or for llama.cpp the room of the
+    /// running slot nearest its limit.
+    #[serde(default)]
+    pub(crate) llm_kv_free_tokens: Option<u64>,
+    /// Memory the runtime's own plan has left for KV cache, in bytes.
+    #[serde(default)]
+    pub(crate) llm_kv_free_bytes: Option<u64>,
+    /// Requests the runtime preempted or recomputed for want of KV cache,
+    /// counted since it started.
+    #[serde(default)]
+    pub(crate) llm_preemptions_total: Option<u64>,
+    /// Requests the runtime is set to run at once, where its settings say:
+    /// oMLX's `max_concurrent_requests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) llm_max_concurrent: Option<u64>,
+    /// What llama-server says of its slots, sleep and speculative decoding.
+    #[serde(default)]
+    pub(crate) llama: crate::providers::llama::LlamaReadings,
+    /// Timings finished requests reported beside their counts: prompt
+    /// speed and model load, matched to `llm_requests` by request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) llm_request_timings: Vec<RequestTiming>,
     pub(crate) llm_active_requests: Option<u64>,
     pub(crate) llm_waiting_requests: Option<u64>,
     pub(crate) llm_model_memory: Option<u64>,
@@ -665,6 +868,11 @@ pub(crate) struct Sample {
     pub(crate) llm_remote: bool,
     #[serde(skip)]
     pub(crate) correlation: CorrelationInsight,
+    /// What the session's requests lost before their first tokens (cache
+    /// misses, model loads, overlap) and the evidence: derived, like the
+    /// correlation, never recorded.
+    #[serde(skip)]
+    pub(crate) request_findings: crate::request_findings::Evidence,
     pub(crate) llm_top: String,
     pub(crate) llm_pid: u32,
     pub(crate) impact: String,
@@ -672,13 +880,71 @@ pub(crate) struct Sample {
     pub(crate) health: Option<u16>,
     pub(crate) grade: String,
     pub(crate) limiter: String,
-    pub(crate) guidance_badge: String,
-    pub(crate) guidance_cause: String,
-    pub(crate) guidance_action: String,
     pub(crate) rate_ready: bool,
+    /// When the sample was taken, in milliseconds since the Unix epoch.
+    /// `updated` is the time of day only, so a recording that runs past
+    /// midnight needs this to be read in order. Unknown in recordings made
+    /// before it was added.
+    #[serde(default)]
+    pub(crate) ts: Option<u64>,
+    /// The recording format it is written in: `SAMPLE_SCHEMA`, or 0 when
+    /// read from a recording that carries no number.
+    #[serde(default)]
+    pub(crate) schema: u32,
 }
 
 impl Sample {
+    /// What the runtime holds: the footprint of its largest process where
+    /// the OS reports it (on Apple Silicon resident size leaves out memory
+    /// the GPU holds for it), else the resident size of its processes.
+    pub(crate) fn runtime_memory(&self) -> u64 {
+        self.process_memory
+            .as_ref()
+            .map_or(0, |reading| reading.footprint)
+            .max(self.llm_rss)
+    }
+
+    /// RAM in use against all of RAM, and what is left, as the memory panel
+    /// says it; the resident figure only where the OS gives no breakdown.
+    pub(crate) fn memory_use_label(&self) -> String {
+        use crate::formatting::bytes;
+        match crate::memory_composition::segments(self) {
+            Some(sizes) => format!(
+                "RAM {} · {} left",
+                crate::memory_headroom::of_total(sizes[0] + sizes[1] + sizes[2], self.total_memory),
+                bytes(crate::memory_headroom::left(sizes))
+            ),
+            None => format!(
+                "RAM resident {}",
+                self.resident_memory
+                    .map(bytes)
+                    .unwrap_or_else(|| "—".into())
+            ),
+        }
+    }
+
+    /// Whether the runtime's readings in this sample are current. Decided
+    /// once, when the sample is taken (telemetry older than a few seconds is
+    /// marked `stale` then), so a verdict holds until the next sample at any
+    /// interval and while paused.
+    pub(crate) fn llm_fresh(&self) -> bool {
+        self.llm_source == TelemetrySource::Live && self.llm_status != "stale"
+    }
+
+    /// Whether the thermal state is worth saying: macOS is holding the
+    /// machine back for heat. Without a macOS reading (a temperature
+    /// measured elsewhere, an older recording) the words decide.
+    pub(crate) fn thermal_news(&self) -> bool {
+        if self.thermal_state.rank().is_some() {
+            self.thermal_state.limited()
+        } else {
+            !matches!(
+                self.thermal.as_str(),
+                "no warning" | "nominal" | "unavailable"
+            )
+        }
+    }
+
     /// Paging rates are measured and the rate baseline is ready.
     pub(crate) fn paging_measured(&self) -> bool {
         self.swap_available && self.rate_ready && !self.paging_unavailable
@@ -725,6 +991,26 @@ impl Sample {
     pub(crate) fn has_discrete_gpus(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "windows")) && !self.gpus.is_empty()
     }
+
+    /// Where this machine's GPU memory comes from: a pool of its own, or
+    /// the same RAM everything else uses.
+    pub(crate) fn gpu_memory(&self) -> gpu::Memory {
+        if self.has_discrete_gpus() {
+            gpu::memory(&self.gpus)
+        } else if self.apple_gpu() || cfg!(target_os = "macos") {
+            gpu::Memory::Shared
+        } else {
+            gpu::Memory::Unknown
+        }
+    }
+
+    /// An Apple GPU was read (`ioreg` named it or counted its cores; Linux
+    /// and Windows fill only the CPU architecture). Its memory is the
+    /// machine's RAM wherever the sample is shown, so a Mac's recording
+    /// keeps its one pool on Linux.
+    pub(crate) fn apple_gpu(&self) -> bool {
+        self.metal.device_name.is_some() || self.metal.gpu_cores.is_some()
+    }
 }
 
 impl Default for Sample {
@@ -732,6 +1018,7 @@ impl Default for Sample {
         Self {
             runtime: Default::default(),
             updated: "waiting".into(),
+            sequence: 0,
             utc_offset: None,
             pressure: "UNKNOWN".into(),
             pressure_meaning: "unavailable".into(),
@@ -763,7 +1050,9 @@ impl Default for Sample {
             gpus: Vec::new(),
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
+            model: Default::default(),
             thermal: "unavailable".into(),
+            thermal_state: ThermalState::default(),
             system_power_mw: None,
             vm_counters: None,
             llm_count: 0,
@@ -775,6 +1064,7 @@ impl Default for Sample {
             llm_cpu: 0.0,
             llm_processes: Vec::new(),
             largest_consumer: None,
+            largest_other: None,
             llm_model: "not detected".into(),
             llm_provider: "not detected".into(),
             llm_status: "offline".into(),
@@ -796,6 +1086,13 @@ impl Default for Sample {
             llm_cache_interval_efficiency: None,
             llm_prefix_hit_rate: None,
             llm_draft_acceptance: None,
+            llm_tokens_per_pass: None,
+            llm_kv_free_tokens: None,
+            llm_kv_free_bytes: None,
+            llm_preemptions_total: None,
+            llm_max_concurrent: None,
+            llama: Default::default(),
+            llm_request_timings: Vec::new(),
             llm_active_requests: None,
             llm_waiting_requests: None,
             llm_model_memory: None,
@@ -807,6 +1104,7 @@ impl Default for Sample {
             llm_engine: None,
             llm_remote: false,
             correlation: CorrelationInsight::default(),
+            request_findings: Default::default(),
             llm_top: "none".into(),
             llm_pid: 0,
             impact: "SAMPLING".into(),
@@ -814,10 +1112,9 @@ impl Default for Sample {
             health: None,
             grade: "SAMPLING".into(),
             limiter: "collecting baseline".into(),
-            guidance_badge: "WAIT".into(),
-            guidance_cause: "Collecting the live-rate baseline.".into(),
-            guidance_action: "Wait one refresh before acting.".into(),
             rate_ready: false,
+            ts: None,
+            schema: SAMPLE_SCHEMA,
         }
     }
 }
@@ -842,6 +1139,7 @@ pub(crate) struct VmCounters {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct RequestUsage {
     pub provider: String,
     pub model: String,
@@ -862,4 +1160,29 @@ pub(crate) struct RequestUsage {
     /// runtime reports it. A generating request that stops is stalled.
     pub idle_for: Option<Duration>,
     pub observed_at: Option<SystemTime>,
+}
+
+/// What a finished request's runtime reported of its timing beyond its
+/// counts: how fast it read the prompt, and how long the request waited for
+/// the model to load. It names its request as `RequestUsage` does.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct RequestTiming {
+    pub provider: String,
+    pub model: String,
+    pub id: String,
+    /// Prompt tokens per second over the part of the prompt the runtime
+    /// computed (cached tokens are not read again).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_tps: Option<f64>,
+    /// Milliseconds the request waited for the runtime to load the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_ms: Option<u64>,
+}
+
+impl RequestTiming {
+    /// Whether this is the timing of `request`.
+    pub(crate) fn belongs_to(&self, request: &RequestUsage) -> bool {
+        self.id == request.id && self.provider == request.provider && self.model == request.model
+    }
 }

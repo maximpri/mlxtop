@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! Bounded OS/queue samples and explicitly reported request latency.
-use crate::domain::{CorrelationCause, Sample, TelemetrySource};
+use crate::domain::{CorrelationCause, Sample};
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 #[derive(Clone, Default)]
 pub(crate) struct Point {
@@ -51,13 +51,7 @@ pub(super) struct History {
 
 impl History {
     pub fn observe(&mut self, sample: &Sample, limit: usize) {
-        let fresh = sample.llm_source == TelemetrySource::Live
-            && sample.llm_status != "stale"
-            && sample.llm_observed_at.is_some_and(|at| {
-                SystemTime::now()
-                    .duration_since(at)
-                    .is_ok_and(|age| age <= Duration::from_secs(5))
-            });
+        let fresh = sample.llm_fresh();
         self.points.push_back(Point {
             active: fresh.then_some(sample.llm_active_requests).flatten(),
             waiting: fresh.then_some(sample.llm_waiting_requests).flatten(),

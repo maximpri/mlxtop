@@ -1,5 +1,314 @@
 # Changelog
 
+## 3.4.0 — 2026-11-16
+
+mlxtop learns what fast means for the machine it watches. It reads what the
+model reads per forward pass and what the chip can move, and estimates how
+close decode runs to that limit; it judges usual speed per verify pass and at
+the same context depth, keeps it across sessions, says how much more context
+fits, and names what first tokens lose to cache misses, model loads and
+overlapping requests. It also carries every fix from the review of 3.3.0
+(3.3.1 was never released; its fixes ship here). **Update with the install
+script or Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS
+crates this release replaces.
+
+### Is this speed normal?
+
+- **How close decode runs to the chip.** Diagnostics (`d`) estimates the
+  share of the chip's peak bandwidth decode reads, counted per verify pass,
+  and with a draft its payoff; `--once` adds `DECODE`/`DRAFT` lines, the
+  session summary gives it by context, and a healthy verdict notes when decode
+  is near the best this Mac has reached. Nothing is shown when an input is
+  unknown or it would exceed 100%.
+- **The chip's memory bandwidth.** The runtime card's bottom edge names the
+  peak its maker publishes beside the chip (`410 GB/s` on a 32-core M4 Max,
+  not the 40-core part's 546), and `--once` adds it to the METAL line. A chip
+  or bin mlxtop cannot tell apart shows nothing, and the figure is the first
+  field to go when the edge is short.
+- **What the model costs, in Diagnostics.** `d` and `mlxtop doctor` show the
+  weights one forward pass reads (decoder layers and output head, not a
+  vision tower, MTP head or embedding lookup), bits per weight and
+  quantization, KV bytes per token and its format, the state each sequence
+  holds, the draft, the context allowed and trained, and the runtime's
+  version. For a local MLX model they come from its `config.json` and
+  safetensors headers, never its weights, read once per model; llama.cpp,
+  Ollama, LM Studio, vLLM and SGLang give theirs through their APIs.
+- **Usual speed compared like with like.** With a draft whose runtime counts
+  tokens per verify pass (Splash), speed is judged per pass, so text the draft
+  guesses less well, such as thinking on, is not a slowdown. With the model's
+  weight and KV bytes known, earlier speeds are scaled to the current depth,
+  so a KV-heavy model twice as deep is not called slow.
+- **Usual speeds survive restarts and upgrades.** mlxtop keeps each model's
+  usual generation speed by context, numbers only, in a private file, so a
+  new session judges its first request against earlier sessions. A model that
+  now runs slower says so once: "This model now generates 31% below its usual
+  from earlier sessions at this depth, since oMLX 0.7.3 became 0.8.0". Turn it
+  off in Settings; `r` now asks first, and `f` there forgets what was kept.
+
+### What limits it
+
+- **Heat is named on Apple Silicon.** mlxtop reads macOS's thermal pressure
+  level (`notifyutil`) every 5 s; `pmset` printed no CPU limit on Apple
+  Silicon, so Thermal never fired there. From `heavy` up the card reads
+  `THERMAL heavy` and the verdict `Thermal limit`; a slowdown while the level
+  rises (from `moderate` up) is put down to `thermal pressure …`. A level that
+  cannot be read shows `thermal —`, never nominal; Intel Macs keep `pmset`'s
+  CPU speed limit.
+- **How much more context fits.** The memory panel shows the tokens each
+  request in flight can still add (`≈37k tokens at 2 requests`), from the
+  runtime's own KV room or plan where it reports one, the configured window
+  for llama.cpp-style runtimes, or memory left for MLX. Diagnostics shows the
+  arithmetic. It is an estimate, never coloured, and the first row to drop.
+- **Wired-limit advice** comes from 90% of `iogpu.wired_limit_mb` or of
+  Metal's recommended working set, where MLX warns generation can slow.
+- **The session summary keeps each model load's peak memory**, with the
+  context it held then, after the model is unloaded.
+- **What first tokens lose.** The Journal names a long prompt read in full
+  right after a cached one of similar length (`CACHE MISS`), a model load
+  (`MODEL LOAD`), requests recomputed for a full KV cache (`KV CACHE FULL`)
+  and, once a session, two requests at once that bought no throughput
+  (`OVERLAP`, noting oMLX's `max_concurrent_requests`). The summary adds the
+  time first tokens lost and Diagnostics the evidence. Nothing is coloured: on
+  a month of one Mac Studio's logs the cache rule fired 5 times in 10,653
+  requests.
+- **A full KV cache is named.** A slowdown while the runtime recomputes
+  preempted requests reads `KV cache full · 2 requests recomputed`, ahead of
+  the prefill it causes.
+- **NVIDIA and AMD limits.** The GPU table adds power against its cap
+  (`183/450 W`), clock against its maximum, memory activity and the PCIe link
+  as width allows. Throttling, slow links and who holds a full card's memory
+  are told in Diagnostics, and a card held for heat is named when generation
+  slows. A field an older driver lacks no longer costs the core readings.
+- **Strix Halo and other AMD APUs** show their memory as the one pool it is,
+  RAM held against its GTT limit, never a near-empty VRAM meter. AMD cards add
+  memory activity, power, clocks and GTT, without waking a sleeping card.
+- **Energy per token on Linux and Windows** uses the GPUs' own power,
+  labelled as such.
+
+### Runtimes
+
+- **Splash's draft, counted per verify pass.** mlxtop reads tokens per verify
+  pass from Splash's counters, matching Splash's own log within its rounding,
+  shows them beside a lone request's output, and reads the KV room in
+  Splash's memory plan. Splash 1.6 also says what paused decoding and held
+  each first token. Under oMLX, Splash's status is private, and Diagnostics
+  says so.
+- **The completion log no longer passes off a whole request's rate as
+  generation speed.**
+- **llama.cpp no longer wakes a sleeping server.** mlxtop reads `/metrics`
+  first and `/slots` only while a request runs; a server started with
+  `--sleep-idle-seconds` can sleep and reads as idle, with `Asleep` in
+  Diagnostics. Each answering request gets its own row in prompt load, the KV
+  cache panel shows its hit rate, and Diagnostics adds slots and speculative
+  decoding.
+- **Prompt speed and model load for finished requests.** The usage recorder
+  reads llama-server `timings` from any runtime, Ollama's prompt and load
+  durations, LM Studio's model load time, and oMLX's prompt speed and model
+  load. Prompt load shows `MODEL LOAD`
+  and `PREFILL` beside a reported request's speed.
+- **SGLang and TensorFold speeds are live.** Decode rates come from counters
+  that move every step, so slowdowns are judged while they generate. vLLM,
+  SGLang and TensorFold add KV room left, preemptions, draft tokens per verify
+  pass and per-interval queue waits to Diagnostics. Ollama (one read-only
+  `/api/show` per model) and LM Studio add quantization, parameters, experts
+  and context to the model facts. No adapter asks a runtime for a route that
+  changes state or generates a token.
+- **No request to oMLX's port until an oMLX is found.** With no oMLX process
+  detected and none chosen, mlxtop no longer probes `127.0.0.1:8000/health`;
+  SGLang answers `/health` by generating a token, so an unseen SGLang there
+  was made to generate one every few seconds. An oMLX behind a tunnel needs
+  `MLXTOP_PROVIDER=omlx` or an `omx` port.
+
+### Output
+
+- **JSON for scripts and agents.** `mlxtop --once --json` prints the static
+  report as one line of JSON, and `mlxtop stream` writes one per sample,
+  ending quietly when its reader goes away or on a signal. Units are in every
+  field name, unknown readings are null, each figure is tagged host, runtime
+  or estimate, and no process names leave the machine. Schema 1, experimental
+  through 3.4.
+- **`mlxtop serve`** answers `/metrics` (Prometheus), `/snapshot` and
+  `/health` on 127.0.0.1:10063 from the newest sample, loopback only (reach it
+  from another machine with `ssh -L`). The snapshot and metrics carry the
+  chip's published bandwidth, the model's facts, decode efficiency, context
+  left, the runtime's KV room, preemptions and tokens per verify pass, each
+  tagged or described as an estimate where it is one.
+
+- **For scripts and Prometheus:** `stream` and `serve` add the session's time
+  lost before first tokens; every snapshot adds the finding against earlier
+  sessions (how far below, and the update), and `/metrics` carries both.
+
+### Evidence
+
+- **`mlxtop replay` tallies each reason:** its slow samples, the episodes the
+  Journal began with it and episodes per hour of generation. It also lists
+  cache misses, model loads, full KV caches and overlap with the slowdowns,
+  tallied with their rows per hour and the time each cost.
+- **Each sample keeps more evidence.** Log lines end with `pressure=`,
+  `thermal=`, `power_mw=`, `draft=` and `ts=` (`na` if not read), and recorded
+  samples carry `ts`; older recordings replay as before.
+
+### Fixes
+
+- **A Mac's memory is one pool wherever it is shown.** The memory panel chose
+  its layout from the build target, so four tests failed on Linux in the
+  3.3.1 test builds (and would in CI there), and a Mac's recording replayed on Linux
+  drew the wrong panel. An Apple GPU reading now decides.
+- **A local port nobody listens on is asked again within seconds on
+  Windows too.** Windows retries a refused connect for about two seconds, so
+  the oMLX client read it as a hung server and waited up to 30 s. A connect
+  that times out on a loopback address is now a refusal; a hung server still
+  waits up to 30 s.
+
+### Fixes from the review of 3.3.0
+
+The rest of this release's notes are the fixes made after a full review of
+3.3.0, tried as 3.3.1 test builds and never released on their own.
+
+### Security and privacy
+
+- **TLS crates refreshed.** rustls 0.23.46, rustls-webpki 0.103.17 and
+  webpki-roots 1.0.12 clear RUSTSEC-2026-0346 to -0349, -0381 and -0382;
+  the last two let a distrusted certificate authority vouch for a server,
+  which mattered to `mlxtop update`. CI now runs every cargo-deny check,
+  weekly too.
+- **Recordings hold no command lines** and are created readable by you
+  only. A runtime's command line can carry a key or a home path, and a
+  recording is meant to go with a bug report. Recordings made by 3.3.0 do
+  contain them: check one before sharing it.
+- **No control characters reach the terminal** from `--once`, `doctor`,
+  `replay` or the exit summary, whatever a runtime or a recording holds.
+- **The oMLX key goes only to a found oMLX.** It is sent when an oMLX
+  process was detected or oMLX was chosen, never to another program
+  answering on port 8000. The updater accepts release assets only from
+  `https://github.com/`; the log is created owner-only.
+
+### The verdict
+
+- **A measured slowdown leads the headline.** A 67% drop read `Compression
+  active` while the chart and Journal showed the slowdown; any host state
+  other than a critical one now gives way to `Generation slowed` or
+  `Generation stalled`.
+- **The verdict holds between samples at every interval.** Freshness is
+  decided when a sample is taken, so a slowdown no longer turns `Healthy` 5 s
+  after a sample at long intervals or while paused. Slowdowns are found at
+  30 s and 60 s intervals, the session summary counts work above 10 s, and
+  counter-based runtimes keep their rates at 5 s and more.
+- **One bell and one story per incident.** A critical episode ends after
+  three calm samples (the bell rang 8 times in 75 s near a threshold), a
+  state already told within 10 samples is not told again, and a stall that
+  comes back within a minute is the same stall. `Paging active` begins at
+  the documented 4 MiB/s.
+- **A prompt being read is not a slowdown** on runtimes that count tokens
+  but list no requests, and a slowdown whose request ends is closed with an
+  `ENDED` row.
+- **Stopped sampling is shown.** `NO SAMPLE 12s` or `STOPPED` replaces the
+  heartbeat, and the verdict reads `Sampling stopped`; a panic message no
+  longer prints over the dashboard.
+
+### Readings
+
+- **A failed reading is unknown, not zero.** One failed `ps` made the
+  runtime vanish and emptied its speed chart; one failed `vm_stat` raised
+  `SWAP THRASHING` at 76 GiB/s. A comma-decimal locale (German, French,
+  ...) hid every process and zeroed swap; one non-UTF-8 argument anywhere
+  discarded the process list.
+- **Process names are real** on macOS (`Google Chrome`, not `Go`), and only
+  serving processes are runtimes: `tail -f ollama-notes.txt` is not Ollama.
+  Runtimes started through `python` or `node` are still found;
+  `MLXTOP_PROVIDER` forces a choice.
+- **A stock oMLX shows its speeds.** The key is read from
+  `MLXTOP_PROVIDER_API_KEY`, `OMLX_API_KEY`, `server.env` or `auth.api_key`
+  in oMLX's own `settings.json`; with none, the Overview says so.
+- **A runtime that hangs costs one short wait.** Every request of one poll
+  shares 1.5 s, so memory and paging keep being sampled; quit does not wait
+  for it. A runtime started after mlxtop shows within seconds, not 30.
+  `localhost` and kept-open connections work for oMLX.
+- **No runtime reads `No LLM runtime detected`**, and one that stopped
+  answering reads `UNREACHABLE` with its age. Every runtime's connection
+  changes are logged.
+- **llama.cpp averages come from its counters**, not gauges each scrape
+  resets; vLLM prefill leaves out cached tokens and is not called live;
+  mlx-serve restarts are seen; a server answering 401 or 503 on its second
+  port is found there.
+- **GPU memory is compared with a limit only when one is known**, and the
+  Linux memory panel no longer counts the page cache twice: cache and free
+  add up to `MemAvailable`.
+
+### Interface
+
+- **Signals restore the terminal.** `kill`, `pkill`, `timeout` or a closed
+  session no longer leave the shell in raw mode; Ctrl-C quits from Help.
+- **Small terminals show the verdict** above the size note, and keys other
+  than quit wait until the terminal is larger.
+- **The Journal reaches its oldest event** when rows wrap; Down past the end
+  no longer stores an index Up has to unwind.
+- **Replay lists every finding** (it stopped after about 120 requests),
+  reports lines it could not read, and refuses files that are not
+  recordings.
+- **Messages name what is wrong:** `mlxtop dcotor` says `unknown command`,
+  a `config.json` that does not parse is reported once, and Settings keeps a
+  symlinked config linked and private.
+- **The memory panel is laid out as the hardware is.** Where the GPU has
+  no memory of its own (Apple Silicon, and NVIDIA's integrated GPUs such as
+  DGX Spark and Jetson) there is one pool and one bar: what the GPU holds
+  is the first part of RAM's wired memory, split into the model and the KV
+  cache and everything else where the runtime gives the model's size. Under
+  it are how near the GPU is to its limit, what is left (free memory and
+  cache, or the room under the GPU limit where that is less), each part's
+  size, the runtime's footprint and the largest other app, and the same
+  pool over time in dimmed colours. Where cards have their own memory,
+  VRAM and RAM each get a meter and a chart. The trace of what was left and
+  the sentence repeating the GPU meter are gone.
+- **Each prompt shows the speed it generated at.** Under every bar of the
+  prompt-load chart, below its size: `24.5/s`. The Overview's panel shows
+  it without being expanded; the count of generated tokens moves one row
+  down, on panels tall enough for both.
+- **Processes show each process's footprint** on macOS, beside its RSS and
+  in the title's total: a runtime's resident size leaves its GPU memory
+  out (7.0 GiB of RSS for a process holding 23.4 GiB).
+- **Nothing is cut mid-word at 80 columns.** The KV panel shortens its name
+  and keeps its reading (it read `KV cache / model I/O %`), the paging
+  footer and the empty-window message use a shorter wording that fits, and
+  any other bottom-edge summary drops whole fields.
+- **Settings holds the inference engine's API key.** It is typed and shown
+  as dots, saved to a `config.json` readable by you only, and used at once.
+  `MLXTOP_PROVIDER_API_KEY` still overrides it. The first time in a session
+  that the engine asks for a key mlxtop does not have, or refuses the one in
+  the file, mlxtop opens Settings on the key, ready to type; Esc carries on
+  without it. The Overview names a missing or refused key (`No live rates:
+  llama.cpp refused the API key · 4 for Settings`).
+- **One figure per fact.** The header's `LLM` and the memory panel's `by
+  app` both give the runtime's footprint (the header gave its resident
+  size: 7.2 GiB beside 23.4 GiB). The Journal's first row, `--once` and the
+  critical-pressure line give RAM in use and what is left, as the panel
+  does. The KV bar's `RAM` and `SSD` shares add up to the title's hit rate
+  as printed (92% and 2% under `KV hit 90%`). An expanded memory chart's
+  title no longer gives a share "resident" over a panel that gives RAM by
+  kind (`avg 98%` over `31.7 / 36.0 GiB`).
+- **Zero and a trickle stand on one baseline.** A zero rate drew a dash
+  through the middle of its row and a tiny rate a sliver at the bottom, so
+  compression that came and went looked like a dashed line. Byte-rate axes
+  top out at round figures: `1.5 MiB/s`, not `1.4 MiB/s`.
+- **Idle is said once.** The empty generation and prefill panels read `No
+  rate samples yet`, the GPU panel's edge says nothing under `0%`, and an
+  empty panel carries no `tok/s`. The SSD cache row keeps words when it is
+  short of room (`1.5k loaded · 1.3k saved`), not `↑1.5k ↓1.3k ✕327`.
+- **A short compression or paging panel keeps a trickle small.** At two
+  rows tall the panel scaled to its own peak, so 16 KiB/s of compression
+  drew full bars; it now scales against the warning rate, as the taller
+  chart does.
+- Smaller fixes: `CPU 0.0%`, not `-0.0%`; `1 request waiting`; the paging
+  panel says `memory is short` only from the warning rate; the
+  discrete-GPU layout drops `% resident` and `No paging traffic`.
+
+### Delivery
+
+- Each release is installed by a machine with both install scripts and
+  updated from the previous one, on macOS, Linux and Windows. Jobs have
+  timeouts, the toolchain action is pinned, a final release with no
+  changelog section fails, and a CI job checks Rust 1.88.
+
 ## 3.3.0 — 2026-11-11
 
 ### Diagnosis

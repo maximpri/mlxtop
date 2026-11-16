@@ -17,10 +17,15 @@ fn live_sample() -> Sample {
         total_memory: 32 * 1024_u64.pow(3),
         gpu_in_use: Some(8 * 1024_u64.pow(3)),
         gpu_alloc: Some(16 * 1024_u64.pow(3)),
-        thermal: "no warning".into(),
+        thermal: "nominal".into(),
+        thermal_state: ThermalState {
+            level: Some(ThermalLevel::Nominal),
+            cpu_speed_limit: None,
+        },
         metal: MetalTelemetry {
             device_name: Some("Apple M4 Max".into()),
             gpu_cores: Some(32),
+            resource_limit: Some(16 * 1024_u64.pow(3)),
             ..MetalTelemetry::default()
         },
         ..Sample::default()
@@ -62,7 +67,7 @@ fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
             );
         }
         // No label for the card, no age on a fresh reading, no normal thermals.
-        for noise in ["SYSINFO", "0s old", "THERMAL no warning"] {
+        for noise in ["SYSINFO", "0s old", "THERMAL"] {
             assert!(
                 !screen.contains(noise),
                 "{noise} at {width}x{height}\n{screen}"
@@ -91,7 +96,7 @@ fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
             for label in [
                 "32 GPU cores",
                 "CPU 0.8%",
-                "LLM RSS 16.0 GiB",
+                "LLM 16.0 GiB",
                 "GPU mem 8.0 GiB / 16.0 GiB",
             ] {
                 assert!(
@@ -109,16 +114,20 @@ fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
 }
 
 #[test]
-fn long_model_never_hides_stale_state_or_source_age() {
+fn long_model_never_hides_unreachable_state_or_its_age() {
     let mut sample = live_sample();
     sample.llm_model = "a-very-long-model-name-".repeat(8);
     sample.llm_status = "stale".into();
     sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(3_600));
     for height in [3, 5] {
         let screen = render(&sample, &request_history::History::default(), 80, height);
-        for label in ["STALE", "LIVE", "1h old", "PROMPT 32.8k"] {
+        for label in ["UNREACHABLE", "1h old", "PROMPT 32.8k"] {
             assert!(screen.contains(label), "missing {label}\n{screen}");
         }
+        assert!(
+            !screen.contains("LIVE"),
+            "an unreachable runtime is not live\n{screen}"
+        );
         assert!(screen.contains('…'));
     }
 }
@@ -161,7 +170,7 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
     assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
 
     let screen = render(&Sample::default(), &history, 100, 5);
-    for label in ["RAM —", "CPU —", "LLM RSS —"] {
+    for label in ["RAM —", "CPU —", "LLM —"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(!screen.contains("CPU 0.0%"));
@@ -215,12 +224,13 @@ fn the_header_colours_a_reading_that_is_unusual() {
     };
     let mut sample = live_sample();
     sample.llm_cpu = 380.0;
-    sample.thermal = "limited 60%".into();
+    sample.thermal_state.level = Some(ThermalLevel::Heavy);
+    sample.thermal = sample.thermal_state.label();
     // Ordinarily: a quiet CPU figure, and thermal in its warning colour.
     let footer = host_footer(&sample, 160);
     assert!(line_text(&footer).contains("CPU 380%"));
     assert_eq!(colour_of(&footer, "CPU 380%"), Some(MUTED));
-    assert_eq!(colour_of(&footer, "THERMAL limited 60%"), Some(YELLOW));
+    assert_eq!(colour_of(&footer, "THERMAL heavy"), Some(YELLOW));
 
     // Beside a slowdown they were unusual for: the anomaly colour, and the
     // CPU says what is usual.
@@ -229,7 +239,7 @@ fn the_header_colours_a_reading_that_is_unusual() {
         cause: CorrelationCause::Thermal,
         unusual: vec![CorrelationCause::Thermal, CorrelationCause::Cpu],
         notes: vec![
-            "thermal limit".into(),
+            "thermal pressure heavy".into(),
             "runtime CPU 380% (usual 95%)".into(),
         ],
         ..CorrelationInsight::default()
@@ -245,7 +255,7 @@ fn the_header_colours_a_reading_that_is_unusual() {
         Some(Tone::Unusual.color())
     );
     assert_eq!(
-        colour_of(&footer, "THERMAL limited 60%"),
+        colour_of(&footer, "THERMAL heavy"),
         Some(Tone::Unusual.color())
     );
 
@@ -254,29 +264,45 @@ fn the_header_colours_a_reading_that_is_unusual() {
     sample.correlation.direction = ThroughputDirection::Flat;
     let footer = host_footer(&sample, 160);
     assert_eq!(colour_of(&footer, "CPU 380%"), Some(MUTED));
-    assert_eq!(colour_of(&footer, "THERMAL limited 60%"), Some(YELLOW));
+    assert_eq!(colour_of(&footer, "THERMAL heavy"), Some(YELLOW));
 }
 
 #[test]
 fn gpu_memory_reads_against_the_limit_and_thermal_and_power_always_show() {
     let mut sample = live_sample();
     let history = request_history::History::default();
-    // Without a limit, the driver's allocation is all there is to compare with.
+    // Without a limit there is nothing to compare with: the driver's current
+    // allocation grows with use and is not one.
+    sample.metal.resource_limit = None;
     let screen = render(&sample, &history, 160, 6);
-    assert!(screen.contains("8.0 GiB / 16.0 GiB"), "{screen}");
+    assert!(screen.contains("GPU mem 8.0 GiB"), "{screen}");
+    assert!(!screen.contains("8.0 GiB / 16.0 GiB"), "{screen}");
     // With one, the header agrees with the memory legend's GPU limit.
     sample.metal.resource_limit = Some(32 * 1024_u64.pow(3));
     sample.system_power_mw = Some(61_400);
     let screen = render(&sample, &history, 160, 6);
     assert!(screen.contains("8.0 GiB / 32.0 GiB"), "{screen}");
     assert!(screen.contains("thermal ok · 61 W"), "{screen}");
-    sample.thermal = "unavailable".into();
+    // A level that could not be read is unknown, not ok.
+    sample.thermal_state = ThermalState::default();
+    sample.thermal = sample.thermal_state.label();
     assert!(render(&sample, &history, 160, 6).contains("thermal — · 61 W"));
     sample.system_power_mw = None;
     assert!(!render(&sample, &history, 160, 6).contains("thermal"));
-    sample.thermal = "serious".into();
+    // A raised level is news.
+    sample.thermal_state.level = Some(ThermalLevel::Heavy);
+    sample.thermal = sample.thermal_state.label();
     sample.system_power_mw = Some(90_000);
-    assert!(render(&sample, &history, 160, 6).contains("THERMAL serious · 90 W"));
+    assert!(render(&sample, &history, 160, 6).contains("THERMAL heavy · 90 W"));
+    // An Intel Mac at full CPU speed with no level read: ok, not news.
+    sample.thermal_state = ThermalState {
+        level: None,
+        cpu_speed_limit: Some(100),
+    };
+    sample.thermal = sample.thermal_state.label();
+    let screen = render(&sample, &history, 160, 6);
+    assert!(screen.contains("thermal ok · 90 W"), "{screen}");
+    assert!(!screen.contains("no limit"), "{screen}");
 }
 
 #[test]
@@ -285,4 +311,37 @@ fn with_no_runtime_the_header_says_so_once() {
     let screen = render(&sample, &request_history::History::default(), 120, 3);
     assert!(screen.contains("No LLM runtime detected"), "{screen}");
     assert!(!screen.contains("not detected · not detected"), "{screen}");
+}
+
+#[test]
+fn the_chips_bandwidth_sits_beside_it_and_is_the_first_field_to_go() {
+    let text = |line: &Line| -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+    let mut sample = live_sample();
+    // With room: after the chip and its cores, once, in the muted text colour.
+    let wide = host_footer(&sample, 160);
+    let all = text(&wide);
+    assert!(
+        all.starts_with("Apple M4 Max · 32 GPU cores · 410 GB/s · thermal ok · "),
+        "{all}"
+    );
+    assert_eq!(all.matches("GB/s").count(), 1, "{all}");
+    let figure = wide.spans.iter().find(|span| span.content == "410 GB/s");
+    assert_eq!(figure.and_then(|span| span.style.fg), Some(MUTED));
+    // One cell short of everything: the bandwidth goes, every other field stays.
+    let short = host_footer(&sample, wide.width() - 1);
+    assert_eq!(text(&short), all.replace(" · 410 GB/s", ""));
+    // The Overview strip at 80 columns has no room for it.
+    let strip = render(&sample, &request_history::History::default(), 80, 3);
+    assert!(!strip.contains("GB/s"), "{strip}");
+    assert!(strip.contains("8.0 GiB / 16.0 GiB"), "{strip}");
+    // Too narrow for the chip's own name: no figure without the chip it is for.
+    assert_eq!(text(&host_footer(&sample, 26)), "thermal ok");
+    // A bin mlxtop cannot tell shows nothing.
+    sample.metal.gpu_cores = None;
+    assert!(!text(&host_footer(&sample, 160)).contains("GB/s"));
 }

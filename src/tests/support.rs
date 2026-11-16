@@ -131,6 +131,10 @@ pub(crate) struct FakeHost {
 struct FakeState {
     commands: HashMap<String, VecDeque<String>>,
     files: HashMap<PathBuf, VecDeque<String>>,
+    /// Binary files (a safetensors header), served by `read_prefix`.
+    blobs: HashMap<PathBuf, Vec<u8>>,
+    /// When files last changed; a file without one reads as the epoch.
+    modified: HashMap<PathBuf, SystemTime>,
     dirs: HashMap<PathBuf, Vec<PathBuf>>,
     calls: Vec<String>,
     panic_on: Option<String>,
@@ -183,6 +187,25 @@ impl FakeHost {
         self
     }
 
+    /// A binary file, served by `read_prefix`.
+    pub(crate) fn blob(self, path: &str, data: &[u8]) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .blobs
+            .insert(PathBuf::from(path), data.to_vec());
+        self
+    }
+
+    /// Say a file changed at `at`; a clone the code under test holds sees it.
+    pub(crate) fn modified_at(&self, path: &str, at: SystemTime) {
+        self.state
+            .lock()
+            .unwrap()
+            .modified
+            .insert(PathBuf::from(path), at);
+    }
+
     /// Queue a Windows API reading; the last one repeats like commands do.
     pub(crate) fn windows(self, reading: crate::host::WindowsReading) -> Self {
         self.state.lock().unwrap().windows.push_back(reading);
@@ -216,6 +239,26 @@ impl Host for FakeHost {
         let mut state = self.state.lock().unwrap();
         state.calls.push(format!("read {}", path.display()));
         state.files.get_mut(path).and_then(next)
+    }
+
+    fn read_prefix(&self, path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .calls
+            .push(format!("prefix {} {max_bytes}", path.display()));
+        let bytes = match state.blobs.get(path) {
+            Some(bytes) => bytes.clone(),
+            None => state.files.get_mut(path).and_then(next)?.into_bytes(),
+        };
+        Some(bytes.into_iter().take(max_bytes as usize).collect())
+    }
+
+    fn modified(&self, path: &Path) -> Option<SystemTime> {
+        let state = self.state.lock().unwrap();
+        state.modified.get(path).copied().or_else(|| {
+            (state.blobs.contains_key(path) || state.files.contains_key(path))
+                .then_some(SystemTime::UNIX_EPOCH)
+        })
     }
 
     fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
@@ -357,6 +400,14 @@ pub(crate) const MACOS_PS: &str = "\
   101 15728640 85.5 40.0 R 120 omlx-server /opt/omlx/bin/omlx-server --port 8080\n\
   202 204800 1.0 0.5 S 3 Safari /Applications/Safari.app/Contents/MacOS/Safari\n";
 
+/// What an Apple Silicon Mac (an M4 and an M4 Max, macOS 27.0.1) printed:
+/// the thermal pressure level, and a `pmset` that reports no CPU limit.
+pub(crate) const NOTIFYUTIL_THERMAL: &str = "com.apple.system.thermalpressurelevel 0\n";
+pub(crate) const PMSET_APPLE_SILICON: &str = "\
+Note: No thermal warning level has been recorded\n\
+Note: No performance warning level has been recorded\n\
+Note: No CPU power status has been recorded\n";
+
 /// A macOS host with a healthy oMLX process and paging counters that move
 /// between the first and second sample.
 pub(crate) fn macos_host() -> FakeHost {
@@ -387,9 +438,10 @@ pub(crate) fn macos_host() -> FakeHost {
             "total = 2048.00M  used = 512.00M  free = 1536.00M  (encrypted)\n",
         )
         .command(
-            "/usr/bin/pmset -g therm",
-            "Note: No thermal warning level has been recorded\n",
+            "/usr/bin/notifyutil -g com.apple.system.thermalpressurelevel",
+            NOTIFYUTIL_THERMAL,
         )
+        .command("/usr/bin/pmset -g therm", PMSET_APPLE_SILICON)
         .command(
             "/bin/ps -axo pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args=",
             MACOS_PS,
@@ -493,27 +545,111 @@ pub(crate) fn offline_config() -> Config {
             host: Some("127.0.0.1".into()),
             port: Some(port),
         }),
+        // A test that starts the real sampler must not keep usual speeds
+        // in the user's own state folder.
+        baselines: Some(false),
         ..Config::default()
     }
 }
 
 pub(crate) fn empty_view() -> CollectorView {
     CollectorView {
-        current: Sample::default(),
-        generation_history: VecDeque::new(),
-        prefill_history: VecDeque::new(),
-        cache_history: VecDeque::new(),
-        disk_history: VecDeque::new(),
-        decode_reads: Default::default(),
-        session: Default::default(),
-        load_history: VecDeque::new(),
-        composition_history: VecDeque::new(),
-        swap_history: VecDeque::new(),
-        compression_history: VecDeque::new(),
         platform: Platform::MacOs,
-        gpu_history: VecDeque::new(),
-        signals: VecDeque::new(),
-        request_history: request_history::History::default(),
-        operator_history: operator_history::History::default(),
+        ..CollectorView::default()
     }
+}
+
+/// Where `owner_models` puts the owner's model and its draft: where oMLX
+/// served them on his Mac, on drive `C:` on Windows (see `on_this_host`).
+pub(crate) const OWNER_MODEL: &str = if cfg!(windows) {
+    "C:/omlx/models/Qwen3.8-27B-oQ4e-mtp"
+} else {
+    "/omlx/models/Qwen3.8-27B-oQ4e-mtp"
+};
+pub(crate) const OWNER_DRAFT: &str = if cfg!(windows) {
+    "C:/omlx/models/Qwen3.8-27B-DFlash2-incoai"
+} else {
+    "/omlx/models/Qwen3.8-27B-DFlash2-incoai"
+};
+
+/// `recorded`, an oMLX answer or file from the owner's Mac or one path in
+/// it, with its models under `/omlx/models` where `owner_models` puts
+/// them. oMLX serves only on macOS, and mlxtop reads a model's files only
+/// at an absolute path: on Windows a path from `/` names no drive, so
+/// there the models are on `C:`.
+pub(crate) fn on_this_host(recorded: &str) -> String {
+    if cfg!(windows) {
+        recorded.replace("/omlx/models/", "C:/omlx/models/")
+    } else {
+        recorded.to_owned()
+    }
+}
+
+/// The owner's Qwen3.8-27B-oQ4e-mtp and its DFlash2 draft as served on his
+/// Mac Studio, as header-only fixtures: each `config.json` and the JSON
+/// header of each safetensors shard, no weights. The draft's header is
+/// whole. The model's keeps every tensor of layers 0–3 (three
+/// linear-attention layers and a full-attention one), the embedding, the
+/// output head, the final norm, the MTP head and the vision tower's own
+/// tensors and first block; in each shard the other layers are one packed
+/// 4-bit placeholder module and the other vision blocks one placeholder
+/// tensor, each carrying exactly the bytes and parameters it replaces, so
+/// every total is the full model's. Its config keeps the quantization
+/// overrides of layers 0–3 only.
+pub(crate) fn owner_models(mut host: FakeHost) -> FakeHost {
+    let model: [(&str, &[u8]); 5] = [
+        (
+            "config.json",
+            include_bytes!("fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/config.json"),
+        ),
+        (
+            "model-00001-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors"
+            ),
+        ),
+        (
+            "model-00002-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors"
+            ),
+        ),
+        (
+            "model-00003-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors"
+            ),
+        ),
+        (
+            "model-00004-of-00004.safetensors",
+            include_bytes!(
+                "fixtures/model_facts/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors"
+            ),
+        ),
+    ];
+    let draft: [(&str, &[u8]); 2] = [
+        (
+            "config.json",
+            include_bytes!("fixtures/model_facts/Qwen3.8-27B-DFlash2-incoai/config.json"),
+        ),
+        (
+            "model.safetensors",
+            include_bytes!("fixtures/model_facts/Qwen3.8-27B-DFlash2-incoai/model.safetensors"),
+        ),
+    ];
+    for (dir, files) in [(OWNER_MODEL, &model[..]), (OWNER_DRAFT, &draft[..])] {
+        let paths: Vec<String> = files
+            .iter()
+            .map(|(name, _)| format!("{dir}/{name}"))
+            .collect();
+        for (path, (_, bytes)) in paths.iter().zip(files) {
+            host = host.blob(path, bytes);
+        }
+        let mut entries: Vec<&str> = paths.iter().map(String::as_str).collect();
+        // Beside the weights: what mlx-lm does not load.
+        let tokenizer = format!("{dir}/tokenizer.json");
+        entries.push(&tokenizer);
+        host = host.dir(dir, &entries);
+    }
+    host
 }

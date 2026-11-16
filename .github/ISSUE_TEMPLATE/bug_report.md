@@ -17,7 +17,8 @@ Describe the problem and what you expected.
 ## Environment
 
 - mlxtop version (`mlxtop --version`):
-- macOS version and Apple Silicon model:
+- Operating system and version, and the Mac or GPU model:
+- `mlxtop doctor` output (remove anything private):
 - Terminal and window size (for display problems):
 - Runtime/provider and version (if applicable):
 

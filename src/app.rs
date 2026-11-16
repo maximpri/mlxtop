@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: MIT
 //! Application state, input handling, selection and critical-alarm lifecycle.
 use crate::analysis::signal_summary;
+use crate::chart_navigation;
 use crate::chart_navigation::Chart;
 use crate::collector::CollectorView;
 use crate::config::{config_history, config_interval, config_path, Config, Thresholds};
 use crate::domain::{EventKind, LlmProcess, Sample, SignalEvent};
-use crate::formatting::bytes;
 use crate::logging::{diagnostics_log, log_field};
 use crate::sampler::{Sampler, SamplerCommand};
 use crate::settings::Settings;
-use crate::{chart_navigation, operator_history, request_history};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use std::collections::VecDeque;
 use std::io::{stdout, Write};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
@@ -136,15 +134,12 @@ pub(crate) fn critical_state(sample: &Sample) -> Option<&str> {
     }
 }
 
+/// Calm samples in a row that end a critical episode and re-arm the bell.
+const CALM_SAMPLES_TO_REARM: u32 = 3;
+
 pub(crate) fn critical_summary(sample: &Sample) -> String {
     if critical_state(sample) == Some("MEMORY BOTTLENECK") {
-        format!(
-            "critical memory pressure · RAM resident {}",
-            sample
-                .resident_memory
-                .map(bytes)
-                .unwrap_or_else(|| "—".into())
-        )
+        format!("critical memory pressure · {}", sample.memory_use_label())
     } else {
         signal_summary(sample)
     }
@@ -174,6 +169,13 @@ pub(crate) struct App {
     pub(crate) top_selected: usize,
     pub(crate) journal_filter: JournalFilter,
     pub(crate) journal_scroll: usize,
+    /// The furthest the Journal could scroll when last drawn (rows wrap).
+    pub(crate) journal_max_scroll: std::cell::Cell<usize>,
+    /// Whether this session has already opened Settings to ask for the
+    /// inference engine's key.
+    pub(crate) key_prompted: bool,
+    /// The terminal was too small for the dashboard when last drawn.
+    pub(crate) compact: std::cell::Cell<bool>,
     pub(crate) request_scroll: usize,
     pub(crate) charts: chart_navigation::Navigation,
     pub(crate) gpu_selected: usize,
@@ -186,12 +188,22 @@ pub(crate) struct App {
     pub(crate) quit: bool,
     /// Esc at the top level asks before quitting, because quitting discards the session's history.
     pub(crate) quit_prompt: bool,
+    /// `r` asks before clearing the session, and offers to forget the usual
+    /// speeds kept across sessions too.
+    pub(crate) reset_prompt: bool,
+    /// Whether usual speeds are kept across sessions (`baselines` in the config).
+    pub(crate) baselines: bool,
     pub(crate) sampler_disconnected: bool,
+    /// When the last sample arrived from the sampler.
+    pub(crate) last_view_at: Instant,
     pub(crate) alert: Option<ActiveAlert>,
     pub(crate) alert_bells: usize,
     /// Rings the terminal bell; replaced in tests so no BEL reaches stdout.
     pub(crate) bell: fn(),
     pub(crate) critical_episode: bool,
+    /// Non-critical samples in a row since the last critical one: an episode
+    /// ends after three, the count the slowdown rule uses to end.
+    pub(crate) calm_samples: u32,
     /// Whether critical conditions ring the bell and raise the banner (`alarms` in the config).
     pub(crate) alarms: bool,
     pub(crate) thresholds: Thresholds,
@@ -215,24 +227,7 @@ impl App {
         let interval = Duration::from_secs(interval);
         let thresholds = Thresholds::from_config(&config);
         Self {
-            collector: CollectorView {
-                current: Sample::default(),
-                generation_history: VecDeque::new(),
-                prefill_history: VecDeque::new(),
-                cache_history: VecDeque::new(),
-                disk_history: VecDeque::new(),
-                decode_reads: VecDeque::new(),
-                session: Default::default(),
-                load_history: VecDeque::new(),
-                composition_history: VecDeque::new(),
-                swap_history: VecDeque::new(),
-                compression_history: VecDeque::new(),
-                platform: crate::host::Platform::current(),
-                gpu_history: VecDeque::new(),
-                signals: VecDeque::new(),
-                request_history: request_history::History::default(),
-                operator_history: operator_history::History::default(),
-            },
+            collector: CollectorView::default(),
             sampler,
             interval,
             paused: false,
@@ -243,6 +238,9 @@ impl App {
             top_selected: 0,
             journal_filter: JournalFilter::All,
             journal_scroll: 0,
+            journal_max_scroll: Default::default(),
+            key_prompted: false,
+            compact: Default::default(),
             request_scroll: 0,
             charts: chart_navigation::Navigation::default(),
             gpu_selected: 0,
@@ -253,16 +251,73 @@ impl App {
             diagnostics_max_scroll: Default::default(),
             quit: false,
             quit_prompt: false,
+            reset_prompt: false,
+            baselines: config.baselines.unwrap_or(true),
             sampler_disconnected: false,
+            last_view_at: Instant::now(),
             alert: None,
             alert_bells: 0,
             bell: ring_terminal_bell,
             critical_episode: false,
+            calm_samples: 0,
             alarms: config.alarms.unwrap_or(true),
             thresholds,
             settings: Settings::new(config_path()),
             last_click: None,
         }
+    }
+
+    /// The first time the inference engine asks for a key mlxtop does not
+    /// have, or refuses the one in the config: open Settings on the key,
+    /// ready to type. Once a session, and never over something the user has
+    /// open; Esc carries on without it.
+    pub(crate) fn prompt_for_key(&mut self) {
+        use crate::runtime_diagnostics::KeyNeed;
+        if self.key_prompted {
+            return;
+        }
+        let runtime = &self.collector.current.runtime;
+        let Some(need) = runtime.key_need() else {
+            return;
+        };
+        let busy = self.help
+            || self.summary_open
+            || self.quit_prompt
+            || self.reset_prompt
+            || self.diagnostics_open
+            || self.top_filtering
+            || self.settings.editing.is_some();
+        if busy {
+            return;
+        }
+        self.key_prompted = true;
+        // A refused key from the environment is not Settings' to replace.
+        let from_environment = !cfg!(test)
+            && std::env::var("MLXTOP_PROVIDER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+        if need == KeyNeed::Rejected && from_environment {
+            return;
+        }
+        let engine = runtime
+            .provider
+            .clone()
+            .unwrap_or_else(|| "The inference engine".into());
+        let asks = match need {
+            KeyNeed::Missing => "asks for an API key",
+            KeyNeed::Rejected => "refused the API key it was sent",
+        };
+        let notice = format!(
+            "{engine} at {} {asks}. Type or paste it, then Enter. Esc skips it; live rates stay off.",
+            runtime.endpoint
+        );
+        self.tab = 3;
+        self.charts.expanded = false;
+        self.settings.reload();
+        self.settings.select("api_key");
+        if self.settings.broken.is_none() {
+            self.settings.start_editing();
+        }
+        self.settings.status = Some(crate::settings::Status::Notice(notice));
+        diagnostics_log("INFO", "api_key_prompt", format!("need={need:?}"));
     }
 
     pub(crate) fn tick(&mut self) {
@@ -287,6 +342,8 @@ impl App {
                         });
                     self.collector = view;
                     self.sampler_disconnected = false;
+                    self.last_view_at = Instant::now();
+                    self.prompt_for_key();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -304,6 +361,14 @@ impl App {
         }
     }
 
+    /// How long sampling has been silent, when it is: the sampler has
+    /// stopped, or (not paused) no sample has come for three intervals.
+    pub(crate) fn sampling_silent(&self) -> Option<Duration> {
+        let age = self.last_view_at.elapsed();
+        let limit = (self.interval * 3).max(Duration::from_secs(5));
+        (self.sampler_disconnected || (!self.paused && age > limit)).then_some(age)
+    }
+
     /// Ring once per critical episode. Acknowledgment silences the episode;
     /// recovery re-arms it. Escalation refreshes the banner without repeating.
     pub(crate) fn track_critical_alert(&mut self, view: &CollectorView) {
@@ -315,7 +380,17 @@ impl App {
             return;
         }
         let newly_critical = state.is_some() && !self.critical_episode;
-        self.critical_episode = state.is_some();
+        if state.is_some() {
+            self.critical_episode = true;
+            self.calm_samples = 0;
+        } else {
+            self.calm_samples += 1;
+            // One calm sample between bursts is not a recovery.
+            if self.calm_samples < CALM_SAMPLES_TO_REARM {
+                return;
+            }
+            self.critical_episode = false;
+        }
         if let Some(alert) = &mut self.alert {
             if let Some(state) = state {
                 if alert.state != state {
@@ -354,12 +429,33 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        // Below the dashboard's size only quitting acts: a key whose effect
+        // cannot be seen (r clears the session's history) must not act.
+        if self.compact.get() && !self.quit_prompt && !self.reset_prompt {
+            let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if !quit {
+                return;
+            }
+        }
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         if self.quit_prompt {
             self.quit_prompt = false;
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
             if ctrl_c || matches!(key.code, KeyCode::Char('y' | 'Y' | 'q') | KeyCode::Enter) {
                 self.quit = true;
+            }
+            return;
+        }
+        // Any key answers the reset prompt; only y (or Enter) and f act.
+        if self.reset_prompt {
+            self.reset_prompt = false;
+            match key.code {
+                _ if ctrl_c => self.quit = true,
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.reset(false),
+                KeyCode::Char('f' | 'F') if self.baselines => self.reset(true),
+                _ => {}
             }
             return;
         }
@@ -401,6 +497,10 @@ impl App {
             return;
         }
         if self.help {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                self.quit = true;
+                return;
+            }
             if matches!(
                 key.code,
                 KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('h')
@@ -457,7 +557,9 @@ impl App {
                     return;
                 }
                 KeyCode::Down => {
-                    self.top_selected = self.top_selected.saturating_add(1);
+                    // Bounded here, not only when drawn: Up then moves at once.
+                    let last = self.filtered_llm_processes().len().saturating_sub(1);
+                    self.top_selected = self.top_selected.saturating_add(1).min(last);
                     return;
                 }
                 KeyCode::PageUp => {
@@ -546,7 +648,8 @@ impl App {
                     return;
                 }
                 KeyCode::Down => {
-                    self.journal_scroll = self.journal_scroll.saturating_add(1);
+                    let last = self.journal_last_scroll();
+                    self.journal_scroll = self.journal_scroll.saturating_add(1).min(last);
                     return;
                 }
                 KeyCode::PageUp => {
@@ -554,7 +657,8 @@ impl App {
                     return;
                 }
                 KeyCode::PageDown => {
-                    self.journal_scroll = self.journal_scroll.saturating_add(10);
+                    let last = self.journal_last_scroll();
+                    self.journal_scroll = self.journal_scroll.saturating_add(10).min(last);
                     return;
                 }
                 KeyCode::Home => {
@@ -562,7 +666,7 @@ impl App {
                     return;
                 }
                 KeyCode::End => {
-                    self.journal_scroll = self.filtered_journal_events().len().saturating_sub(1);
+                    self.journal_scroll = self.journal_last_scroll();
                     return;
                 }
                 KeyCode::Char('f') | KeyCode::Char(']') => {
@@ -593,7 +697,9 @@ impl App {
             }
             return;
         }
-        if self.help || self.tab != 0 {
+        // The charts under an overlay are not what the pointer is on.
+        if self.help || self.summary_open || self.quit_prompt || self.reset_prompt || self.tab != 0
+        {
             return;
         }
         let Some(chart) = self.charts.at(mouse.column, mouse.row) else {
@@ -654,6 +760,7 @@ impl App {
                     self.critical_episode = false;
                 }
             }
+            "baselines" => self.baselines = config.baselines.unwrap_or(true),
             _ => {}
         }
         self.thresholds = Thresholds::from_config(config);
@@ -684,16 +791,8 @@ impl App {
                 self.paused = !self.paused;
                 self.sampler.send(SamplerCommand::SetPaused(self.paused));
             }
-            KeyCode::Char('r') => {
-                self.sampler.send(SamplerCommand::Reset);
-                self.journal_scroll = 0;
-                self.request_scroll = 0;
-                self.charts = chart_navigation::Navigation::default();
-                self.gpu_selected = 0;
-                self.journal_filter = JournalFilter::All;
-                self.alert = None;
-                self.critical_episode = false;
-            }
+            // Clearing the session cannot be undone: it asks first (F-069).
+            KeyCode::Char('r') => self.reset_prompt = true,
             KeyCode::Char('t') | KeyCode::Char('2') => {
                 self.tab = 1;
                 self.top_selected = 0;
@@ -721,6 +820,24 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Start the session over, as the reset prompt was answered: charts,
+    /// Journal, session totals and alarm go, and with `forget` the usual
+    /// speeds kept across sessions for this machine too.
+    fn reset(&mut self, forget: bool) {
+        self.sampler.send(if forget {
+            SamplerCommand::Forget
+        } else {
+            SamplerCommand::Reset
+        });
+        self.journal_scroll = 0;
+        self.request_scroll = 0;
+        self.charts = chart_navigation::Navigation::default();
+        self.gpu_selected = 0;
+        self.journal_filter = JournalFilter::All;
+        self.alert = None;
+        self.critical_episode = false;
     }
 
     pub(crate) fn filtered_llm_processes(&self) -> Vec<LlmProcess> {
@@ -760,6 +877,17 @@ impl App {
             }),
         }
         rows
+    }
+
+    /// The furthest the Journal scrolls: as drawn, or (before the first
+    /// draw) the oldest event.
+    fn journal_last_scroll(&self) -> usize {
+        let drawn = self.journal_max_scroll.get();
+        if drawn > 0 {
+            drawn
+        } else {
+            self.filtered_journal_events().len().saturating_sub(1)
+        }
     }
 
     pub(crate) fn filtered_journal_events(&self) -> Vec<&SignalEvent> {

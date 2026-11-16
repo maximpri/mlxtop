@@ -56,9 +56,12 @@ fn critical_memory_alarm_survives_missing_counters_and_acknowledgment() {
     app.tick();
     assert_eq!(app.alert_bells, 1);
     assert!(app.alert.is_none());
-    views
-        .send(view_with_impact("GPU BUSY", "12:00:03"))
-        .unwrap();
+    // Recovery takes three calm samples.
+    for second in 3..6 {
+        views
+            .send(view_with_impact("GPU BUSY", &format!("12:00:0{second}")))
+            .unwrap();
+    }
     views.send(critical).unwrap();
     app.tick();
     assert_eq!(app.alert_bells, 2);
@@ -83,17 +86,21 @@ fn paging_alert_banner_shows_until_acknowledged_or_reset() {
     let rendered = render_app(&app, 180, 50);
     assert!(!rendered.contains("⚠ HEAVY PAGING"));
 
-    // A fresh episode after recovery raises again; reset retires it.
+    // A fresh episode after recovery (three calm samples) raises again;
+    // reset retires it.
+    for second in 55..58 {
+        views
+            .send(view_with_impact("LLM READY", &format!("00:52:{second}")))
+            .expect("test channel should accept views");
+        app.tick();
+    }
     views
-        .send(view_with_impact("LLM READY", "00:52:55"))
-        .expect("test channel should accept views");
-    app.tick();
-    views
-        .send(view_with_impact("SWAP THRASHING", "00:52:56"))
+        .send(view_with_impact("SWAP THRASHING", "00:52:58"))
         .expect("test channel should accept views");
     app.tick();
     assert_eq!(app.alert_bells, 2);
     app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(app.alert.is_none());
     let rendered = render_app(&app, 180, 50);
     assert!(!rendered.contains("⚠ SWAP THRASHING"));
@@ -160,7 +167,7 @@ fn overview_journal_retains_three_recent_events_at_screenshot_size() {
         !compact.contains("Event 11"),
         "compact Overview uses the journal preview space for the assessment"
     );
-    assert!(compact.contains("? help q quit"));
+    assert!(compact.contains("? help  q quit"));
 }
 
 #[test]
@@ -399,5 +406,58 @@ fn the_journal_has_one_row_as_a_request_starts_and_one_as_it_ends() {
     assert_eq!(
         finished.journal_line(),
         "r1 · 800 prompt · 25% cached · 64 out · 41.2 tok/s · first token 310 ms"
+    );
+}
+
+#[test]
+fn the_journal_says_when_heat_begins_changes_and_ends_once_each() {
+    use ThermalLevel::{Heavy, Moderate, Nominal, Trapping};
+    let at = |level: Option<ThermalLevel>| {
+        let thermal_state = ThermalState {
+            level,
+            cpu_speed_limit: None,
+        };
+        Sample {
+            thermal: thermal_state.label(),
+            thermal_state,
+            ..Sample::default()
+        }
+    };
+    // A level that could not be read for a few seconds, with nominal on
+    // either side, is not news, nor is Moderate on its own; heat that
+    // limits the machine beginning, rising and ending is.
+    let samples = [
+        at(Some(Nominal)),
+        at(None),
+        at(Some(Nominal)),
+        at(Some(Moderate)),
+        at(Some(Heavy)),
+        at(Some(Heavy)),
+        at(Some(Trapping)),
+        at(Some(Nominal)),
+    ];
+    let mut collector = Collector::with_host(
+        200,
+        offline_config(),
+        Box::new(FakeHost::default()),
+        Platform::MacOs,
+        None,
+    );
+    for pair in samples.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let rows: Vec<(String, Tone)> = collector
+        .signals
+        .iter()
+        .filter(|event| event.state == "THERMAL")
+        .map(|event| (event.summary.clone(), event.tone))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("heavy".to_owned(), Tone::Yellow),
+            ("trapping".to_owned(), Tone::Yellow),
+            ("nominal".to_owned(), Tone::Green),
+        ]
     );
 }

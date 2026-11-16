@@ -1,0 +1,31 @@
+{
+  "models": {
+    "Qwen3.8-27B-DFlash2-incoai": {
+      "is_default": false,
+      "is_hidden": true,
+      "is_pinned": false,
+      "model_type_override": "llm",
+      "trust_remote_code": false
+    },
+    "Qwen3.8-27B-oQ4e-mtp": {
+      "dflash_block_size": null,
+      "dflash_draft_model": "/omlx/models/Qwen3.8-27B-DFlash2-incoai",
+      "dflash_draft_quant_enabled": null,
+      "dflash_draft_quant_weight_bits": null,
+      "dflash_enabled": false,
+      "dflash_verify_mode": null,
+      "enable_thinking": true,
+      "external_engine": "splash",
+      "is_default": true,
+      "is_pinned": true,
+      "max_context_window": 131072,
+      "model_alias": "omlx-coding",
+      "model_type_override": "llm",
+      "mtp_enabled": true,
+      "turboquant_kv_bits": 8.0,
+      "turboquant_kv_enabled": true,
+      "turboquant_skip_last": true
+    }
+  },
+  "version": 1
+}

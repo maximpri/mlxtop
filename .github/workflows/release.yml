@@ -24,11 +24,16 @@ permissions:
 jobs:
   licenses:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: stable
+          # A release is built clean, and a lint a new compiler adds cannot
+          # block it; clippy with -D warnings in CI stays the gate.
+          cache: false
+          rustflags: ""
       - name: Collect dependency licenses for all release targets
         run: python3 scripts/collect_licenses.py dist-licenses
       - uses: actions/upload-artifact@v4
@@ -39,11 +44,16 @@ jobs:
   macos:
     needs: licenses
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: stable
+          # A release is built clean, and a lint a new compiler adds cannot
+          # block it; clippy with -D warnings in CI stays the gate.
+          cache: false
+          rustflags: ""
       - uses: actions/download-artifact@v4
         with:
           name: licenses
@@ -78,13 +88,18 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: stable
+          # A release is built clean, and a lint a new compiler adds cannot
+          # block it; clippy with -D warnings in CI stays the gate.
+          cache: false
+          rustflags: ""
           target: ${{ matrix.target }}
       - uses: actions/download-artifact@v4
         with:
@@ -111,14 +126,19 @@ jobs:
   windows:
     needs: licenses
     runs-on: windows-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: stable
+          # A release is built clean, and a lint a new compiler adds cannot
+          # block it; clippy with -D warnings in CI stays the gate.
+          cache: false
+          rustflags: ""
       - uses: actions/download-artifact@v4
         with:
           name: licenses
@@ -141,6 +161,7 @@ jobs:
   release:
     needs: [macos, linux, windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -174,6 +195,10 @@ jobs:
           # The changelog section for this version seeds the notes for review.
           awk -v heading="## $version " 'index($0, heading) == 1 {found=1; next} found && /^## / {exit} found' CHANGELOG.md > notes.md
           flags=(--draft --verify-tag --title "mlxtop $GITHUB_REF_NAME" --notes-file notes.md)
+          if [[ "$version" != *-rc.* && ! -s notes.md ]]; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
           if [[ "$version" == *-rc.* ]]; then
             # Prereleases never become the latest release, so installers and
             # plain `mlxtop update` skip them.

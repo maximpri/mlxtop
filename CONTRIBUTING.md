@@ -22,8 +22,8 @@ cargo build --release --locked
 
 ### Coverage gate
 
-Production line coverage must stay at or above 90 percent on each supported
-platform. Install the tools once, then run the gate:
+Production line coverage must stay at or above 90 percent on macOS and
+Linux, the platforms CI measures (Windows code has no coverage gate). Install the tools once, then run the gate:
 
 ~~~sh
 cargo install cargo-llvm-cov --locked
@@ -131,6 +131,29 @@ releases and for release candidates offered as prereleases.
    gh release edit vX.Y.Z --draft=false --latest
    gh release edit vX.Y.Z-rc.N --draft=false   # a candidate stays a prerelease
    ~~~
+
+6. For a final release, bump the Homebrew tap (see [Homebrew](#homebrew)) and
+   check that it delivers the new version:
+
+   ~~~sh
+   brew update && brew info --json=v2 maximpri/tap/mlxtop | jq -r '.formulae[0].versions.stable'
+   ~~~
+
+### When a release goes wrong
+
+- **A build or test job failed.** Re-run the failed jobs for a flaky
+  failure. If code must change, fix it on `main`; move the tag
+  (`git tag -d vX.Y.Z && git push --delete origin vX.Y.Z`, then tag again)
+  only if no draft was reviewed or published, otherwise bump the patch
+  version.
+- **The release job failed after creating a draft.** Delete the draft and
+  keep the tag (`gh release delete vX.Y.Z --yes`), then re-run the job.
+- **A published release is bad.** Mark the previous release Latest
+  (`gh release edit vPREV --latest`) so the install scripts fall back to it,
+  then publish a fixed patch release. `mlxtop update` never installs an
+  older version, so users who already updated need the patch; anyone can
+  pin a version with `MLXTOP_VERSION=X.Y.Z` on either install script.
+- **Homebrew.** Revert the tap's bump commit.
 
 Pull requests that change the workflow or packaging scripts run the same
 builds without publishing; the assets are attached to the run as artifacts.

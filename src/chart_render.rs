@@ -132,7 +132,7 @@ pub(crate) fn chart_scale(
     } else if metric.is_byte_rate() {
         (
             0,
-            crate::chart_scale::ceiling(
+            crate::chart_scale::ceiling_bytes(
                 history
                     .iter()
                     .skip(history.len().saturating_sub(width))

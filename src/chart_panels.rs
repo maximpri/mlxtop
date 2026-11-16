@@ -153,6 +153,15 @@ impl App {
         let sample = &self.collector.current;
         let insight = &sample.correlation;
         let current = history.back().and_then(|point| point.value);
+        // Whether the panel has anything plotted in its window: the count
+        // the chart itself draws (its axis labels take six columns).
+        let plot_width = usize::from(area.width.saturating_sub(2)).saturating_sub(6);
+        let visible = self.charts.visible_samples(Chart::from(metric), plot_width);
+        let sampled = history
+            .iter()
+            .rev()
+            .take(visible)
+            .any(|point| point.value.is_some());
         match metric {
             ChartMetric::Generation
                 if self.charts.expanded
@@ -170,8 +179,9 @@ impl App {
             }
             // While a prefill runs, its position replaces the unit: the rate is already in the title,
             // and 40.9k / 61.5k tells you how long the wait is.
+            // With nothing plotted there is no axis for a unit to label.
             ChartMetric::Prefill => {
-                Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
+                llm_prefill_progress_label(sample).or_else(|| sampled.then(|| "tok/s".into()))
             }
             // oMLX and Splash report generation summed over running requests;
             // say so when there are several, since each gets only its share.
@@ -217,14 +227,32 @@ impl App {
                             Line::from(text.as_str()).width() + 4 <= usize::from(area.width)
                         })
                     });
-                Some(usual.unwrap_or(unit))
+                (sampled || usual.is_some() || unit != "tok/s").then(|| usual.unwrap_or(unit))
             }
             ChartMetric::Memory => None,
-            ChartMetric::Gpu => Some(if current == Some(0) {
-                "idle".into()
-            } else {
-                gpu_load_label(sample.gpu_util, self.thresholds).into()
-            }),
+            // At 0% the title has said it; a label only for a load. Then
+            // what the cards draw against their caps, and a lone card's
+            // memory activity, while the edge has room (fields drop whole).
+            ChartMetric::Gpu => {
+                let mut fields = Vec::new();
+                if current != Some(0) {
+                    fields.push(gpu_load_label(sample.gpu_util, self.thresholds).to_owned());
+                }
+                if let Some(power) = crate::gpu::board_power_mw(&sample.gpus) {
+                    fields.push(crate::gpu::power_label(
+                        Some(power),
+                        crate::gpu::power_cap_mw(&sample.gpus),
+                    ));
+                }
+                if let [gpu] = sample.gpus.as_slice() {
+                    fields.extend(
+                        gpu.limits
+                            .memory_busy
+                            .map(|busy| format!("mem busy {busy}%")),
+                    );
+                }
+                (!fields.is_empty()).then(|| fields.join(" · "))
+            }
             // A short panel's title already has the rate; the split would
             // only repeat it.
             ChartMetric::Compression if area.height < 7 => None,
@@ -269,17 +297,28 @@ impl App {
                 if !sample.rate_ready || sample.paging_unavailable {
                     return Some("paging unavailable".into());
                 }
-                let swapping = sample.swap_in.saturating_add(sample.swap_out) > 0;
+                let swap = sample.swap_in.saturating_add(sample.swap_out);
+                // "Memory is short" only from the rate the verdict treats as
+                // paging; lighter swap traffic is said to be light.
+                let swapping = swap >= self.thresholds.swap_warn_rate;
+                let light_swap = swap > 0 && !swapping;
                 let files = sample.page_in.saturating_add(sample.page_out) > 0;
-                Some(
-                    match (swapping, files, sample.memory_tight()) {
-                        (true, _, _) => "swapping: memory is short",
-                        (false, true, true) => "reading files back: memory is tight",
-                        (false, true, false) => "reading files · memory not tight",
-                        (false, false, _) => "no paging",
+                // The fullest wording the edge holds whole.
+                let wordings: &[&str] = match (swapping, files, sample.memory_tight()) {
+                    (true, _, _) => &["swapping: memory is short", "memory is short"],
+                    (false, _, _) if light_swap => &["light swapping"],
+                    (false, true, true) => {
+                        &["reading files back: memory is tight", "memory is tight"]
                     }
-                    .into(),
-                )
+                    (false, true, false) => &["reading files · memory not tight", "reading files"],
+                    (false, false, _) => &["no paging"],
+                };
+                let room = usize::from(area.width.saturating_sub(4));
+                wordings
+                    .iter()
+                    .find(|text| text.chars().count() <= room)
+                    .or(wordings.last())
+                    .map(|text| (*text).to_owned())
             }
             // What the SSD tier is doing, in words; the chart shows how much.
             ChartMetric::Disk => cache_impact::activity(sample).map(|(state, _)| state.to_owned()),
@@ -315,21 +354,23 @@ impl App {
             // is left, and what was left over time. Without the OS's
             // composition counters, the plain occupancy reading below.
             let visible = |width: usize| self.charts.visible_samples(Chart::Memory, width);
+            // RAM by kind per column, with the tone its sample was marked in:
+            // a slowdown's samples are marked here as on every chart.
             let columns = |width: usize| {
                 let tones = &self.collector.load_history;
-                let lefts = self.composition_columns(visible(width), width);
                 let shown = visible(width);
                 let start = tones.len().saturating_sub(shown);
                 let padding = shown - (tones.len() - start);
-                lefts
+                self.composition_columns(shown, width)
                     .into_iter()
+                    .zip(self.gpu_memory_columns(shown, width))
                     .enumerate()
-                    .map(|(column, sizes)| {
-                        let tone = (column * shown / width)
+                    .map(|(column, (sizes, gpu))| {
+                        let tone = (column * shown / width.max(1))
                             .checked_sub(padding)
                             .and_then(|offset| tones.get(start + offset))
                             .map_or(Tone::Green, |point| point.tone);
-                        sizes.map(|sizes| (crate::memory_headroom::left(sizes), tone))
+                        sizes.map(|sizes| crate::memory_headroom::Column { sizes, gpu, tone })
                     })
                     .collect()
             };
@@ -355,14 +396,12 @@ impl App {
                 (unit == total_unit).then(|| format!("{used}/{total} {unit}"))
             });
             let mut line = Line::from(Span::styled(usage.clone(), Style::default().fg(MUTED)));
-            if let Some(value) = current {
+            if current.is_some() {
+                // Used and total only: a "% resident" figure sits near 99% on a
+                // healthy Mac and was removed from the other layouts as noise.
                 let candidates = [
-                    (usage, format!(" · {value}% resident")),
-                    (
-                        compact_usage.clone().unwrap_or_default(),
-                        format!(" · {value}% resident"),
-                    ),
-                    (compact_usage.unwrap_or_default(), format!(" · {value}%")),
+                    (usage, String::new()),
+                    (compact_usage.unwrap_or_default(), String::new()),
                 ];
                 if let Some((text, resident)) = candidates.into_iter().find(|(text, resident)| {
                     !text.is_empty()

@@ -11,8 +11,8 @@ use crate::domain::{
     MIB,
 };
 use crate::formatting::{
-    bytes, compact_tokens, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
-    pressure_state_label, rate,
+    compact_label, compact_tokens, llm_generation_rate_label, llm_model_label,
+    llm_prefill_rate_label, pressure_state_label, rate,
 };
 use crate::history::{
     compression_tone, delta, paging_tone, push_history, push_history_with_tone, rate_bytes,
@@ -25,9 +25,9 @@ use crate::logging::{
 use crate::omlx::LlmTelemetryClient;
 use crate::platform::{
     linux_counters_for_rates, linux_metal_init, linux_page_size, linux_total_memory,
-    macos_counters_for_rates, parse_metal_hardware, resident_memory_percent,
-    sample_linux_gpu_thermal, sample_linux_memory, sample_macos_gpu_thermal, sample_macos_memory,
-    sample_windows_gpu_thermal, sample_windows_memory,
+    parse_metal_hardware, resident_memory_percent, sample_linux_gpu_thermal, sample_linux_memory,
+    sample_macos_gpu_thermal, sample_macos_memory, sample_windows_gpu_thermal,
+    sample_windows_memory,
 };
 use crate::processes::{annotate_process_pagein_rates, parse_processes, snapshot};
 use crate::{host, operator_history, process_memory, providers, request_history};
@@ -50,8 +50,44 @@ pub(crate) struct PreviousCounters {
 /// How often readings that change over seconds (thermal state, power) are
 /// taken; each costs a process.
 const SLOW_READ_INTERVAL: Duration = Duration::from_secs(5);
+/// Samples within which a host state or paging change already told is not
+/// told again: a state flapping in and out is one story, not a row a poll.
+const JOURNAL_REPEAT_SAMPLES: u64 = 10;
 
-#[derive(Clone)]
+/// When each host state (or paging on/off) was last told, in Journal calls.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Held {
+    calls: u64,
+    told: std::collections::HashMap<String, u64>,
+}
+
+impl Held {
+    /// Count one Journal call.
+    fn tick(&mut self) {
+        self.calls += 1;
+    }
+
+    /// Whether `value` may be told now; if so, it is remembered as told.
+    fn tell(&mut self, value: &str) -> bool {
+        let fresh = self
+            .told
+            .get(value)
+            .is_none_or(|at| self.calls.saturating_sub(*at) > JOURNAL_REPEAT_SAMPLES);
+        if fresh {
+            self.told.insert(value.to_owned(), self.calls);
+        }
+        fresh
+    }
+}
+
+/// Consecutive failed process listings answered with the last good one.
+const PROCESS_READ_RETRIES: u32 = 3;
+
+/// What the interface draws: the newest sample and the histories kept from
+/// it. The collector keeps one and hands a copy over after each sample, and
+/// a reset starts it over, so a history added here is drawn, handed over
+/// and cleared without being listed anywhere else.
+#[derive(Clone, Default)]
 pub(crate) struct CollectorView {
     pub(crate) current: Sample,
     pub(crate) generation_history: VecDeque<ChartPoint>,
@@ -63,6 +99,9 @@ pub(crate) struct CollectorView {
     /// RAM by kind (wired, app, compressed, cache, free) for each memory
     /// sample, aligned one to one with `load_history`.
     pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
+    /// GPU memory in use for each memory sample, the cards' own or the
+    /// GPU's part of RAM: aligned one to one with `load_history`.
+    pub(crate) gpu_memory_history: VecDeque<Option<u64>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
     /// Which host counters exist; Linux has no compressor counters to chart.
@@ -98,32 +137,51 @@ pub(crate) struct Collector {
     pub(crate) cached_at_start: Option<(String, u64)>,
     /// When thermal state and power were last read.
     pub(crate) slow_read_at: Option<Instant>,
-    pub(crate) current: Sample,
-    pub(crate) generation_history: VecDeque<ChartPoint>,
-    pub(crate) prefill_history: VecDeque<ChartPoint>,
-    pub(crate) cache_history: VecDeque<ChartPoint>,
-    pub(crate) disk_history: VecDeque<ChartPoint>,
-    pub(crate) decode_reads: VecDeque<crate::domain::DecodeRead>,
-    pub(crate) load_history: VecDeque<ChartPoint>,
-    /// RAM by kind (wired, app, compressed, cache, free) for each memory
-    /// sample, aligned one to one with `load_history`.
-    pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
-    pub(crate) swap_history: VecDeque<ChartPoint>,
-    pub(crate) compression_history: VecDeque<ChartPoint>,
-    pub(crate) gpu_history: VecDeque<ChartPoint>,
-    pub(crate) signals: VecDeque<SignalEvent>,
-    pub(crate) request_history: request_history::History,
-    pub(crate) operator_history: operator_history::History,
-    pub(crate) session: crate::session::Session,
+    /// The last process listing read, and how many reads have failed since.
+    pub(crate) last_processes: Option<(crate::domain::ProcessSnapshot, u32)>,
+    /// Runtime and model of the last sample that produced a rate.
+    pub(crate) rate_identity: Option<(String, String)>,
+    /// Host state and paging as the Journal last told them: a change is
+    /// told once it has held for a few samples, so flapping is one story.
+    pub(crate) journal_impact: Held,
+    pub(crate) journal_paging: Held,
+    /// When a stall row was last written; a stall that comes back within the
+    /// same-story window is the same stall.
+    pub(crate) last_stall_row: Option<std::time::SystemTime>,
+    pub(crate) stall_row_skipped: bool,
+    /// The runtime connection state last written to the log.
+    pub(crate) runtime_logged: Option<String>,
+    /// Why config.json was ignored at start, told once in the Journal.
+    pub(crate) config_ignored: Option<String>,
+    /// The newest sample and its histories, as the interface is handed
+    /// them. The collector reads as this view: `collector.current` is
+    /// `collector.view.current`.
+    pub(crate) view: CollectorView,
     pub(crate) history_limit: usize,
     pub(crate) thresholds: Thresholds,
     /// The `omx` section the oMLX endpoint was resolved from.
     pub(crate) omx: Option<OmxConfig>,
+    /// The configured inference-engine key the client was built with.
+    pub(crate) api_key: Option<crate::config::Secret>,
     pub(crate) journal: JournalConfig,
     /// GPU load band the Journal last saw; `None` until the first reading.
     pub(crate) gpu_band: Option<GpuBand>,
     /// Provider and source last reported as "telemetry online".
     pub(crate) telemetry_online: Option<(String, TelemetrySource)>,
+}
+
+impl std::ops::Deref for Collector {
+    type Target = CollectorView;
+
+    fn deref(&self) -> &CollectorView {
+        &self.view
+    }
+}
+
+impl std::ops::DerefMut for Collector {
+    fn deref_mut(&mut self) -> &mut CollectorView {
+        &mut self.view
+    }
 }
 
 /// Latched GPU load bands, each with an enter and a lower exit level.
@@ -138,13 +196,17 @@ const GPU_SATURATED_EXIT_GAP: u64 = 10;
 
 impl Collector {
     pub(crate) fn new(history_limit: usize, config: Config) -> Self {
-        Self::with_host(
+        let baselines = config.baselines != Some(false);
+        let mut collector = Self::with_host(
             history_limit,
             config,
             host::system(),
             Platform::current(),
             crate::config::home_dir(),
-        )
+        );
+        collector.config_ignored = crate::config::config_ignored();
+        collector.keep_baselines(crate::baseline_store::default_path(), baselines);
+        collector
     }
 
     pub(crate) fn with_host(
@@ -208,25 +270,23 @@ impl Collector {
             previous: None,
             previous_llm_cache: None,
             cached_at_start: None,
+            last_processes: None,
+            rate_identity: None,
+            journal_impact: Held::default(),
+            journal_paging: Held::default(),
+            last_stall_row: None,
+            stall_row_skipped: false,
+            runtime_logged: None,
+            config_ignored: None,
             slow_read_at: None,
-            session: Default::default(),
-            current: Sample::default(),
-            generation_history: VecDeque::with_capacity(history_limit),
-            prefill_history: VecDeque::with_capacity(history_limit),
-            cache_history: VecDeque::with_capacity(history_limit),
-            disk_history: VecDeque::with_capacity(history_limit),
-            decode_reads: VecDeque::with_capacity(history_limit),
-            load_history: VecDeque::with_capacity(history_limit),
-            composition_history: VecDeque::with_capacity(history_limit),
-            swap_history: VecDeque::with_capacity(history_limit),
-            compression_history: VecDeque::with_capacity(history_limit),
-            gpu_history: VecDeque::with_capacity(history_limit),
-            signals: VecDeque::with_capacity(8),
-            request_history: request_history::History::default(),
-            operator_history: operator_history::History::default(),
+            view: CollectorView {
+                platform,
+                ..CollectorView::default()
+            },
             history_limit,
             thresholds: Thresholds::from_config(&config),
             omx: config.omx.clone(),
+            api_key: config.api_key.clone(),
             journal: config.journal.clone().unwrap_or_default(),
             gpu_band: None,
             telemetry_online: None,
@@ -238,8 +298,11 @@ impl Collector {
     pub(crate) fn apply_config(&mut self, config: &Config) {
         self.thresholds = Thresholds::from_config(config);
         self.journal = config.journal.clone().unwrap_or_default();
-        if config.omx != self.omx {
+        // A new endpoint or key starts the client over: the old session
+        // and a remembered refusal belong to what was configured before.
+        if config.omx != self.omx || config.api_key != self.api_key {
             self.omx = config.omx.clone();
+            self.api_key = config.api_key.clone();
             self.llm_client = LlmTelemetryClient::from_config(config, self.home.clone());
         }
     }
@@ -248,6 +311,7 @@ impl Collector {
         let sample_started = Instant::now();
         let now = sample_started;
         let mut sample = Sample {
+            sequence: self.current.sequence + 1,
             total_memory: self.total_memory,
             metal: self.metal.clone(),
             ..Sample::default()
@@ -270,21 +334,36 @@ impl Collector {
                 self.thresholds,
             ),
         }
+        // On macOS total memory and page size are read once; if that first
+        // read failed, try again rather than run a session without them.
+        if self.platform == Platform::MacOs && self.total_memory == 0 {
+            if let Some(total) = host.command_u64("/usr/sbin/sysctl", &["-n", "hw.memsize"]) {
+                self.total_memory = total;
+                sample.total_memory = total;
+                if let Some(page) = host.command_u64("/usr/sbin/sysctl", &["-n", "hw.pagesize"]) {
+                    self.page_size = page;
+                }
+            }
+        }
         let counters = match self.platform {
             // The memory reading already ran vm_stat: one call serves both.
-            Platform::MacOs => sample
-                .vm_counters
-                .take()
-                .unwrap_or_else(|| macos_counters_for_rates(host, self.page_size)),
+            Platform::MacOs => sample.vm_counters.take().filter(|_| sample.vm_available),
             Platform::Linux => linux_counters_for_rates(host),
-            Platform::Windows => VmCounters::default(),
+            Platform::Windows => Some(VmCounters::default()),
         };
         let process_elapsed = self
             .previous
             .as_ref()
             .map(|previous| now.duration_since(previous.at));
 
-        if let Some(previous) = &self.previous {
+        // Counters that could not be read are unknown, not zero: no rate
+        // this sample, and the next good reading starts a new baseline.
+        let previous_counters = if counters.is_some() {
+            self.previous.as_ref()
+        } else {
+            None
+        };
+        if let (Some(previous), Some(counters)) = (previous_counters, counters.as_ref()) {
             let elapsed = now.duration_since(previous.at);
             sample.swap_in = rate_bytes(
                 delta(counters.swapins, previous.swapins),
@@ -324,7 +403,7 @@ impl Collector {
             sample.swap_growth = signed_rate_bytes(sample.swap_used, previous.swap_used, elapsed);
             sample.rate_ready = true;
         }
-        self.previous = Some(PreviousCounters {
+        self.previous = counters.map(|counters| PreviousCounters {
             at: now,
             swapins: counters.swapins,
             swapouts: counters.swapouts,
@@ -348,6 +427,7 @@ impl Collector {
                     self.slow_read_at = Some(now);
                 } else {
                     sample.thermal = self.current.thermal.clone();
+                    sample.thermal_state = self.current.thermal_state;
                     sample.system_power_mw = self.current.system_power_mw;
                 }
             }
@@ -355,28 +435,39 @@ impl Collector {
             Platform::Windows => sample_windows_gpu_thermal(host, &mut sample, &self.current.gpus),
         }
 
-        let process_snapshot = match self.platform {
-            Platform::MacOs => parse_processes(
-                &host
-                    .command(
-                        "/bin/ps",
-                        &["-axo", "pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args="],
-                    )
-                    .unwrap_or_default(),
+        let listing = match self.platform {
+            Platform::MacOs => host.command(
+                "/bin/ps",
+                &["-axo", "pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args="],
             ),
             // Linux `ps` has no `pagein` column; `maj_flt` (major faults)
             // keeps the same positional layout for the shared parser.
-            Platform::Linux => parse_processes(
-                &host
-                    .command(
-                        "ps",
-                        &["-axo", "pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args="],
-                    )
-                    .unwrap_or_default(),
+            Platform::Linux => host.command(
+                "ps",
+                &["-axo", "pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args="],
             ),
-            Platform::Windows => {
+            Platform::Windows => None,
+        }
+        // `ps` always lists itself: empty output is a failed read too.
+        .filter(|text| !text.trim().is_empty());
+        let process_snapshot = match (self.platform, listing) {
+            (Platform::Windows, _) => {
                 snapshot(windows.map(|reading| reading.processes).unwrap_or_default())
             }
+            (_, Some(text)) => {
+                let fresh = parse_processes(&text);
+                self.last_processes = Some((fresh.clone(), 0));
+                fresh
+            }
+            // A failed listing is not an empty machine: keep the last one for
+            // a few samples so the runtime and its charts do not "vanish".
+            (_, None) => match self.last_processes.as_mut() {
+                Some((last, failures)) if *failures < PROCESS_READ_RETRIES => {
+                    *failures += 1;
+                    last.clone()
+                }
+                _ => parse_processes(""),
+            },
         };
         sample.llm_count = process_snapshot.llm_count;
         sample.llm_rss = process_snapshot.llm_rss;
@@ -397,13 +488,23 @@ impl Collector {
             .map(|process| process.name.clone())
             .unwrap_or_else(|| "none".into());
         sample.largest_consumer = process_snapshot.largest_consumer;
+        sample.largest_other = process_snapshot.largest_other;
         let mut llm_processes = process_snapshot.llm_processes;
         if let Some(elapsed) = process_elapsed {
             annotate_process_pagein_rates(&mut llm_processes, &self.current.llm_processes, elapsed);
         }
+        // Each process's footprint, read from the OS per process. Tests
+        // name process ids that are not theirs to read.
+        if !cfg!(test) {
+            for process in &mut llm_processes {
+                process.footprint =
+                    process_memory::read(process.pid).map(|reading| reading.footprint);
+            }
+        }
         sample.llm_processes = llm_processes;
         let live_stats = self.llm_client.poll(detected_provider.as_deref());
         sample.runtime = self.llm_client.report();
+        self.log_runtime_change(&sample.runtime);
         let should_read_log = !self
             .llm_client
             .provider_adapter
@@ -547,6 +648,13 @@ impl Collector {
         sample.llm_draft_acceptance = llm_stats
             .and_then(|stats| stats.draft_acceptance)
             .filter(|share| (0.0..=1.0).contains(share));
+        sample.llm_tokens_per_pass = llm_stats
+            .and_then(|stats| stats.tokens_per_pass)
+            .filter(|tokens| tokens.is_finite() && *tokens >= 1.0);
+        sample.llm_kv_free_tokens = llm_stats.and_then(|stats| stats.kv_free_tokens);
+        sample.llm_kv_free_bytes = llm_stats.and_then(|stats| stats.kv_free_bytes);
+        sample.llm_preemptions_total = llm_stats.and_then(|stats| stats.preemptions_total);
+        sample.llm_max_concurrent = llm_stats.and_then(|stats| stats.max_concurrent);
         sample.ssd_cache = llm_stats.and_then(|stats| stats.ssd_cache);
         sample.disk = disk_activity(
             sample.process_memory.as_ref(),
@@ -561,10 +669,23 @@ impl Collector {
         sample.llm_model_memory_max = llm_stats.and_then(|stats| stats.model_memory_max);
         sample.llm_model_offloaded = llm_stats.and_then(|stats| stats.model_offloaded);
         sample.llm_model_size = llm_stats.and_then(|stats| stats.model_size);
+        sample.model = llm_stats.map_or_else(Default::default, |stats| stats.model_facts.clone());
+        sample.llama = prefill_progress.map_or_else(Default::default, |stats| stats.llama.clone());
+        sample.llm_request_timings =
+            llm_stats.map_or_else(Vec::new, |stats| stats.request_timings.clone());
         if process_snapshot.hosted_splash_cpu.is_some() {
             apply_hosted_splash(&mut sample, self.thresholds);
         }
         (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref(), self.platform);
+        sample.ts = epoch_millis(SystemTime::now());
+        self.conclude(sample, sample_started)
+    }
+
+    /// What becomes of a sample once it is read: it is judged against
+    /// earlier ones, drawn, told in the Journal, counted in the session,
+    /// recorded and logged, and becomes the current sample. Nothing here
+    /// reads the machine, so a sample taken elsewhere goes the same way.
+    pub(crate) fn conclude(&mut self, mut sample: Sample, sample_started: Instant) -> Sample {
         let previous = if self.current.updated == "waiting" {
             None
         } else {
@@ -573,15 +694,23 @@ impl Collector {
         sample.correlation = self.correlation.observe(&sample, self.thresholds);
         classify(&mut sample, previous.as_ref(), self.thresholds);
 
-        if previous.as_ref().is_some_and(|old| {
-            old.llm_provider != sample.llm_provider || old.llm_model != sample.llm_model
-        }) {
-            self.generation_history.clear();
-            self.prefill_history.clear();
+        // A rate chart restarts when a different runtime or model produces a
+        // rate. A sample without one (idle, or a runtime briefly not found)
+        // cannot clear it.
+        if let Some(identity) = rate_identity(&sample) {
+            if self
+                .rate_identity
+                .as_ref()
+                .is_some_and(|last| *last != identity)
+            {
+                self.view.generation_history.clear();
+                self.view.prefill_history.clear();
+            }
+            self.rate_identity = Some(identity);
         }
 
         push_history(
-            &mut self.generation_history,
+            &mut self.view.generation_history,
             chart_rate_value(&sample, ChartMetric::Generation),
             ChartMetric::Generation,
             self.history_limit,
@@ -590,13 +719,13 @@ impl Collector {
         // A prefill speed has no threshold and no grade: it is a reading.
         let prefill = chart_rate_value(&sample, ChartMetric::Prefill);
         push_history_with_tone(
-            &mut self.prefill_history,
+            &mut self.view.prefill_history,
             prefill,
             Tone::Green,
             self.history_limit,
         );
         push_history(
-            &mut self.cache_history,
+            &mut self.view.cache_history,
             sample
                 .llm_cache_interval_efficiency
                 .filter(|value| value.is_finite() && *value >= 0.0)
@@ -607,7 +736,7 @@ impl Collector {
         );
         // Weight reads are blue, prompt-cache traffic cyan.
         push_history_with_tone(
-            &mut self.disk_history,
+            &mut self.view.disk_history,
             sample.disk.rate(),
             if sample.disk.weights > 0 {
                 Tone::Blue
@@ -621,17 +750,17 @@ impl Collector {
             .filter(|speed| speed.is_finite() && *speed > 0.0)
             .filter(|_| sample.disk.read.is_some())
         {
-            if self.decode_reads.len() >= self.history_limit {
-                self.decode_reads.pop_front();
+            while self.view.decode_reads.len() >= self.history_limit.max(1) {
+                self.view.decode_reads.pop_front();
             }
-            self.decode_reads.push_back(crate::domain::DecodeRead {
+            self.view.decode_reads.push_back(crate::domain::DecodeRead {
                 speed,
                 from_disk: sample.disk.weights > 0,
             });
         }
         // Generation has no threshold either: a sample is its usual speed
         // or, marked below, unusually slow.
-        if let Some(point) = self.generation_history.back_mut() {
+        if let Some(point) = self.view.generation_history.back_mut() {
             point.tone = if point.value.is_none() {
                 Tone::Muted
             } else {
@@ -639,15 +768,28 @@ impl Collector {
             };
         }
         push_history_with_tone(
-            &mut self.load_history,
+            &mut self.view.load_history,
             resident_memory_percent(&sample),
             sample.pressure_tone,
             self.history_limit,
         );
-        self.composition_history
+        self.view
+            .composition_history
             .push_back(crate::memory_composition::segments(&sample));
-        while self.composition_history.len() > self.history_limit {
-            self.composition_history.pop_front();
+        while self.view.composition_history.len() > self.history_limit {
+            self.view.composition_history.pop_front();
+        }
+        // What the GPU holds: its own memory in use where the cards have
+        // any, else its part of RAM where the OS counts that.
+        self.view
+            .gpu_memory_history
+            .push_back(match sample.gpu_memory() {
+                crate::gpu::Memory::Dedicated { used, .. } => Some(used),
+                crate::gpu::Memory::Shared => sample.gpu_in_use,
+                crate::gpu::Memory::Unknown => None,
+            });
+        while self.view.gpu_memory_history.len() > self.history_limit {
+            self.view.gpu_memory_history.pop_front();
         }
         // Captured tones follow the assessment's states, so a chart never
         // shows a severity the headline does not report.
@@ -655,7 +797,7 @@ impl Collector {
         // the system (swap, and file paging while memory is tight).
         let paging = sample.paging_measured().then_some(sample.disk_paging());
         push_history_with_tone(
-            &mut self.swap_history,
+            &mut self.view.swap_history,
             paging,
             paging
                 .map(|_| paging_tone(sample.paging_churn(), &sample.impact, self.thresholds))
@@ -665,12 +807,13 @@ impl Collector {
         let compression = (sample.vm_available && sample.rate_ready)
             .then_some(sample.compress.saturating_add(sample.decompress));
         let previous_tone = self
+            .view
             .compression_history
             .back()
             .filter(|point| point.value.is_some())
             .map(|point| point.tone);
         push_history_with_tone(
-            &mut self.compression_history,
+            &mut self.view.compression_history,
             compression,
             compression
                 .map(|churn| compression_tone(churn, previous_tone, self.thresholds))
@@ -678,7 +821,7 @@ impl Collector {
             self.history_limit,
         );
         push_history(
-            &mut self.gpu_history,
+            &mut self.view.gpu_history,
             sample.gpu_util.map(u64::from),
             ChartMetric::Gpu,
             self.history_limit,
@@ -687,51 +830,15 @@ impl Collector {
 
         self.mark_unusual(&sample);
         self.record_journal_events(previous.as_ref(), &sample);
-        self.session.observe(&sample);
-        // What generation was doing, so a log can be replayed against it.
-        let generating = crate::analysis::CorrelationObservation::from_sample(&sample);
+        sample.request_findings = self.view.session.request_findings.evidence();
+        self.view.session.observe(&sample);
         crate::recording::write(&sample);
         diagnostics_log(
             "INFO",
             "sample",
-            format!(
-                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={} writers={} disk_read={} disk_write={} disk_weights={} ssd_loads={} ssd_saves={}",
-                sample_started.elapsed().as_millis(),
-                log_field(&sample.llm_status),
-                log_field(&sample.llm_provider),
-                log_field(&sample.llm_model),
-                log_field(sample.llm_source.label()),
-                sample.llm_generation_tps_live,
-                log_optional_f64(sample.llm_generation_tps),
-                sample.llm_prefill_tps_live,
-                log_optional_f64(sample.llm_prefill_tps),
-                log_optional_f64(sample.llm_cache_efficiency),
-                log_optional_u64(sample.llm_active_requests),
-                log_optional_u64(sample.llm_waiting_requests),
-                log_optional_u8(sample.gpu_util),
-                log_optional_u8(sample.metal.renderer_util),
-                log_optional_u8(sample.metal.tiler_util),
-                log_optional_u64(resident_memory_percent(&sample)),
-                log_optional_u8(sample.availability),
-                sample.swap_in,
-                sample.swap_out,
-                sample.compress,
-                sample.decompress,
-                generating.generating,
-                log_optional_u64(generating.context),
-                if generating.writers.is_empty() {
-                    "-".to_owned()
-                } else {
-                    log_field(&generating.writers.join(","))
-                },
-                log_optional_u64(sample.disk.read),
-                log_optional_u64(sample.disk.write),
-                sample.disk.weights,
-                sample.disk.loads,
-                sample.disk.saves,
-            ),
+            sample_log_details(&sample, sample_started.elapsed().as_millis()),
         );
-        self.current = sample.clone();
+        self.view.current = sample.clone();
         sample
     }
 
@@ -761,13 +868,13 @@ impl Collector {
         }
         for chart in charts {
             let history = match chart {
-                Chart::Generation => &mut self.generation_history,
-                Chart::Prefill => &mut self.prefill_history,
-                Chart::Cache => &mut self.disk_history,
-                Chart::Memory => &mut self.load_history,
-                Chart::Paging => &mut self.swap_history,
-                Chart::Compression => &mut self.compression_history,
-                Chart::Gpu => &mut self.gpu_history,
+                Chart::Generation => &mut self.view.generation_history,
+                Chart::Prefill => &mut self.view.prefill_history,
+                Chart::Cache => &mut self.view.disk_history,
+                Chart::Memory => &mut self.view.load_history,
+                Chart::Paging => &mut self.view.swap_history,
+                Chart::Compression => &mut self.view.compression_history,
+                Chart::Gpu => &mut self.view.gpu_history,
                 // Drawn per request, not per sample: the panel is tagged.
                 Chart::Prompt | Chart::Queue | Chart::Latency => continue,
             };
@@ -783,23 +890,34 @@ impl Collector {
     }
 
     pub(crate) fn view(&self) -> CollectorView {
-        CollectorView {
-            current: self.current.clone(),
-            generation_history: self.generation_history.clone(),
-            prefill_history: self.prefill_history.clone(),
-            cache_history: self.cache_history.clone(),
-            disk_history: self.disk_history.clone(),
-            decode_reads: self.decode_reads.clone(),
-            session: self.session.clone(),
-            load_history: self.load_history.clone(),
-            composition_history: self.composition_history.clone(),
-            swap_history: self.swap_history.clone(),
-            compression_history: self.compression_history.clone(),
-            platform: self.platform,
-            gpu_history: self.gpu_history.clone(),
-            signals: self.signals.clone(),
-            request_history: self.request_history.clone(),
-            operator_history: self.operator_history.clone(),
+        self.view.clone()
+    }
+
+    /// One log line when a runtime's connection or its failing probes
+    /// change, for every runtime: the log then says why readings are missing.
+    fn log_runtime_change(&mut self, report: &crate::runtime_diagnostics::RuntimeReport) {
+        let failures: Vec<String> = report
+            .probes
+            .iter()
+            .filter_map(|probe| {
+                probe
+                    .issue
+                    .as_ref()
+                    .map(|issue| format!("{}={issue}", probe.path))
+            })
+            .collect();
+        let state = format!(
+            "provider={} endpoint={} connected={} {}",
+            log_field(report.provider.as_deref().unwrap_or("none")),
+            log_field(&report.endpoint),
+            report.connected,
+            log_field(&failures.join(";"))
+        );
+        if self.runtime_logged.as_deref() != Some(state.as_str()) {
+            if report.attempted_at.is_some() {
+                diagnostics_log("INFO", "runtime_poll", &state);
+            }
+            self.runtime_logged = Some(state);
         }
     }
 
@@ -809,8 +927,18 @@ impl Collector {
             events.push((state.to_string(), summary, tone));
         };
 
-        self.request_history.observe(&sample.llm_requests);
-        self.operator_history.observe(sample, self.history_limit);
+        self.view.request_history.observe(&sample.llm_requests);
+        self.view
+            .operator_history
+            .observe(sample, self.history_limit);
+        // What requests lost before their first tokens: cache misses, model
+        // loads, overlap that bought nothing, a full KV cache. Told after
+        // the requests' own rows; none of it colours anything.
+        let view = &mut self.view;
+        let found = view
+            .session
+            .request_findings
+            .observe(previous, sample, &view.request_history);
         for request in &sample.llm_requests {
             if let Some(summary) = providers::new_request_summary(&mut self.seen_requests, request)
             {
@@ -833,9 +961,13 @@ impl Collector {
             // load, not news. Conditions worth inspecting still get a row.
             let serving = !sample.llm_requests.is_empty() || !previous.llm_requests.is_empty();
             let routine = |impact: &str| matches!(impact, "GPU BUSY" | "LLM READY" | "IDLE");
+            // A state told within the last few samples is not told again.
+            self.journal_impact.tick();
+            self.journal_paging.tick();
             let impact_changed = previous.impact != sample.impact
                 && sample.impact != "SAMPLING"
-                && !(serving && routine(&previous.impact) && routine(&sample.impact));
+                && !(serving && routine(&previous.impact) && routine(&sample.impact))
+                && self.journal_impact.tell(&sample.impact);
             if impact_changed {
                 add(&sample.impact, signal_summary(sample), sample.impact_tone);
             }
@@ -919,6 +1051,9 @@ impl Collector {
                 }
                 add("DONE", summary, Tone::Cyan);
             }
+            for (state, summary) in found {
+                add(state, summary, Tone::Cyan);
+            }
             let lists_requests = lists_requests || !previous.llm_requests.is_empty();
             if (previous_active == 0) != (active == 0) && !lists_requests {
                 add(
@@ -991,20 +1126,39 @@ impl Collector {
                     )
                 };
                 let next = crate::diagnosis::slowdown_next_step(sample);
-                add(
-                    state,
-                    if next.is_empty() {
-                        what
-                    } else {
-                        format!("{what} → {next}")
-                    },
-                    insight.tone(),
-                );
+                // A stall that comes back within the same-story window is the
+                // same stall: one STALL row, and no RESUMED rows in between.
+                let at = sample
+                    .llm_observed_at
+                    .unwrap_or_else(std::time::SystemTime::now);
+                let same_stall = state == "STALL"
+                    && self.last_stall_row.is_some_and(|last| {
+                        at.duration_since(last).is_ok_and(|gap| {
+                            gap.as_secs_f64() < crate::analysis::SAME_STORY_SECONDS
+                        })
+                    });
+                if state == "STALL" {
+                    self.last_stall_row = Some(at);
+                    self.stall_row_skipped = same_stall;
+                }
+                if !same_stall {
+                    add(
+                        state,
+                        if next.is_empty() {
+                            what
+                        } else {
+                            format!("{what} → {next}")
+                        },
+                        insight.tone(),
+                    );
+                }
             }
+            // The end of a stall that was folded into the last one is not news.
+            let quiet_stall = self.stall_row_skipped;
             if let Some(stalled) = previous
                 .correlation
                 .stall_seconds
-                .filter(|_| sample.correlation.stall_seconds.is_none())
+                .filter(|_| sample.correlation.stall_seconds.is_none() && !quiet_stall)
             {
                 add(
                     "RESUMED",
@@ -1024,7 +1178,19 @@ impl Collector {
             // One row when a slowdown ends: how long it lasted and how deep
             // it went, or that the slower speed is now the request's own.
             if let Some(end) = sample.correlation.ended {
-                if end.settled {
+                if end.finished {
+                    add(
+                        "ENDED",
+                        format!(
+                            "{} finished while slow after {:.0}s · low {:.1} tok/s, usual {:.1}",
+                            sample.correlation.phase.word(),
+                            end.seconds,
+                            end.low,
+                            end.reference
+                        ),
+                        Tone::Muted,
+                    );
+                } else if end.settled {
                     add(
                         "SETTLED",
                         format!(
@@ -1058,7 +1224,11 @@ impl Collector {
 
             let previous_paging = previous.paging_churn() > 0;
             let paging = sample.paging_churn() > 0;
-            if previous_paging != paging {
+            if previous_paging != paging
+                && self
+                    .journal_paging
+                    .tell(if paging { "paging" } else { "none" })
+            {
                 // Same band as the paging chart: traffic below the warning
                 // rate is light paging, not a condition worth inspecting.
                 let churn = sample.paging_churn();
@@ -1096,17 +1266,20 @@ impl Collector {
                 add("GPU", summary, tone);
             }
 
+            // Heat that begins, changes or ends; not a reading that merely
+            // went missing and came back.
             if previous.thermal != sample.thermal
                 && sample.thermal != "unavailable"
                 && !sample.thermal.ends_with("°C measured")
+                && (sample.thermal_news() || previous.thermal_news())
             {
                 add(
                     "THERMAL",
                     sample.thermal.clone(),
-                    if sample.thermal == "no warning" {
-                        Tone::Green
-                    } else {
+                    if sample.thermal_news() {
                         Tone::Yellow
+                    } else {
+                        Tone::Green
                     },
                 );
             }
@@ -1114,15 +1287,24 @@ impl Collector {
             add(
                 "SYSTEM",
                 format!(
-                    "journal started · RAM resident {} · pressure {}",
-                    sample
-                        .resident_memory
-                        .map(bytes)
-                        .unwrap_or_else(|| "—".into()),
+                    "journal started · {} · pressure {}",
+                    sample.memory_use_label(),
                     pressure_state_label(sample)
                 ),
                 Tone::Cyan,
             );
+            // A config that did not parse is ignored; say so once, where
+            // the session starts.
+            if let Some(reason) = self.config_ignored.clone() {
+                add(
+                    "SYSTEM",
+                    format!(
+                        "config.json ignored: {} · open Settings (4)",
+                        compact_label(&reason, 60)
+                    ),
+                    Tone::Yellow,
+                );
+            }
             if sample.llm_provider != "none" && sample.llm_model != "not detected" {
                 add(
                     "LLM",
@@ -1144,7 +1326,7 @@ impl Collector {
                 continue;
             }
             let kind = EventKind::from_state(&state);
-            self.signals.push_back(SignalEvent {
+            self.view.signals.push_back(SignalEvent {
                 time: sample.updated.clone(),
                 recorded_at: SystemTime::now(),
                 kind,
@@ -1154,33 +1336,30 @@ impl Collector {
             });
         }
         let journal_limit = self.history_limit.clamp(40, 240);
-        while self.signals.len() > journal_limit {
-            self.signals.pop_front();
+        while self.view.signals.len() > journal_limit {
+            self.view.signals.pop_front();
         }
     }
 
+    /// Start the session over: everything drawn and learned goes; the
+    /// machine, the runtime client and the settings stay.
     pub(crate) fn reset(&mut self) {
+        self.view = CollectorView {
+            platform: self.platform,
+            ..CollectorView::default()
+        };
         self.previous = None;
+        self.cached_at_start = None;
+        self.rate_identity = None;
+        self.journal_impact = Held::default();
+        self.journal_paging = Held::default();
+        self.last_stall_row = None;
+        self.stall_row_skipped = false;
         self.previous_llm_cache = None;
         self.gpu_band = None;
         self.telemetry_online = None;
         self.seen_requests.clear();
-        self.request_history = request_history::History::default();
-        self.operator_history = operator_history::History::default();
         self.correlation.reset();
-        self.generation_history.clear();
-        self.prefill_history.clear();
-        self.cache_history.clear();
-        self.disk_history.clear();
-        self.decode_reads.clear();
-        self.session = Default::default();
-        self.load_history.clear();
-        self.composition_history.clear();
-        self.swap_history.clear();
-        self.compression_history.clear();
-        self.gpu_history.clear();
-        self.signals.clear();
-        self.current = Sample::default();
     }
 }
 
@@ -1216,6 +1395,17 @@ pub(crate) fn apply_hosted_splash(sample: &mut Sample, thresholds: Thresholds) {
 /// Return a live request rate for a chart. Aggregate session rates and
 /// completion-log values are deliberately excluded because they are not
 /// measurements of the current sample.
+/// The runtime and model a sample's rate belongs to, when it has a rate. From
+/// a live API only a live rate counts: an idle runtime keeps its last rate,
+/// which says nothing about the model now named.
+pub(crate) fn rate_identity(sample: &Sample) -> Option<(String, String)> {
+    let live_api = sample.llm_source == TelemetrySource::Live;
+    let generation =
+        sample.llm_generation_tps.is_some() && (!live_api || sample.llm_generation_tps_live);
+    let prefill = sample.llm_prefill_tps.is_some() && (!live_api || sample.llm_prefill_tps_live);
+    (generation || prefill).then(|| (sample.llm_provider.clone(), sample.llm_model.clone()))
+}
+
 pub(crate) fn chart_rate_value(sample: &Sample, metric: ChartMetric) -> Option<u64> {
     let (value, live) = match metric {
         ChartMetric::Generation => (sample.llm_generation_tps, sample.llm_generation_tps_live),
@@ -1314,6 +1504,73 @@ pub(crate) fn watched(start: &mut Option<(String, u64)>, runtime: &str, cached: 
             0
         }
     }
+}
+
+/// Milliseconds since the Unix epoch; unknown for a clock set before it.
+pub(crate) fn epoch_millis(at: SystemTime) -> Option<u64> {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_millis()).ok())
+}
+
+/// The `event=sample` log line: what the sample read and what generation
+/// was doing, so a log can be replayed against it. Fields are only ever
+/// added at the end, so scripts that read the earlier ones keep working;
+/// a reading that was not taken is `na`.
+pub(crate) fn sample_log_details(sample: &Sample, duration_ms: u128) -> String {
+    let generating = crate::analysis::CorrelationObservation::from_sample(sample);
+    // A reading the sample holds in words, unless it holds the word for
+    // nothing read.
+    let read = |value: &str, unread: &str| {
+        if value.is_empty() || value == unread {
+            "na".to_owned()
+        } else {
+            log_field(value)
+        }
+    };
+    format!(
+        "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={} generating={} context={} writers={} disk_read={} disk_write={} disk_weights={} ssd_loads={} ssd_saves={} pressure={} thermal={} power_mw={} draft={} ts={}",
+        duration_ms,
+        log_field(&sample.llm_status),
+        log_field(&sample.llm_provider),
+        log_field(&sample.llm_model),
+        log_field(sample.llm_source.label()),
+        sample.llm_generation_tps_live,
+        log_optional_f64(sample.llm_generation_tps),
+        sample.llm_prefill_tps_live,
+        log_optional_f64(sample.llm_prefill_tps),
+        log_optional_f64(sample.llm_cache_efficiency),
+        log_optional_u64(sample.llm_active_requests),
+        log_optional_u64(sample.llm_waiting_requests),
+        log_optional_u8(sample.gpu_util),
+        log_optional_u8(sample.metal.renderer_util),
+        log_optional_u8(sample.metal.tiler_util),
+        log_optional_u64(resident_memory_percent(sample)),
+        log_optional_u8(sample.availability),
+        sample.swap_in,
+        sample.swap_out,
+        sample.compress,
+        sample.decompress,
+        generating.generating,
+        log_optional_u64(generating.context),
+        if generating.writers.is_empty() {
+            "-".to_owned()
+        } else {
+            log_field(&generating.writers.join(","))
+        },
+        log_optional_u64(sample.disk.read),
+        log_optional_u64(sample.disk.write),
+        sample.disk.weights,
+        sample.disk.loads,
+        sample.disk.saves,
+        read(&sample.pressure, "UNKNOWN"),
+        read(&sample.thermal, "unavailable"),
+        log_optional_u64(sample.system_power_mw),
+        // The share of draft tokens accepted since the last poll: what the
+        // runtime reports about speculative decoding.
+        log_optional_f64(sample.llm_draft_acceptance),
+        log_optional_u64(sample.ts),
+    )
 }
 
 pub(crate) fn cache_interval_efficiency(

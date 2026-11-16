@@ -256,6 +256,30 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
 }
 
 #[test]
+fn detects_omlx_however_it_was_started() {
+    // oMLX runs only on Apple Silicon Macs, natively, so its process is in
+    // this Mac's list; mlxtop asks oMLX's port nothing until it finds one.
+    // macOS cuts the `comm` column to 16 characters.
+    for line in [
+        // The menu bar app's server (oMLX 0.8.0rc1, ServerProcess.swift).
+        "100 2097152 3.0 1.0 S 0 /Applications/oM /Applications/oMLX.app/Contents/Resources/Python/cpython-3.11/bin/python3 -m omlx.cli serve --base-path /Users/test/.omlx --port 8000",
+        // `brew services start omlx` runs the formula's `omlx serve`.
+        "101 2097152 3.0 1.0 S 0 /opt/homebrew/Ce /opt/homebrew/Cellar/omlx/0.8.0/libexec/bin/python3.11 /opt/homebrew/opt/omlx/bin/omlx serve",
+        // `omlx serve` from a uv tool or pip install.
+        "102 2097152 3.0 1.0 S 0 /Users/test/.loc /Users/test/.local/share/uv/tools/omlx/bin/python3 /Users/test/.local/bin/omlx serve --port 8000",
+        "103 2097152 3.0 1.0 S 0 python3 python3 -m omlx.server --model-dir /Users/test/models",
+        // The app itself, with its server stopped.
+        "104 204800 0.1 0.1 S 0 /Applications/oM /Applications/oMLX.app/Contents/MacOS/oMLX",
+    ] {
+        assert_eq!(
+            parse_processes(line).provider.as_deref(),
+            Some("oMLX"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
 fn detects_bionic_and_lmstudio_helpers_with_resource_totals() {
     let snapshot = parse_processes(
         "101 4096 12.5 0.1 S 0 Bionic /Applications/Bionic.app/Contents/MacOS/Bionic\n\
@@ -343,19 +367,17 @@ fn classification_reports_unknown_data_and_actionable_compression() {
     sample.vm_available = false;
     classify(&mut sample, None, defaults());
     assert_eq!(sample.impact, "DATA LIMITED");
-    assert_eq!(sample.guidance_badge, "CHECK");
 
     sample.vm_available = true;
     sample.compress = COMPRESSION_WARN_RATE;
     classify(&mut sample, None, defaults());
     assert_eq!(sample.impact, "COMPRESSION ACTIVE");
-    assert_eq!(sample.guidance_badge, "WATCH");
 }
 
 #[test]
 fn parses_llm_completion_stats() {
     let stats = parse_llm_completion_line(
-        "2026-08-25 03:00:00 Chat completion: model=oQ4e-mtp, 128 tokens in 4.0s (32.0 tok/s), prompt: 4096, finish_reason=stop, max_tokens=512",
+        "2026-08-25 03:00:00 Chat completion: model=oQ4e-mtp, 128 tokens in 6.0s (32.0 tok/s), prompt: 4096, finish_reason=stop, max_tokens=512",
     )
     .expect("completion should parse");
     assert_eq!(stats.model.as_deref(), Some("oQ4e-mtp"));
@@ -373,7 +395,9 @@ fn parses_omlx_responses_api_stats_without_prompt_count() {
     assert_eq!(stats.model.as_deref(), Some("Qwen3.8-27B-oQ4e-mtp"));
     assert_eq!(stats.output_tokens, Some(8407));
     assert_eq!(stats.prompt_tokens, None);
-    assert_eq!(stats.tokens_per_second, Some(18.7));
+    // 8,407 tokens over the request's 449.88 s: the wait for the first token is in it, so it
+    // is no generation speed.
+    assert_eq!(stats.tokens_per_second, None);
 }
 
 #[test]
@@ -964,4 +988,75 @@ fn captured_omlx_stats_report_a_full_ssd_cache_and_its_block_counters() {
     assert_eq!(crate::omlx::parse_ssd_cache(&no_dir), None);
     assert_eq!(crate::omlx::parse_ssd_cache(&json!({})), None);
     assert!(!domain::SsdCache::default().full());
+}
+
+#[test]
+fn an_absurd_idle_age_from_omlx_is_ignored_not_fatal() {
+    let health = json!({"status": "ok", "default_model": "m"});
+    let text = include_str!("fixtures/omlx_stats_generating_live.json")
+        .replace("0.04725745797622949", "1e30");
+    let stats: Value = serde_json::from_str(&text).unwrap();
+    let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+    let [request] = telemetry.requests.as_slice() else {
+        panic!("one generating request: {:?}", telemetry.requests);
+    };
+    assert_eq!(request.idle_for, None);
+}
+
+#[test]
+fn unrelated_commands_naming_a_runtime_are_not_runtimes() {
+    for (name, command) in [
+        ("vim", "vim ollama-notes.md"),
+        ("tail", "tail -f /var/log/omlx.log"),
+        ("ssh", "ssh ollama-box"),
+        ("git", "git clone https://github.com/ollama/ollama"),
+        ("less", "less sglang.txt"),
+        ("grep", "grep -r llama.cpp ."),
+    ] {
+        assert_eq!(process_provider(name, command), None, "{command}");
+    }
+    // Runtimes started through an interpreter are still found.
+    assert_eq!(
+        process_provider("Python", "/usr/bin/python3 -m mlx_lm.server --port 8080").as_deref(),
+        Some("mlx-lm")
+    );
+    assert_eq!(
+        process_provider("ollama", "/opt/homebrew/bin/ollama serve").as_deref(),
+        Some("Ollama")
+    );
+}
+
+#[test]
+fn macos_process_names_are_executable_names() {
+    // `ps -axo …,comm=,args=` on macOS: `comm` cut to 16 characters.
+    let listing = "\
+  429  32944  1.9 0.1 Ss 0 /System/Library/ /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console\n\
+ 1076 4186368 30.4 12.5 Us 0 /Applications/Go /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --type=renderer\n\
+  777 2097152  5.0 3.0 S 0 /opt/homebrew/bi /opt/homebrew/bin/ollama serve\n\
+  101 1024  0.1 0.1 Ss 0 /sbin/launchd /sbin/launchd\n";
+    let snapshot = crate::processes::parse_processes(listing);
+    assert_eq!(snapshot.largest_consumer.as_deref(), Some("Google Chrome"));
+    assert_eq!(
+        snapshot.top_llm.as_ref().map(|p| p.name.as_str()),
+        Some("ollama")
+    );
+    assert_eq!(snapshot.provider.as_deref(), Some("Ollama"));
+    assert_eq!(
+        crate::processes::executable_name("/sbin/launchd"),
+        "launchd"
+    );
+    assert_eq!(
+        crate::processes::executable_name(
+            "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console"
+        ),
+        "loginwindow"
+    );
+}
+
+#[test]
+fn omlx_model_and_status_carry_no_control_characters() {
+    let health = json!({"status": "ok\u{1b}[5m", "default_model": "evil\u{1b}]0;TITLE\u{7}model"});
+    let telemetry = parse_omlx_telemetry(&health, None);
+    assert_eq!(telemetry.model.as_deref(), Some("evil]0;TITLEmodel"));
+    assert_eq!(telemetry.status.as_deref(), Some("ok[5m"));
 }

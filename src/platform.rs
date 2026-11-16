@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! macOS, Linux and Windows host-counter collection through the injectable Host interface.
 use crate::config::Thresholds;
-use crate::domain::{ChartMetric, MetalTelemetry, Sample, Tone, VmCounters};
+use crate::domain::{
+    ChartMetric, MetalTelemetry, Sample, ThermalLevel, ThermalState, Tone, VmCounters,
+};
 use crate::gpu;
 use crate::host::{Host, WindowsReading};
 use crate::parsing::{
@@ -67,11 +69,6 @@ pub(crate) fn sample_macos_memory(host: &dyn Host, sample: &mut Sample, page_siz
     (sample.swap_total, sample.swap_used) = parse_swap_usage(&swap_usage.unwrap_or_default());
 }
 
-pub(crate) fn macos_counters_for_rates(host: &dyn Host, page_size: u64) -> VmCounters {
-    let vm = host.command("/usr/bin/vm_stat", &[]).unwrap_or_default();
-    parse_vm_stat(&vm, page_size)
-}
-
 /// The GPU's load and memory, every poll; thermal state and power only when
 /// `slow` is set, since they change over seconds and each costs a process.
 pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample, slow: bool) {
@@ -90,11 +87,8 @@ pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample, slo
     if !slow {
         return;
     }
-    sample.thermal = parse_thermal(
-        &host
-            .command("/usr/bin/pmset", &["-g", "therm"])
-            .unwrap_or_default(),
-    );
+    sample.thermal_state = macos_thermal(host, sample.metal.architecture.as_deref());
+    sample.thermal = sample.thermal_state.label();
     // Power telemetry needs no privileges; desktops publish it too.
     sample.system_power_mw = host
         .command(
@@ -147,9 +141,9 @@ pub(crate) fn parse_linux_meminfo(text: &str) -> LinuxMeminfo {
     } else {
         anon_kb
     };
-    let file_kb = parse_meminfo_value_kb(text, "Active(file):")
-        .saturating_add(parse_meminfo_value_kb(text, "Inactive(file):"))
-        .saturating_add(parse_meminfo_value_kb(text, "Cached:"))
+    // The file LRU lists and Cached + Buffers count the same pages: one of
+    // them, not both.
+    let file_kb = parse_meminfo_value_kb(text, "Cached:")
         .saturating_add(parse_meminfo_value_kb(text, "Buffers:"));
     LinuxMeminfo {
         total_kb,
@@ -255,14 +249,16 @@ pub(crate) fn linux_thermal_label(hottest: Option<u64>) -> String {
         .unwrap_or_else(|| "unavailable".into())
 }
 
-pub(crate) fn linux_counters_for_rates(host: &dyn Host) -> VmCounters {
-    let mut counters = VmCounters::default();
-    if let Some(text) = host.read_file(Path::new("/proc/vmstat")) {
-        let (swapins, swapouts) = parse_linux_paging(&text);
-        counters.swapins = swapins;
-        counters.swapouts = swapouts;
-    }
-    counters
+/// Paging counters from `/proc/vmstat`, or `None` when it could not be read:
+/// an unread counter must never become a zero baseline for the next rate.
+pub(crate) fn linux_counters_for_rates(host: &dyn Host) -> Option<VmCounters> {
+    let text = host.read_file(Path::new("/proc/vmstat"))?;
+    let (swapins, swapouts) = parse_linux_paging(&text);
+    Some(VmCounters {
+        swapins,
+        swapouts,
+        ..VmCounters::default()
+    })
 }
 
 pub(crate) fn sample_linux_memory(
@@ -285,9 +281,13 @@ pub(crate) fn sample_linux_memory(
     sample.resident_memory =
         resident_memory_bytes(total, info.free_kb.and_then(|free| free.checked_mul(1024)));
     sample.vm_available = true;
+    // Laid out so that cache and free add up to what the kernel says is
+    // available: what is neither the apps' nor available (kernel, slab,
+    // unreclaimable cache) is drawn as wired.
+    let available = info.available_kb.saturating_mul(1024).min(total);
     sample.anonymous = info.anon_kb.saturating_mul(1024);
-    sample.file_backed = info.file_kb.saturating_mul(1024);
-    sample.wired = 0;
+    sample.file_backed = info.file_kb.saturating_mul(1024).min(available);
+    sample.wired = total.saturating_sub(sample.anonymous.saturating_add(available));
     sample.compressor = 0;
     sample.compressed_logical = 0;
 
@@ -329,7 +329,9 @@ pub(crate) fn sample_linux_gpu_thermal(
     sample.gpu_util = gpu::peak_utilization(&sample.gpus);
     // VRAM remains per-card. A sum would falsely suggest a single allocation
     // pool and feed discrete GPU memory into the Apple Metal correlation rules.
-    sample.gpu_in_use = None;
+    // A GPU without memory of its own (an APU, DGX Spark) holds part of RAM:
+    // that part is drawn inside the one RAM bar, as on a Mac.
+    sample.gpu_in_use = gpu::shared_in_use(&sample.gpus);
     sample.gpu_alloc = None;
     sample.metal.renderer_util = None;
     sample.metal.tiler_util = None;
@@ -510,21 +512,60 @@ pub(crate) fn parse_metal_hardware(text: &str) -> MetalTelemetry {
         tiler_util: find_named_number(text, "Tiler Utilization %")
             .and_then(|value| value.try_into().ok()),
         resource_limit: None,
+        machine_model: None,
     }
 }
 
-pub(crate) fn parse_thermal(text: &str) -> String {
-    if let Some(value) = find_number(text, "CPU_Speed_Limit") {
-        if value < 100 {
-            return format!("limited {value}%");
-        }
-        return "no limit".into();
-    }
-    if text.is_empty() {
-        "unavailable".into()
-    } else if text.contains("No thermal warning") || text.contains("No performance warning") {
-        "no warning".into()
+/// The notify(3) key macOS posts its thermal pressure level under
+/// (`kOSThermalNotificationPressureLevelName`).
+pub(crate) const THERMAL_PRESSURE_KEY: &str = "com.apple.system.thermalpressurelevel";
+
+/// macOS's thermal pressure level, and pmset's CPU speed limit where it can
+/// give one. Intel Macs report a limit; Apple Silicon prints none, so there
+/// pmset is read only when the level could not be.
+pub(crate) fn macos_thermal(host: &dyn Host, architecture: Option<&str>) -> ThermalState {
+    let level = host
+        .command("/usr/bin/notifyutil", &["-g", THERMAL_PRESSURE_KEY])
+        .as_deref()
+        .and_then(parse_thermal_pressure);
+    let apple_silicon = architecture.is_some_and(|arch| arch.starts_with("arm64"));
+    let cpu_speed_limit = if level.is_some() && apple_silicon {
+        None
     } else {
-        "warning reported".into()
+        host.command("/usr/bin/pmset", &["-g", "therm"])
+            .as_deref()
+            .and_then(parse_cpu_speed_limit)
+    };
+    ThermalState {
+        level,
+        cpu_speed_limit,
     }
 }
+
+/// The level in what `notifyutil -g KEY` prints, `KEY STATE`. Anything
+/// else, such as an error it printed instead, is no reading.
+pub(crate) fn parse_thermal_pressure(text: &str) -> Option<ThermalLevel> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != THERMAL_PRESSURE_KEY {
+            return None;
+        }
+        let state = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        ThermalLevel::from_state(state)
+    })
+}
+
+/// `CPU_Speed_Limit` in `pmset -g therm`: the percent of full speed macOS
+/// allows the CPU.
+pub(crate) fn parse_cpu_speed_limit(text: &str) -> Option<u8> {
+    find_number(text, "CPU_Speed_Limit")
+        .and_then(|limit| u8::try_from(limit).ok())
+        .filter(|limit| *limit <= 100)
+}
+
+#[cfg(test)]
+#[path = "tests/platform.rs"]
+mod tests;

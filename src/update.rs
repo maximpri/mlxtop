@@ -315,6 +315,14 @@ impl Updater<'_> {
                 .find(|asset| asset.name == name)
                 .map(|asset| asset.browser_download_url.clone())
                 .ok_or_else(|| format!("release {latest} has no {name}"))
+                .and_then(|url| {
+                    // Assets come from GitHub over HTTPS, nowhere else.
+                    if url.starts_with("https://github.com/") {
+                        Ok(url)
+                    } else {
+                        Err(format!("release {latest} lists {name} outside github.com"))
+                    }
+                })
         };
         let (archive_url, sums_url) = (asset(&archive)?, asset("SHA256SUMS")?);
         writeln!(out, "Downloading mlxtop {latest} ({})...", self.target)?;
@@ -330,13 +338,18 @@ impl Updater<'_> {
         let archive_path = work.0.join(&archive);
         fs::write(&archive_path, &bytes)?;
         // bsdtar (macOS, Windows 10+) reads zip and gzip; GNU tar detects gzip.
-        let status = Command::new("tar")
-            .arg("-xf")
-            .arg(&archive_path)
-            .arg("-C")
-            .arg(&work.0)
-            .status()
-            .map_err(|error| format!("could not run tar to unpack {archive}: {error}"))?;
+        // An absolute path on macOS, where `sudo` keeps the caller's PATH.
+        let status = Command::new(if cfg!(target_os = "macos") {
+            "/usr/bin/tar"
+        } else {
+            "tar"
+        })
+        .arg("-xf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&work.0)
+        .status()
+        .map_err(|error| format!("could not run tar to unpack {archive}: {error}"))?;
         if !status.success() {
             return Err(format!("tar could not unpack {archive}").into());
         }
@@ -406,6 +419,7 @@ pub(crate) fn update(rc: bool) -> Result<(), Box<dyn Error>> {
     let target = release_target().ok_or("no mlxtop release is built for this platform")?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .https_only(true)
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_global(Some(Duration::from_secs(300)))
         .user_agent(format!("mlxtop/{VERSION}"))

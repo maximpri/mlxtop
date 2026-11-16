@@ -40,6 +40,8 @@ fn capabilities_preserve_sources_and_missing_or_stale_observations() {
         "GPT4All",
         "TensorFold",
         "Strata",
+        "mlx-serve",
+        "Splash",
     ] {
         let capabilities = capabilities(name);
         assert_eq!(capabilities.len(), 7, "{name}");
@@ -88,9 +90,11 @@ fn capabilities_preserve_sources_and_missing_or_stale_observations() {
                 || c.observed(&sample).contains("reported completions")
         );
     }
+    // An old reading is marked stale when the sample is taken; a fresh
+    // sample drawn later is still current.
     sample.llm_status = "running".into();
     sample.llm_observed_at = Some(SystemTime::now() - std::time::Duration::from_secs(60));
-    assert!(capabilities("oMLX")[1].observed(&sample).contains("stale"));
+    assert!(!capabilities("oMLX")[1].observed(&sample).contains("stale"));
     sample.llm_source = TelemetrySource::Report;
     assert_eq!(capabilities("Ollama")[1].source, "client recorder");
     assert!(capabilities("Ollama")[1]
@@ -113,6 +117,11 @@ fn diagnostics_are_read_only_sanitized_and_useful_without_a_runtime() {
     report.provider = Some("LM Studio".into());
     report.finish(true);
     assert_eq!(report.status(), "Connected · partial availability");
+    // Without an endpoint there is nothing to place, locally or remotely.
+    assert!(report
+        .lines(&Sample::default())
+        .contains(&"Endpoint: —".to_owned()));
+    report.endpoint = "https://example.net/llm".into();
     report.remote = true;
     report.credentials_present = true;
     let text = report.lines(&Sample::default()).join("\n");
@@ -172,6 +181,29 @@ fn safe_error_messages_preserve_actionable_failure_categories() {
     assert_eq!(
         ProbeIssue::from_io(std::io::ErrorKind::ConnectionRefused.into()),
         ProbeIssue::Transport
+    );
+}
+
+#[test]
+fn a_local_connect_that_times_out_found_no_server() {
+    let timed_out = || std::io::Error::from(std::io::ErrorKind::TimedOut);
+    // Windows retries a refused local connect for seconds: still a refusal.
+    for local in ["127.0.0.1:8000", "[::1]:8000"] {
+        assert_eq!(
+            ProbeIssue::from_connect(timed_out(), &local.parse().unwrap()),
+            ProbeIssue::Transport,
+            "{local}"
+        );
+    }
+    let local = "127.0.0.1:8000".parse().unwrap();
+    assert_eq!(
+        ProbeIssue::from_connect(std::io::ErrorKind::ConnectionRefused.into(), &local),
+        ProbeIssue::Transport
+    );
+    // A remote host that does not answer may be down or dropping packets.
+    assert_eq!(
+        ProbeIssue::from_connect(timed_out(), &"192.0.2.1:8000".parse().unwrap()),
+        ProbeIssue::Timeout
     );
 }
 

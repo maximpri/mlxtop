@@ -86,11 +86,13 @@ fn paging_alert_rings_once_per_episode_and_rearms() {
     assert_eq!(alert.time, "00:52:55");
     assert_eq!(app.alert_bells, 1);
 
-    // Recovery retires the alert and re-arms it for the next episode.
-    views
-        .send(view_with_impact("LLM READY", "00:52:56"))
-        .expect("test channel should accept views");
-    app.tick();
+    // Recovery (three calm samples) retires the alert and re-arms it.
+    for second in 56..59 {
+        views
+            .send(view_with_impact("LLM READY", &format!("00:52:{second}")))
+            .expect("test channel should accept views");
+        app.tick();
+    }
     assert!(app.alert.is_none());
     views
         .send(view_with_impact("HEAVY PAGING", "00:53:10"))
@@ -817,6 +819,7 @@ fn a_slowdown_is_three_slow_samples_and_ends_after_three_usual_ones() {
     assert_eq!(
         over.ended,
         Some(DropEnd {
+            finished: false,
             settled: false,
             seconds: 12.0,
             low: 25.0,
@@ -890,6 +893,7 @@ fn a_slowdown_with_nothing_else_unusual_becomes_the_usual_speed_after_thirty_sec
     assert_eq!(
         settled.ended,
         Some(DropEnd {
+            finished: false,
             settled: true,
             seconds: 32.0,
             low: 30.0,
@@ -948,6 +952,7 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     let usual = |second: u64| {
         let mut sample = paging(second, 50.0, 0);
         sample.pressure = "GREEN".into();
+        sample.thermal_state.level = Some(ThermalLevel::Nominal);
         sample.llm_waiting_requests = Some(0);
         sample.llm_model_memory = Some(80);
         sample.llm_model_memory_max = Some(100);
@@ -969,9 +974,17 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     let cases: Vec<(CorrelationCause, String, Change)> = vec![
         (
             CorrelationCause::Thermal,
-            "thermal limit".into(),
+            "thermal pressure heavy".into(),
             Box::new(|mut s| {
-                s.thermal = "limited 60%".into();
+                s.thermal_state.level = Some(ThermalLevel::Heavy);
+                s
+            }),
+        ),
+        (
+            CorrelationCause::Thermal,
+            "CPU speed limit 60%".into(),
+            Box::new(|mut s| {
+                s.thermal_state.cpu_speed_limit = Some(60);
                 s
             }),
         ),
@@ -1091,7 +1104,7 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     // Several at once: the host's limits lead, the summary names two, the
     // details all of them.
     let both = slowed(&|mut s| {
-        s.thermal = "limited 60%".into();
+        s.thermal_state.level = Some(ThermalLevel::Moderate);
         s.llm_waiting_requests = Some(2);
         s
     });
@@ -1117,15 +1130,59 @@ fn each_signal_that_is_unusual_beside_a_slowdown_is_named_host_limits_first() {
     assert_eq!(both.cause, CorrelationCause::Thermal);
     assert_eq!(
         both.summary,
-        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal limit + 2 waiting (usual 0)"
+        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal pressure moderate + 2 waiting (usual 0)"
     );
     assert_eq!(
         both.details,
-        "thermal limiting · thermal limit · 2 waiting (usual 0)"
+        "thermal limiting · thermal pressure moderate · 2 waiting (usual 0)"
     );
     assert_eq!(
         both.unusual,
         vec![CorrelationCause::Thermal, CorrelationCause::Queueing]
+    );
+}
+
+#[test]
+fn heat_is_a_slowdowns_reason_only_while_macos_raises_its_thermal_pressure() {
+    use ThermalLevel::{Heavy, Moderate, Nominal};
+    // Ten samples at the usual speed, then three at half of it, with the
+    // pressure level each was read at (`None`: it could not be read).
+    let run = |usual: Option<ThermalLevel>, slow: Option<ThermalLevel>| {
+        let mut samples: Vec<Sample> = (0..13)
+            .map(|second| {
+                let slowed = second >= 10;
+                let mut sample = paging(second, if slowed { 25.0 } else { 50.0 }, 0);
+                sample.thermal_state.level = if slowed { slow } else { usual };
+                sample
+            })
+            .collect();
+        observe_all(&mut CorrelationEngine::default(), &mut samples);
+        samples.pop().unwrap().correlation
+    };
+    // Nominal names nothing, and neither does a level never read.
+    for level in [Some(Nominal), None] {
+        let insight = run(level, level);
+        assert!(insight.is_material_drop(), "{level:?}");
+        assert_eq!(insight.cause, CorrelationCause::None, "{level:?}");
+        assert!(insight.unusual.is_empty(), "{level:?}");
+    }
+    // A raised level names heat.
+    let hot = run(Some(Nominal), Some(Moderate));
+    assert_eq!(hot.cause, CorrelationCause::Thermal);
+    assert_eq!(hot.lead, "thermal pressure moderate");
+    assert_eq!(
+        hot.summary,
+        "GEN ↓50.0% (50.0→25.0 tok/s) · unusual: thermal pressure moderate"
+    );
+    // A level that held while speed was usual is not the reason; heat that
+    // rises from it is.
+    assert_eq!(
+        run(Some(Moderate), Some(Moderate)).cause,
+        CorrelationCause::None
+    );
+    assert_eq!(
+        run(Some(Moderate), Some(Heavy)).lead,
+        "thermal pressure heavy"
     );
 }
 
@@ -1630,7 +1687,7 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
     ];
     sample.correlation.unusual = vec![CorrelationCause::Paging, CorrelationCause::GpuIdle];
     sample.correlation.usual_speed = Some((50.0, 40.0));
-    let lines = crate::report::diagnostic_lines(&sample);
+    let lines = crate::report::diagnostic_lines(&sample, None);
     let at = |text: &str| lines.iter().position(|line| line == text);
     assert!(at("Usual generation speed 50.0 tok/s · slow below 40.0").is_some());
     assert!(
@@ -1694,7 +1751,7 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
         usual_speed: Some((50.0, 40.0)),
         ..CorrelationInsight::default()
     };
-    let lines = crate::report::diagnostic_lines(&sample);
+    let lines = crate::report::diagnostic_lines(&sample, None);
     assert!(lines
         .iter()
         .any(|line| line.starts_with("Usual generation speed")));
@@ -1711,7 +1768,7 @@ fn diagnostics_and_the_expanded_chart_say_what_a_slowdown_is_judged_against() {
     // With nothing unusual, nothing is listed.
     sample.correlation.unusual.clear();
     sample.correlation.notes.clear();
-    let lines = crate::report::diagnostic_lines(&sample);
+    let lines = crate::report::diagnostic_lines(&sample, None);
     assert!(!lines.iter().any(|line| line.starts_with("Unusual:")));
 }
 
@@ -1885,9 +1942,9 @@ fn a_slow_prefill_is_found_named_and_drawn_like_a_slow_answer() {
     );
     for _ in 0..4 {
         for history in [
-            &mut collector.prefill_history,
-            &mut collector.generation_history,
-            &mut collector.swap_history,
+            &mut collector.view.prefill_history,
+            &mut collector.view.generation_history,
+            &mut collector.view.swap_history,
         ] {
             push_history_with_tone(history, Some(700), Tone::Green, 60);
         }
@@ -1962,4 +2019,112 @@ fn a_slowdown_from_fewer_draft_tokens_accepted_says_so() {
         )
     });
     assert!(screen.contains("draft 72%"), "{screen}");
+}
+
+#[test]
+fn bursty_heavy_paging_rings_once() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let mut app = test_app(0);
+    app.alarms = true;
+    let mut previous: Option<Sample> = None;
+    for (i, out) in [40u64, 20, 44, 12, 36, 28, 50, 8, 40, 20, 44, 12]
+        .into_iter()
+        .enumerate()
+    {
+        let mut sample = Sample {
+            total_memory: 1 << 34,
+            availability: Some(20),
+            pressure: "GREEN".into(),
+            vm_available: true,
+            swap_available: true,
+            rate_ready: true,
+            swap_out: out * 1024 * 1024,
+            updated: format!("12:00:{i:02}"),
+            ..Sample::default()
+        };
+        crate::analysis::classify(&mut sample, previous.as_ref(), thresholds);
+        let mut view = view_with_impact(&sample.impact, &sample.updated);
+        view.current = sample.clone();
+        app.track_critical_alert(&view);
+        previous = Some(sample);
+    }
+    assert_eq!(app.alert_bells, 1);
+}
+
+#[test]
+fn steady_paging_between_the_exit_and_enter_rates_stays_watch() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    for (rate, expected) in [
+        (5 * 1024 * 1024 / 2, "WATCH PAGING"),
+        (4 * 1024 * 1024, "PAGING ACTIVE"),
+    ] {
+        let mut previous: Option<Sample> = None;
+        let mut states = Vec::new();
+        for _ in 0..4 {
+            let mut sample = Sample {
+                total_memory: 1 << 34,
+                availability: Some(50),
+                pressure: "GREEN".into(),
+                vm_available: true,
+                swap_available: true,
+                rate_ready: true,
+                swap_in: rate,
+                ..Sample::default()
+            };
+            crate::analysis::classify(&mut sample, previous.as_ref(), thresholds);
+            states.push(sample.impact.clone());
+            previous = Some(sample);
+        }
+        assert!(states.iter().all(|state| state == expected), "{states:?}");
+    }
+}
+
+#[test]
+fn a_request_that_stalls_every_other_poll_is_one_journal_story() {
+    let thresholds = Thresholds::from_config(&Config::default());
+    let mut samples = Vec::new();
+    let mut out = 100;
+    for i in 0..20u64 {
+        let idle = if i % 2 == 0 { 0.2 } else { 1.8 };
+        if i % 2 == 0 {
+            out += 1;
+        }
+        samples.push(Sample {
+            llm_provider: "oMLX".into(),
+            llm_model: "m".into(),
+            llm_source: TelemetrySource::Live,
+            llm_status: "generating".into(),
+            llm_generation_tps: Some(0.5),
+            llm_generation_tps_live: true,
+            llm_active_requests: Some(1),
+            llm_observed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(i)),
+            updated: format!("t{i}"),
+            vm_available: true,
+            swap_available: true,
+            rate_ready: true,
+            llm_requests: vec![RequestUsage {
+                provider: "oMLX".into(),
+                model: "m".into(),
+                id: "slow".into(),
+                prompt: 30_000,
+                output: Some(out),
+                idle_for: Some(Duration::from_secs_f64(idle)),
+                ..RequestUsage::default()
+            }],
+            ..Sample::default()
+        });
+    }
+    let result = crate::recording::replay(&mut samples, thresholds);
+    let stalls = result
+        .findings
+        .iter()
+        .filter(|(_, s, _)| s == "STALL")
+        .count();
+    let resumed = result
+        .findings
+        .iter()
+        .filter(|(_, s, _)| s == "RESUMED")
+        .count();
+    assert_eq!(stalls, 1, "{:?}", result.findings);
+    assert!(resumed <= 1, "{:?}", result.findings);
 }

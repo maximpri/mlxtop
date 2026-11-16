@@ -21,7 +21,7 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
     let home = TempDir::new("macos-home");
     home.write(
         ".omlx-coding/logs/server.log",
-        "noise\nINFO Chat completion: model=qwen-coder, 120 tokens in 2.00s (60.0 tok/s), prompt: 500, cached: 0\n",
+        "noise\nINFO Chat completion: model=qwen-coder, 120 tokens in 3.00s (60.0 tok/s), prompt: 500, cached: 0\n",
     );
     let mut collector = collector(host.clone(), Platform::MacOs, Some(home.0.clone()));
     assert_eq!(collector.total_memory, 36 * 1024 * MIB);
@@ -49,9 +49,15 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
     assert_eq!((first.swap_in, first.swap_out), (0, 0));
     assert_eq!(first.gpu_util, Some(93));
     assert_eq!(first.gpu_in_use, Some(2 * 1024 * MIB));
+    // The memory panel's GPU history holds what its meter read.
+    assert_eq!(
+        collector.gpu_memory_history.back().copied().flatten(),
+        Some(2 * 1024 * MIB)
+    );
     assert_eq!(first.metal.renderer_util, Some(91));
     assert_eq!(first.metal.tiler_util, Some(12));
-    assert_eq!(first.thermal, "no warning");
+    assert_eq!(first.thermal_state.level, Some(ThermalLevel::Nominal));
+    assert_eq!(first.thermal, "nominal");
     assert_eq!(first.llm_count, 1);
     assert_eq!(first.llm_pid, 101);
     assert_eq!(first.llm_top, "omlx-server");
@@ -94,8 +100,104 @@ fn macos_collector_reads_hardware_memory_paging_and_processes() {
         .iter()
         .any(|(state, summary)| state == "PAGING" && summary.starts_with("active")));
     let calls = host.calls();
-    assert!(calls.contains(&"/usr/bin/pmset -g therm".to_string()));
+    assert!(calls.contains(&"/usr/bin/notifyutil -g com.apple.system.thermalpressurelevel".into()));
+    // Apple Silicon's pmset reports no CPU limit: with the level read, it
+    // is not run.
+    assert!(!calls.iter().any(|call| call.starts_with("/usr/bin/pmset")));
     assert!(!calls.iter().any(|call| call.starts_with("read /proc")));
+}
+
+#[test]
+fn a_sample_carries_when_it_was_taken_and_its_recording_format() {
+    let mut collector = collector(macos_host(), Platform::MacOs, None);
+    let before = epoch_millis(SystemTime::now()).unwrap();
+    let sample = collector.sample();
+    let after = epoch_millis(SystemTime::now()).unwrap();
+    // The time of day repeats every day; the epoch time does not.
+    assert_eq!(sample.updated, "12:00:01");
+    let ts = sample.ts.expect("a sample knows when it was taken");
+    assert!(
+        (before..=after).contains(&ts),
+        "{before} <= {ts} <= {after}"
+    );
+    assert_eq!(sample.schema, SAMPLE_SCHEMA);
+    assert!(sample_log_details(&sample, 3).ends_with(&format!(" ts={ts}")));
+    let before_epoch = SystemTime::UNIX_EPOCH
+        .checked_sub(Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(epoch_millis(before_epoch), None);
+}
+
+#[test]
+fn the_sample_log_line_keeps_its_fields_and_adds_new_ones_at_the_end() {
+    let sample = Sample {
+        pressure: "YELLOW".into(),
+        thermal: "limited 60%".into(),
+        system_power_mw: Some(61_250),
+        llm_draft_acceptance: Some(0.78),
+        ts: Some(1_794_719_479_668),
+        ..Sample::default()
+    };
+    let line = sample_log_details(&sample, 12);
+    // Scripts read fields by name after `event=sample`: the earlier ones
+    // keep their order and the new ones follow them.
+    let keys: Vec<&str> = line
+        .split(' ')
+        .filter_map(|field| field.split_once('='))
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "duration_ms",
+            "status",
+            "provider",
+            "model",
+            "source",
+            "gen_live",
+            "gen_tps",
+            "prefill_live",
+            "prefill_tps",
+            "cache",
+            "active",
+            "waiting",
+            "gpu",
+            "renderer",
+            "tiler",
+            "ram_resident_percent",
+            "vm_availability",
+            "paging_in",
+            "paging_out",
+            "compress",
+            "decompress",
+            "generating",
+            "context",
+            "writers",
+            "disk_read",
+            "disk_write",
+            "disk_weights",
+            "ssd_loads",
+            "ssd_saves",
+            "pressure",
+            "thermal",
+            "power_mw",
+            "draft",
+            "ts",
+        ]
+    );
+    assert!(line.starts_with("duration_ms=12 status=offline "), "{line}");
+    assert!(
+        line.ends_with(
+            " pressure=YELLOW thermal=limited_60% power_mw=61250 draft=0.780 ts=1794719479668"
+        ),
+        "{line}"
+    );
+    // What was not read is na, never zero or a made-up word.
+    let unread = sample_log_details(&Sample::default(), 0);
+    assert!(
+        unread.ends_with(" pressure=na thermal=na power_mw=na draft=na ts=na"),
+        "{unread}"
+    );
 }
 
 #[test]
@@ -112,7 +214,11 @@ fn linux_collector_reads_proc_nvidia_and_thermal_zones() {
     assert_eq!(first.pressure_meaning, "warning");
     assert_eq!(first.resident_memory, Some(14_000_000 * 1024));
     assert_eq!(first.anonymous, 7_000_000 * 1024);
-    assert_eq!(first.file_backed, 5_600_000 * 1024);
+    // Cached + Buffers, not also the file LRU lists that count the same
+    // pages; cache and free add up to MemAvailable.
+    assert_eq!(first.file_backed, 3_100_000 * 1024);
+    let sizes = crate::memory_composition::segments(&first).unwrap();
+    assert_eq!(crate::memory_headroom::left(sizes), 4_000_000 * 1024);
     assert_eq!(
         (first.swap_total, first.swap_used),
         (4_000_000 * 1024, 1_000_000 * 1024)
@@ -307,7 +413,7 @@ fn sampling_clears_rate_histories_when_the_model_changes() {
     let home = TempDir::new("model-switch");
     let log = home.write(
         ".omlx-coding/logs/server.log",
-        "Chat completion: model=first, 10 tokens in 1.00s (10.0 tok/s)\n",
+        "Chat completion: model=first, 10 tokens in 2.00s (10.0 tok/s)\n",
     );
     let mut collector = collector(macos_host(), Platform::MacOs, Some(home.0.clone()));
     collector.sample();
@@ -315,7 +421,7 @@ fn sampling_clears_rate_histories_when_the_model_changes() {
     assert_eq!(collector.generation_history.len(), 2);
     fs::write(
         &log,
-        "Chat completion: model=second, 10 tokens in 1.00s (10.0 tok/s)\n",
+        "Chat completion: model=second, 10 tokens in 2.00s (10.0 tok/s)\n",
     )
     .unwrap();
     let sample = collector.sample();
@@ -335,12 +441,16 @@ fn reset_discards_baselines_history_and_journal() {
     let mut collector = collector(linux_host(), Platform::Linux, None);
     collector.sample();
     collector.sample();
+    assert!(collector.session.started.is_some());
     collector.reset();
     assert!(collector.previous.is_none());
     assert!(collector.generation_history.is_empty() && collector.signals.is_empty());
     assert_eq!(collector.current.updated, "waiting");
     let view = collector.view();
     assert!(view.load_history.is_empty());
+    assert!(view.session.started.is_none(), "the session starts over");
+    // What the view is drawn for is the machine's, not the session's.
+    assert_eq!(view.platform, Platform::Linux);
     let sample = collector.sample();
     assert!(!sample.rate_ready, "reset must drop the rate baseline");
     assert!(journal(&collector)[0].1.starts_with("journal started"));
@@ -596,6 +706,8 @@ fn app_applies_new_views_and_keeps_the_selected_gpu_by_uuid() {
         total: None,
         temperature: None,
         throttle_reasons: None,
+        unified: false,
+        limits: Default::default(),
     };
     let mut view = empty_view();
     view.current.gpus = vec![device(0, "GPU-a"), device(1, "GPU-b")];
@@ -776,8 +888,8 @@ fn omlx_client_backs_off_while_the_server_is_unreachable() {
     }
     assert_eq!(
         client.retry_backoff,
-        Duration::from_secs(30),
-        "backoff is capped"
+        Duration::from_secs(4),
+        "a refused connection is retried within seconds"
     );
     // A cached success survives a failed poll.
     client.cached = Some(LlmTelemetry {
@@ -786,6 +898,19 @@ fn omlx_client_backs_off_while_the_server_is_unreachable() {
     });
     client.next_poll = Instant::now();
     assert_eq!(client.poll(None).unwrap().model.as_deref(), Some("kept"));
+}
+
+#[test]
+fn omlx_client_waits_longer_for_a_runtime_that_accepts_and_never_answers() {
+    // The operating system completes the handshake for a server that
+    // listens but never accepts: a hung runtime. It times out when read,
+    // on every platform, and is asked again later than a refused one.
+    let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = omlx_client(hung.local_addr().unwrap().port(), None);
+    client.retry_backoff = Duration::from_secs(16);
+    assert!(client.poll(None).is_none());
+    assert_eq!(client.retry_backoff, Duration::from_secs(30));
+    drop(hung);
 }
 
 #[test]
@@ -1362,7 +1487,7 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
     let count = |prefix: &str| calls.iter().filter(|call| call.starts_with(prefix)).count();
     assert_eq!(count("/usr/bin/vm_stat"), 2, "one per poll: {calls:?}");
     assert_eq!(
-        count("/usr/bin/pmset"),
+        count("/usr/bin/notifyutil"),
         1,
         "thermal is read every few seconds"
     );
@@ -1372,6 +1497,8 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
     );
     // Between readings, the last one stands.
     assert_eq!(second.thermal, first.thermal);
+    assert_eq!(second.thermal_state, first.thermal_state);
+    assert_eq!(second.thermal_state.level, Some(ThermalLevel::Nominal));
     assert_eq!(second.system_power_mw, first.system_power_mw);
     // Five seconds on, they are read again.
     collector.slow_read_at = collector
@@ -1382,7 +1509,417 @@ fn slow_readings_are_taken_every_few_polls_and_vm_stat_once_per_poll() {
         .calls()
         .into_iter()
         .skip(before)
-        .filter(|c| c.starts_with("/usr/bin/pmset"))
+        .filter(|c| c.starts_with("/usr/bin/notifyutil"))
         .count();
     assert_eq!(again, 2);
+}
+
+#[test]
+fn a_completion_log_tail_that_starts_inside_a_character_is_still_read() {
+    let home = TempDir::new("omlx-log-tail");
+    // 256 KiB + 2 bytes: the tail starts one byte into a three-byte `→`.
+    let mut text = String::from("x→");
+    text.push_str(&"y".repeat(256 * 1024 - 2));
+    text.push_str(
+        "\nChat completion: model=qwen, 7 tokens in 1.0s (7.0 tok/s), prompt: 3, cached: 0\n",
+    );
+    home.write(".omlx-coding/logs/server.log", &text);
+    let stats = read_latest_completion(&home.0.join(".omlx-coding/logs/server.log"))
+        .expect("the tail must be decoded lossily");
+    assert_eq!(stats.model.as_deref(), Some("qwen"));
+}
+
+fn scripted_macos_host(vm_stats: &[String], ps: &[&str]) -> FakeHost {
+    let mut host = FakeHost::default()
+        .command("/usr/sbin/sysctl -n hw.memsize", "38654705664\n")
+        .command("/usr/sbin/sysctl -n hw.machine", "arm64\n")
+        .command("/usr/sbin/sysctl -n iogpu.wired_limit_mb", "28000\n")
+        .command("/usr/sbin/sysctl -n hw.pagesize", "16384\n")
+        .command("/usr/sbin/ioreg -r -d 1 -w 0 -c IOAccelerator", IOREG_GPU)
+        .command(
+            "/usr/sbin/sysctl -n kern.memorystatus_vm_pressure_level",
+            "1\n",
+        )
+        .command(
+            "/usr/bin/memory_pressure -Q",
+            "System-wide memory free percentage: 63%\n",
+        )
+        .command(
+            "/usr/sbin/sysctl -n vm.swapusage",
+            "total = 2048.00M  used = 512.00M  free = 1536.00M  (encrypted)\n",
+        )
+        .command(
+            "/usr/bin/pmset -g therm",
+            "Note: No thermal warning level has been recorded\n",
+        )
+        .command("/bin/date +%H:%M:%S %z", "12:00:01 -0500\n");
+    for vm in vm_stats {
+        host = host.command("/usr/bin/vm_stat", vm);
+    }
+    for listing in ps {
+        host = host.command(
+            "/bin/ps -axo pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args=",
+            listing,
+        );
+    }
+    host
+}
+
+fn scripted_vm_stat(pageins: u64) -> String {
+    format!(
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n\
+Pages free:                               10000.\n\
+Pages speculative:                         2000.\n\
+Pages wired down:                         50000.\n\
+Pages occupied by compressor:             10000.\n\
+Pages stored in compressor:               40000.\n\
+Anonymous pages:                         300000.\n\
+File-backed pages:                       100000.\n\
+Pages reactivated:                       700000.\n\
+Compressions:                          90000000.\n\
+Decompressions:                        40000000.\n\
+Pageins:                               {pageins}.\n\
+Pageouts:                                300000.\n\
+Swapins:                                5000000.\n\
+Swapouts:                               6000000.\n"
+    )
+}
+
+#[test]
+fn a_failed_counter_read_never_becomes_a_rate_baseline() {
+    let host = scripted_macos_host(
+        &[
+            scripted_vm_stat(50_000_000),
+            String::new(),
+            scripted_vm_stat(50_000_010),
+            scripted_vm_stat(50_000_020),
+        ],
+        &[MACOS_PS],
+    );
+    let mut collector = collector(host, Platform::MacOs, None);
+    let samples: Vec<Sample> = (0..4)
+        .map(|_| {
+            thread::sleep(Duration::from_millis(20));
+            collector.sample()
+        })
+        .collect();
+    assert!(!samples[1].rate_ready, "an unread counter has no rate");
+    assert!(
+        !samples[2].rate_ready,
+        "the next good read starts a new baseline"
+    );
+    assert_eq!(samples[2].swap_in, 0);
+    assert!(samples[3].rate_ready);
+    assert_eq!(samples[3].swap_in, 0, "swap-ins did not change");
+    for sample in &samples {
+        assert_ne!(sample.impact, "SWAP THRASHING");
+    }
+    assert!(!journal(&collector)
+        .iter()
+        .any(|(state, _)| state == "PAGING" || state == "SWAP THRASHING"));
+}
+
+#[test]
+fn a_failed_linux_counter_read_never_becomes_a_rate_baseline() {
+    let mut collector = collector(linux_host(), Platform::Linux, None);
+    collector.sample();
+    collector.host = Box::new(FakeHost::default());
+    let sample = collector.sample();
+    assert!(!sample.rate_ready);
+    assert!(collector.previous.is_none());
+}
+
+#[test]
+fn a_failed_process_listing_keeps_the_runtime_and_its_history() {
+    let host = scripted_macos_host(&[scripted_vm_stat(1)], &[MACOS_PS, "", MACOS_PS, MACOS_PS]);
+    let mut collector = collector(host, Platform::MacOs, None);
+    let samples: Vec<Sample> = (0..4).map(|_| collector.sample()).collect();
+    let first = &samples[0];
+    assert!(first.llm_count > 0, "the fixture lists a runtime");
+    for sample in &samples {
+        assert_eq!(sample.llm_count, first.llm_count);
+        assert_eq!(sample.llm_provider, first.llm_provider);
+    }
+    assert_eq!(collector.generation_history.len(), 4);
+    let detected = journal(&collector)
+        .iter()
+        .filter(|(_, summary)| summary.starts_with("detected"))
+        .count();
+    assert!(detected <= 1, "{:?}", journal(&collector));
+}
+
+#[test]
+fn repeated_failed_process_listings_stop_reusing_the_last_one() {
+    let host = scripted_macos_host(&[scripted_vm_stat(1)], &[MACOS_PS, "", "", "", "", ""]);
+    let mut collector = collector(host, Platform::MacOs, None);
+    let samples: Vec<Sample> = (0..5).map(|_| collector.sample()).collect();
+    assert!(samples[3].llm_count > 0);
+    assert_eq!(samples[4].llm_count, 0);
+}
+
+#[test]
+fn an_idle_sample_naming_another_model_does_not_restart_the_rate_charts() {
+    let live = |model: &str, live: bool| Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: model.into(),
+        llm_source: TelemetrySource::Live,
+        llm_generation_tps: Some(40.0),
+        llm_generation_tps_live: live,
+        ..Sample::default()
+    };
+    assert_eq!(
+        crate::collector::rate_identity(&live("coder", true)),
+        Some(("oMLX".into(), "coder".into()))
+    );
+    // Idle: oMLX keeps its last rate and names the first listed model.
+    assert_eq!(crate::collector::rate_identity(&live("chat", false)), None);
+    // A rate read from a log has no live flag but still names its model.
+    let logged = Sample {
+        llm_source: TelemetrySource::Log,
+        ..live("second", false)
+    };
+    assert_eq!(
+        crate::collector::rate_identity(&logged),
+        Some(("oMLX".into(), "second".into()))
+    );
+}
+
+#[test]
+fn host_state_flaps_write_one_journal_row_each_way() {
+    let mut collector = collector(linux_host(), Platform::Linux, None);
+    let mut previous: Option<Sample> = None;
+    for i in 0..16 {
+        let sample = Sample {
+            impact: if i % 2 == 0 {
+                "HEAVY PAGING"
+            } else {
+                "MEMORY STRESS"
+            }
+            .into(),
+            rate_ready: true,
+            vm_available: true,
+            ..Sample::default()
+        };
+        collector.record_journal_events(previous.as_ref(), &sample);
+        previous = Some(sample);
+    }
+    let rows: Vec<String> = journal(&collector)
+        .into_iter()
+        .map(|(state, _)| state)
+        .filter(|state| state == "HEAVY PAGING" || state == "MEMORY STRESS")
+        .collect();
+    assert!(rows.len() <= 4, "{rows:?}");
+}
+
+#[test]
+fn a_stock_omlx_login_uses_the_key_in_its_own_settings() {
+    let home = TempDir::new("omlx-stock-key");
+    home.write(
+        ".omlx/settings.json",
+        r#"{"server":{"port":8123},"auth":{"api_key":"from-settings"}}"#,
+    );
+    let key = |provider: Option<&str>, omlx: Option<&str>, base: Option<&Path>| {
+        omlx_api_key_from(
+            provider.map(str::to_owned),
+            None,
+            omlx.map(str::to_owned),
+            Some(&home.0),
+            base,
+        )
+    };
+    // The key set in mlxtop's Settings outranks what oMLX keeps for itself,
+    // and gives way only to mlxtop's own variable.
+    let configured = |provider: Option<&str>, set: &str| {
+        omlx_api_key_from(
+            provider.map(str::to_owned),
+            Some(set.to_owned()),
+            Some("from-omlx-env".into()),
+            Some(&home.0),
+            None,
+        )
+    };
+    assert_eq!(
+        configured(None, "from-config").as_deref(),
+        Some("from-config")
+    );
+    assert_eq!(
+        configured(Some("from-mlxtop"), "from-config").as_deref(),
+        Some("from-mlxtop")
+    );
+    assert_eq!(configured(None, "  ").as_deref(), Some("from-omlx-env"));
+    assert_eq!(key(None, None, None).as_deref(), Some("from-settings"));
+    assert_eq!(
+        key(None, Some("from-omlx-env"), None).as_deref(),
+        Some("from-omlx-env")
+    );
+    assert_eq!(
+        key(Some("from-mlxtop"), Some("x"), None).as_deref(),
+        Some("from-mlxtop")
+    );
+    assert_eq!(
+        key(Some("  "), None, None).as_deref(),
+        Some("from-settings")
+    );
+    home.write(".config/omlx-coding/server.env", "API_KEY=from-env\n");
+    assert_eq!(key(None, None, None).as_deref(), Some("from-env"));
+
+    let other = TempDir::new("omlx-base-path");
+    other.write(".omlx/settings.json", r#"{"auth":{"api_key":null}}"#);
+    assert_eq!(read_omlx_settings_api_key(&other.0.join(".omlx")), None);
+    other.write("base/settings.json", r#"{"auth":{"api_key":"from-base"}}"#);
+    let bare = TempDir::new("omlx-no-wrapper");
+    assert_eq!(
+        omlx_api_key_from(None, None, None, Some(&bare.0), Some(&other.0.join("base"))).as_deref(),
+        Some("from-base")
+    );
+    assert_eq!(
+        omlx_api_key_from(None, None, None, Some(&bare.0), None),
+        None
+    );
+}
+
+#[test]
+fn omlx_key_is_not_sent_without_a_detected_or_selected_runtime() {
+    let home = TempDir::new("omlx-gate");
+    home.write(".config/omlx-coding/server.env", "API_KEY=secret\n");
+    let mut client = omlx_client(1, Some(home.0.clone()));
+    client.login_allowed = false;
+    client.login();
+    assert!(client.session_cookie.is_none());
+    assert!(client
+        .runtime
+        .probes
+        .iter()
+        .any(|probe| probe.issue == Some(crate::runtime_diagnostics::ProbeIssue::NotDetected)));
+}
+
+#[test]
+fn a_refused_omlx_login_is_retried_once_a_minute_not_every_poll() {
+    let home = TempDir::new("omlx-refused");
+    home.write(".config/omlx-coding/server.env", "API_KEY=wrong\n");
+    let (port, server) = serve(vec![reply("POST /admin/api/login ", 401, "{}")]);
+    let mut client = omlx_client(port, Some(home.0.clone()));
+    client.login();
+    assert_eq!(server.join().unwrap().len(), 1);
+    // The next attempt within a minute sends nothing.
+    client.login();
+    assert!(client.session_cookie.is_none());
+}
+
+#[test]
+fn omlx_server_env_reads_exported_host_and_port() {
+    let found = parse_omlx_server_env("export PORT=9000\nexport HOST='10.0.0.2'\n");
+    assert_eq!(found.port, Some(9000));
+    assert_eq!(found.host.as_deref(), Some("10.0.0.2"));
+}
+
+fn one_connection(
+    reply: impl FnOnce(std::net::TcpStream) + Send + 'static,
+) -> (u16, thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        reply(stream);
+    });
+    (port, handle)
+}
+
+#[test]
+fn slow_responses_time_out_as_a_whole() {
+    use std::io::Write as _;
+    let (port, server) = one_connection(|mut stream| {
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n");
+        for _ in 0..40 {
+            if stream.write_all(b"x").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let started = Instant::now();
+    let reply = crate::transport::http_request("127.0.0.1", port, "GET", "/health", &[], None);
+    assert!(matches!(
+        reply,
+        Err(crate::runtime_diagnostics::ProbeIssue::Timeout)
+    ));
+    assert!(
+        started.elapsed() < Duration::from_millis(2600),
+        "{:?}",
+        started.elapsed()
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn a_complete_reply_on_a_kept_open_connection_is_read() {
+    use std::io::{Read as _, Write as _};
+    let (port, server) = one_connection(|mut stream| {
+        let mut request = [0_u8; 512];
+        let _ = stream.read(&mut request);
+        let body = r#"{"default_model":"q"}"#;
+        let _ = stream.write_all(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+        );
+        thread::sleep(Duration::from_millis(50));
+        let _ = stream.write_all(body.as_bytes());
+        // Keep the connection open well past the reply.
+        thread::sleep(Duration::from_millis(1500));
+    });
+    let started = Instant::now();
+    let reply = crate::transport::http_request("localhost", port, "GET", "/health", &[], None)
+        .expect("localhost reaches an IPv4-only server, and the reply ends at its length");
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.body, r#"{"default_model":"q"}"#);
+    assert!(started.elapsed() < Duration::from_millis(1000));
+    server.join().unwrap();
+}
+
+#[test]
+fn sampler_keeps_its_cadence_and_quit_does_not_wait_for_a_sample() {
+    let host = linux_host();
+    let sampler = Sampler::start(Duration::from_millis(200), move || {
+        collector(host, Platform::Linux, None)
+    });
+    let first = sampler.views.recv_timeout(Duration::from_secs(10)).unwrap();
+    let mut last = first;
+    for _ in 0..5 {
+        last = sampler.views.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+    let _ = last;
+    let started = Instant::now();
+    drop(sampler);
+    assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+#[test]
+fn an_unread_view_channel_holds_one_snapshot() {
+    let host = linux_host();
+    let sampler = Sampler::start(Duration::from_millis(5), move || {
+        collector(host, Platform::Linux, None)
+    });
+    thread::sleep(Duration::from_millis(300));
+    let waiting = sampler.views.try_iter().count();
+    assert!(waiting <= 1, "{waiting} snapshots queued");
+}
+
+#[test]
+fn a_saved_history_length_reaches_the_running_sampler() {
+    let sampler = Sampler::start(Duration::from_millis(20), || {
+        collector(linux_host(), Platform::Linux, None)
+    });
+    let mut view = recv_view(&sampler);
+    while view.load_history.len() < 3 {
+        view = recv_view(&sampler);
+    }
+    sampler.send(SamplerCommand::SetHistory(1));
+    // The next views are trimmed to the new length.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let view = recv_view(&sampler);
+        if view.load_history.len() == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "history was never trimmed");
+    }
 }

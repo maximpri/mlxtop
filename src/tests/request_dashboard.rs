@@ -84,6 +84,72 @@ fn polls_update_one_bar_and_absent_requests_remain() {
 }
 
 #[test]
+fn each_bar_shows_the_speed_its_request_generated_at() {
+    let now = SystemTime::now();
+    let mut first = usage("a", 12000);
+    first.output = Some(160);
+    first.output_tps = Some(24.5);
+    first.observed_at = Some(now);
+    let mut second = usage("b", 20000);
+    second.output = Some(300);
+    second.output_tps = Some(138.04);
+    second.observed_at = Some(now);
+    // A request that has generated nothing yet has no speed to show.
+    let third = usage("c", 32000);
+    let mut history = History::default();
+    history.observe(&[first.clone(), second.clone(), third.clone()]);
+    let sample = Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "model".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_observed_at: Some(now),
+        llm_requests: vec![first, second, third],
+        ..Sample::default()
+    };
+    let render = |height, zoom| {
+        crate::tests::render_view(90, height, |frame| {
+            draw(frame, frame.area(), &history, &sample, 0, zoom)
+        })
+    };
+    let screen = render(13, 1);
+    // Sizes, then speeds, then generated tokens, each under its own bar.
+    let row = |label: &str| {
+        screen
+            .lines()
+            .position(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("missing {label}\n{screen}"))
+    };
+    assert_eq!(row("24.5/s"), row("20.0k") + 1, "{screen}");
+    assert_eq!(row("138/s"), row("24.5/s"), "a slot keeps a gap\n{screen}");
+    assert_eq!(row("160"), row("24.5/s") + 1, "{screen}");
+    let speeds = screen.lines().nth(row("24.5/s")).unwrap_or_default();
+    assert_eq!(
+        speeds.matches("/s").count(),
+        2,
+        "none for no output\n{screen}"
+    );
+    // Wider slots name the unit in full.
+    assert!(render(13, 2).contains("24.5 tok/s"), "{}", render(13, 2));
+    // One row fewer keeps the speeds and drops the token counts; a short
+    // panel keeps the sizes alone.
+    let shorter = render(12, 1);
+    assert!(
+        shorter.contains("24.5/s") && !shorter.contains("│ 160"),
+        "{shorter}"
+    );
+    // The Overview's panel, seven rows inside its border, keeps the speeds
+    // over two rows of bars.
+    let overview = render(9, 1);
+    assert!(
+        overview.contains("24.5/s") && overview.contains("138/s"),
+        "{overview}"
+    );
+    let short = render(7, 1);
+    assert!(short.contains("20.0k") && !short.contains("/s"), "{short}");
+}
+
+#[test]
 fn selected_prompt_keeps_its_own_output_speed_live_historical_and_completed() {
     let now = SystemTime::now();
     let mut first = usage("a", 12000);
@@ -215,10 +281,14 @@ fn live_requires_fresh_membership_and_file_history_keeps_its_age() {
         ..Sample::default()
     };
     let entry = history.entries.back().unwrap();
-    assert!(is_live(entry, &sample, now));
-    assert!(!is_live(entry, &sample, now + Duration::from_secs(6)));
+    assert!(is_live(entry, &sample));
+    // Freshness is decided when the sample is taken: a stale sample is not
+    // live, however recently it was drawn.
+    sample.llm_status = "stale".into();
+    assert!(!is_live(entry, &sample));
+    sample.llm_status = "generating".into();
     sample.llm_requests.clear();
-    assert!(!is_live(entry, &sample, now));
+    assert!(!is_live(entry, &sample));
     request.completed = true;
     request.observed_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1700000000));
     history.observe(&[request.clone()]);
@@ -568,29 +638,33 @@ fn sparse_requests_stay_at_the_right_edge_with_fixed_spacing() {
                     .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0, zoom))
                     .unwrap();
                 let buffer = terminal.backend().buffer();
-                // Sizes sit above the row kept for generated tokens, which
-                // stays blank while no request has generated any.
-                let labels: String = (1..width - 1).map(|x| buffer[(x, 9)].symbol()).collect();
+                // Sizes sit above the rows kept for generation speed and
+                // generated tokens, which stay blank while no request has
+                // generated any.
+                let labels: String = (1..width - 1).map(|x| buffer[(x, 8)].symbol()).collect();
                 assert!(labels.trim_end().ends_with("2.9k▲"));
-                assert!((1..width - 1).all(|x| buffer[(x, 10)].symbol() == " "));
+                assert!((1..width - 1)
+                    .all(|x| buffer[(x, 9)].symbol() == " " && buffer[(x, 10)].symbol() == " "));
                 // The newest body and label stay in the last slot even
                 // with a single request, at every supported zoom/width.
                 let last_bar = (1..width - 1)
                     .rev()
                     .find(|x| {
-                        (4..9).any(|y| {
-                            buffer[(*x, y)].fg == BLUE
-                                && matches!(
-                                    buffer[(*x, y)].symbol(),
-                                    "█" | "▁" | "▂" | "▃" | "▄" | "▅" | "▆" | "▇"
-                                )
+                        (4..8).any(|y| {
+                            // A whole cell is filled; a part of one is a glyph.
+                            buffer[(*x, y)].bg == BLUE
+                                || buffer[(*x, y)].fg == BLUE
+                                    && matches!(
+                                        buffer[(*x, y)].symbol(),
+                                        "█" | "▁" | "▂" | "▃" | "▄" | "▅" | "▆" | "▇"
+                                    )
                         })
                     })
                     .unwrap();
                 assert!(last_bar >= width - 3, "bar floats away from latest edge");
                 if zoom == 1 {
                     let occupied_start = width - 1 - (index + 1) * 6;
-                    assert!((1..occupied_start).all(|x| buffer[(x, 8)].symbol() == " "));
+                    assert!((1..occupied_start).all(|x| buffer[(x, 7)].symbol() == " "));
                 }
             }
         }

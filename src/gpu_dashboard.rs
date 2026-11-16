@@ -27,13 +27,26 @@ fn visible(count: usize, rows: usize, selected: usize) -> Range<usize> {
     start..(start + rows).min(count)
 }
 
+fn gib_pair(used: u64, total: u64) -> String {
+    format!(
+        "{:.1}/{:.1} GiB",
+        used as f64 / (1024.0 * 1024.0 * 1024.0),
+        total as f64 / (1024.0 * 1024.0 * 1024.0)
+    )
+}
+
+/// VRAM used of total; for a GPU without memory of its own, the RAM it
+/// holds of the most it may hold.
 pub(crate) fn memory_label(device: &gpu::Device) -> String {
+    if device.unified {
+        return match (device.limits.ram_used, device.limits.ram_limit) {
+            (Some(used), Some(limit)) => gib_pair(used, limit),
+            (Some(used), None) => bytes(used),
+            (None, _) => "—".into(),
+        };
+    }
     match (device.used, device.total) {
-        (Some(used), Some(total)) => format!(
-            "{:.1}/{:.1} GiB",
-            used as f64 / (1024.0 * 1024.0 * 1024.0),
-            total as f64 / (1024.0 * 1024.0 * 1024.0)
-        ),
+        (Some(used), Some(total)) => gib_pair(used, total),
         (used, total) => format!(
             "{} / {}",
             used.map(bytes).unwrap_or_else(|| "—".into()),
@@ -45,7 +58,7 @@ pub(crate) fn memory_label(device: &gpu::Device) -> String {
 /// A clock limit names the state while the card is working; otherwise load.
 fn state(device: &gpu::Device, thresholds: Thresholds) -> &'static str {
     if let Some(cause) = device.throttle() {
-        if device.utilization.is_some_and(|load| load >= 20) {
+        if device.busy() {
             return cause.short_label();
         }
     }
@@ -58,23 +71,126 @@ fn state(device: &gpu::Device, thresholds: Thresholds) -> &'static str {
     }
 }
 
-fn columns(area: Rect) -> Vec<Rect> {
-    let mut widths = vec![
-        Constraint::Length(7),
-        Constraint::Fill(if area.width >= 120 { 3 } else { 2 }),
-        if area.width >= 100 {
-            Constraint::Fill(2)
+/// The table's columns, left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Column {
+    Card,
+    Name,
+    Utilization,
+    State,
+    MemoryLoad,
+    Memory,
+    Power,
+    Clock,
+    MemoryBusy,
+    Link,
+    Temperature,
+}
+
+/// Utilization, memory and temperature at every width; the load state from
+/// 100 columns of table and a memory bar from 120; power from 110, clock and
+/// memory activity from 150 and the PCIe link from 180, each only when a
+/// card reports it, so no column is all dashes.
+fn plan(width: u16, devices: &[gpu::Device]) -> Vec<Column> {
+    let reports = |reading: fn(&gpu::Device) -> bool| devices.iter().any(reading);
+    let mut columns = vec![Column::Card, Column::Name, Column::Utilization];
+    if width >= 100 {
+        columns.push(Column::State);
+    }
+    // RAM held has a bar only against a limit (an APU's GTT); DGX Spark's
+    // limit is all of RAM, which the memory panel already shows.
+    if width >= 120
+        && (!devices.iter().all(|gpu| gpu.unified) || reports(|gpu| gpu.ram_percent().is_some()))
+    {
+        columns.push(Column::MemoryLoad);
+    }
+    columns.push(Column::Memory);
+    if width >= 110 && reports(|gpu| gpu.limits.power_mw.is_some()) {
+        columns.push(Column::Power);
+    }
+    if width >= 150 && reports(|gpu| gpu.limits.clock_mhz.is_some()) {
+        columns.push(Column::Clock);
+    }
+    if width >= 150 && reports(|gpu| gpu.limits.memory_busy.is_some()) {
+        columns.push(Column::MemoryBusy);
+    }
+    // An integrated GPU has no slot.
+    if width >= 180
+        && reports(|gpu| {
+            !gpu.unified
+                && (gpu.limits.link_gen_max.is_some() || gpu.limits.link_width_max.is_some())
+        })
+    {
+        columns.push(Column::Link);
+    }
+    columns.push(Column::Temperature);
+    columns
+}
+
+fn constraint(column: Column, width: u16) -> Constraint {
+    match column {
+        Column::Card => Constraint::Length(7),
+        Column::Name => Constraint::Fill(if width >= 120 { 3 } else { 2 }),
+        Column::Utilization if width >= 100 => Constraint::Fill(2),
+        Column::Utilization => Constraint::Length(17),
+        Column::State => Constraint::Length(13),
+        Column::MemoryLoad => Constraint::Fill(2),
+        Column::Memory => Constraint::Length(21),
+        Column::Power => Constraint::Length(12),
+        Column::Clock => Constraint::Length(15),
+        Column::MemoryBusy => Constraint::Length(10),
+        Column::Link => Constraint::Length(10),
+        Column::Temperature => Constraint::Length(7),
+    }
+}
+
+/// What the memory columns hold: a card's own VRAM, or the RAM a GPU
+/// without memory of its own holds, against a limit or not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Vram,
+    Ram,
+    RamOfLimit,
+}
+
+impl Held {
+    fn of(devices: &[gpu::Device]) -> Self {
+        if !devices.iter().all(|gpu| gpu.unified) {
+            Self::Vram
+        } else if devices.iter().any(|gpu| gpu.limits.ram_limit.is_some()) {
+            Self::RamOfLimit
         } else {
-            Constraint::Length(17)
+            Self::Ram
+        }
+    }
+}
+
+fn label(column: Column, held: Held) -> &'static str {
+    match column {
+        Column::Card => "GPU",
+        Column::Name => "DEVICE",
+        Column::Utilization => "UTILIZATION",
+        Column::State => "STATE",
+        Column::MemoryLoad if held == Held::Vram => "VRAM LOAD",
+        Column::MemoryLoad => "RAM LOAD",
+        Column::Memory => match held {
+            Held::Vram => "VRAM USED / TOTAL",
+            Held::RamOfLimit => "RAM USED / LIMIT",
+            Held::Ram => "RAM USED",
         },
-    ];
-    if area.width >= 100 {
-        widths.push(Constraint::Length(13)); // semantic load state
+        Column::Power => "POWER",
+        Column::Clock => "CLOCK",
+        Column::MemoryBusy => "MEM BUSY",
+        Column::Link => "PCIE",
+        Column::Temperature => "TEMP",
     }
-    if area.width >= 120 {
-        widths.push(Constraint::Fill(2)); // additional VRAM bar
-    }
-    widths.extend([Constraint::Length(21), Constraint::Length(7)]);
+}
+
+fn columns(area: Rect, plan: &[Column]) -> Vec<Rect> {
+    let widths: Vec<Constraint> = plan
+        .iter()
+        .map(|column| constraint(*column, area.width))
+        .collect();
     Layout::horizontal(widths).split(area).to_vec()
 }
 
@@ -166,17 +282,10 @@ pub(crate) fn draw(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let header = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
-    let cols = columns(header);
-    let mut labels = vec!["GPU", "DEVICE", "UTILIZATION"];
-    if header.width >= 100 {
-        labels.push("STATE");
-    }
-    if header.width >= 120 {
-        labels.push("VRAM LOAD");
-    }
-    labels.extend(["VRAM USED / TOTAL", "TEMP"]);
-    for (column, label) in cols.iter().zip(labels) {
-        text(frame, *column, label, MUTED);
+    let plan = plan(header.width, devices);
+    let held = Held::of(devices);
+    for (area, column) in columns(header, &plan).into_iter().zip(&plan) {
+        text(frame, area, label(*column, held), MUTED);
     }
     for (row, i) in range.enumerate() {
         let device = &devices[i];
@@ -190,89 +299,167 @@ pub(crate) fn draw(
             })),
             row_area,
         );
-        let cols = columns(row_area);
         let load_color = device
             .utilization
             .map(|n| ChartMetric::Gpu.tone(u64::from(n), thresholds).color())
             .unwrap_or(MUTED);
-        text(
-            frame,
-            cols[0],
-            format!("{} {}", if selected { "▸" } else { " " }, device.index),
-            if selected { CYAN } else { MUTED },
-        );
-        text(
-            frame,
-            cols[1],
-            compact_label(&device.name, cols[1].width.saturating_sub(2) as usize),
-            Color::White,
-        );
-        meter(
-            frame,
-            cols[2],
-            device.utilization.map(u16::from),
-            load_color,
-        );
-        let mut next = 3;
-        if header.width >= 100 {
-            let fault = device.throttle().is_some_and(|cause| cause.is_fault())
-                && device.utilization.is_some_and(|load| load >= 20);
-            let color = if fault { YELLOW } else { load_color };
-            text(frame, cols[next], state(device, thresholds), color);
-            next += 1;
-        }
         // Memory occupancy is capacity information, not GPU compute load; it
-        // turns yellow only where the next allocation may spill or fail.
+        // turns yellow only where the next allocation may spill or fail. A
+        // GPU's share of RAM is no finding at all.
         let full = device
             .memory_percent()
             .is_some_and(|percent| percent >= VRAM_FULL_ENTER);
-        if header.width >= 120 {
-            meter(
-                frame,
-                cols[next],
-                device.memory_percent(),
-                if full { YELLOW } else { BLUE },
-            );
-            next += 1;
+        let limits = &device.limits;
+        for (cell, column) in columns(row_area, &plan).into_iter().zip(&plan) {
+            match column {
+                Column::Card => text(
+                    frame,
+                    cell,
+                    format!("{} {}", if selected { "▸" } else { " " }, device.index),
+                    if selected { CYAN } else { MUTED },
+                ),
+                Column::Name => text(
+                    frame,
+                    cell,
+                    compact_label(&device.name, cell.width.saturating_sub(2) as usize),
+                    Color::White,
+                ),
+                Column::Utilization => {
+                    meter(frame, cell, device.utilization.map(u16::from), load_color)
+                }
+                Column::State => {
+                    let fault =
+                        device.throttle().is_some_and(|cause| cause.is_fault()) && device.busy();
+                    let color = if fault { YELLOW } else { load_color };
+                    text(frame, cell, state(device, thresholds), color);
+                }
+                Column::MemoryLoad if device.unified => {
+                    meter(frame, cell, device.ram_percent(), BLUE);
+                }
+                Column::MemoryLoad => meter(
+                    frame,
+                    cell,
+                    device.memory_percent(),
+                    if full { YELLOW } else { BLUE },
+                ),
+                Column::Memory => text(
+                    frame,
+                    cell,
+                    memory_label(device),
+                    if full { YELLOW } else { Color::White },
+                ),
+                Column::Power => text(
+                    frame,
+                    cell,
+                    gpu::power_label(limits.power_mw, limits.power_cap_mw),
+                    MUTED,
+                ),
+                Column::Clock => text(
+                    frame,
+                    cell,
+                    gpu::clock_label(limits.clock_mhz, limits.clock_max_mhz),
+                    MUTED,
+                ),
+                Column::MemoryBusy => text(
+                    frame,
+                    cell,
+                    limits
+                        .memory_busy
+                        .map(|busy| format!("{busy}%"))
+                        .unwrap_or_else(|| "—".into()),
+                    MUTED,
+                ),
+                // What the card and its slot allow: an idle card slows its
+                // link, so the current one is told only when it costs.
+                Column::Link => text(
+                    frame,
+                    cell,
+                    gpu::link_label(limits.link_gen_max, limits.link_width_max),
+                    MUTED,
+                ),
+                Column::Temperature => text(
+                    frame,
+                    cell,
+                    device
+                        .temperature
+                        .map(|n| format!("{n}°C"))
+                        .unwrap_or_else(|| "—".into()),
+                    MUTED,
+                ),
+            }
         }
-        text(
-            frame,
-            cols[next],
-            memory_label(device),
-            if full { YELLOW } else { Color::White },
-        );
-        text(
-            frame,
-            cols[next + 1],
-            device
-                .temperature
-                .map(|n| format!("{n}°C"))
-                .unwrap_or_else(|| "—".into()),
-            MUTED,
-        );
     }
 }
 
+/// One line per card for the static report: identity, every reading the
+/// card gave, and its state. Readings it does not report are left out.
 pub(crate) fn static_lines(devices: &[gpu::Device], thresholds: Thresholds) -> Vec<String> {
     devices
         .iter()
         .map(|device| {
-            format!(
-                "GPU {:<8}{} · {} · utilization {} · VRAM {} · temperature {} · {}",
-                device.index,
-                device.name,
-                device.uuid,
-                device
-                    .utilization
-                    .map(|n| format!("{n}%"))
-                    .unwrap_or_else(|| "—".into()),
-                memory_label(device),
-                device
-                    .temperature
-                    .map(|n| format!("{n}°C"))
-                    .unwrap_or_else(|| "—".into()),
-                state(device, thresholds)
-            )
+            let limits = &device.limits;
+            let mut fields = vec![
+                device.name.clone(),
+                device.uuid.clone(),
+                format!(
+                    "utilization {}",
+                    device
+                        .utilization
+                        .map(|n| format!("{n}%"))
+                        .unwrap_or_else(|| "—".into())
+                ),
+                format!(
+                    "{} {}",
+                    if device.unified { "RAM" } else { "VRAM" },
+                    memory_label(device)
+                ),
+                format!(
+                    "temperature {}",
+                    device
+                        .temperature
+                        .map(|n| format!("{n}°C"))
+                        .unwrap_or_else(|| "—".into())
+                ),
+            ];
+            if limits.power_mw.is_some() {
+                fields.push(format!(
+                    "power {}",
+                    gpu::power_label(limits.power_mw, limits.power_cap_mw)
+                ));
+            }
+            if limits.clock_mhz.is_some() {
+                fields.push(format!(
+                    "clock {}",
+                    gpu::clock_label(limits.clock_mhz, limits.clock_max_mhz)
+                ));
+            }
+            if let Some(busy) = limits.memory_busy {
+                fields.push(format!("memory busy {busy}%"));
+            }
+            let now = (limits.link_gen, limits.link_width);
+            let max = (limits.link_gen_max, limits.link_width_max);
+            if !device.unified && (now != (None, None) || max != (None, None)) {
+                fields.push(if now == max || now == (None, None) {
+                    format!("PCIe {}", gpu::link_label(max.0, max.1))
+                } else {
+                    format!(
+                        "PCIe {} of {}",
+                        gpu::link_label(now.0, now.1),
+                        gpu::link_label(max.0, max.1)
+                    )
+                });
+            }
+            if let (false, Some(used)) = (device.unified, limits.ram_used) {
+                fields.push(format!(
+                    "GTT {}",
+                    match limits.ram_limit {
+                        Some(limit) => gib_pair(used, limit),
+                        None => bytes(used),
+                    }
+                ));
+            }
+            fields.push(state(device, thresholds).into());
+            format!("GPU {:<8}{}", device.index, fields.join(" · "))
         })
         .collect()
 }

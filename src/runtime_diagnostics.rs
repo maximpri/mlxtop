@@ -3,6 +3,7 @@
 use crate::domain::{Sample, TelemetrySource};
 use crate::formatting::telemetry_age;
 use std::fmt;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -14,6 +15,9 @@ pub(crate) enum ProbeIssue {
     InvalidCredential,
     RemoteAuthBlocked,
     CredentialsMissing,
+    /// A key is set, but no runtime process was found or chosen: it is not
+    /// sent to whatever answers on the port.
+    NotDetected,
     Timeout,
     Transport,
     Http(u16),
@@ -29,10 +33,11 @@ impl fmt::Display for ProbeIssue {
             Self::InvalidPort => f.write_str("invalid MLXTOP_PROVIDER_PORT; use an integer from 1 to 65535"),
             Self::InvalidCredential => f.write_str("invalid credential; remove empty values and control characters"),
             Self::RemoteAuthBlocked => f.write_str("remote authentication blocked; MLXTOP_ALLOW_REMOTE_AUTH=1 is required to send credentials"),
-            Self::CredentialsMissing => f.write_str("monitoring credentials not configured"),
+            Self::CredentialsMissing => f.write_str("monitoring credentials not configured; set the API key in Settings (4), MLXTOP_PROVIDER_API_KEY, or auth.api_key in oMLX's settings"),
+            Self::NotDetected => f.write_str("no oMLX process found; key not sent (set MLXTOP_PROVIDER=omlx to send it)"),
             Self::Timeout => f.write_str("connection timed out; check the server address and reachability"),
-            Self::Transport => f.write_str("connection failed; check reachability and HTTPS certificate trust"),
-            Self::Http(401 | 403) => f.write_str("authentication rejected; check monitoring credentials and permissions"),
+            Self::Transport => f.write_str("connection failed; check that the server is running and reachable"),
+            Self::Http(401 | 403) => f.write_str("authentication rejected; check the API key in Settings (4) or MLXTOP_PROVIDER_API_KEY, and its permissions"),
             Self::Http(status) => write!(f, "HTTP {status}; check that this monitoring endpoint is enabled"),
             Self::InvalidResponse => f.write_str("unrecognized response; check the endpoint and runtime API version"),
             Self::ResponseTooLarge => f.write_str("response exceeds the monitoring size limit"),
@@ -45,6 +50,20 @@ impl ProbeIssue {
         match error.kind() {
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Self::Timeout,
             _ => Self::Transport,
+        }
+    }
+
+    /// Why a connection to `address` was not made. On a loopback address
+    /// the operating system completes the handshake for a listening server,
+    /// hung or not, so a connect that times out there found no server:
+    /// Windows retries a refused connect for about two seconds before it
+    /// says so. That is a refusal, retried within seconds. A hung server
+    /// accepts and times out when read; a connect to it times out only once
+    /// its queue of waiting connections is full, which a retry does not add to.
+    pub(crate) fn from_connect(error: std::io::Error, address: &SocketAddr) -> Self {
+        match Self::from_io(error) {
+            Self::Timeout if address.ip().is_loopback() => Self::Transport,
+            issue => issue,
         }
     }
 }
@@ -70,7 +89,37 @@ pub(crate) struct RuntimeReport {
     pub usage: &'static str,
 }
 
+/// What a runtime's answers say about the key it wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyNeed {
+    /// It asks for a key and none was found to send.
+    Missing,
+    /// The key that was sent was refused.
+    Rejected,
+}
+
 impl RuntimeReport {
+    /// Whether the runtime needs a key it was not given, or refused the one
+    /// it got. `None` while it answers, is down, or has not been asked.
+    pub(crate) fn key_need(&self) -> Option<KeyNeed> {
+        let issue = |wanted: fn(&ProbeIssue) -> bool| {
+            self.probes
+                .iter()
+                .any(|probe| probe.issue.as_ref().is_some_and(wanted))
+        };
+        if issue(|issue| *issue == ProbeIssue::CredentialsMissing) {
+            Some(KeyNeed::Missing)
+        } else if issue(|issue| matches!(issue, ProbeIssue::Http(401 | 403))) {
+            Some(if self.credentials_present {
+                KeyNeed::Rejected
+            } else {
+                KeyNeed::Missing
+            })
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn begin(&mut self) {
         self.attempted_at = Some(SystemTime::now());
         self.connected = false;
@@ -156,19 +205,20 @@ impl RuntimeReport {
                     self.selection
                 }
             ),
-            format!(
-                "Endpoint: {} · {}",
-                if self.endpoint.is_empty() {
-                    "—"
-                } else {
-                    &self.endpoint
-                },
-                if self.remote {
-                    "remote API; host counters are local"
-                } else {
-                    "local"
-                }
-            ),
+            if self.endpoint.is_empty() {
+                // No runtime asked: no endpoint, local or remote.
+                "Endpoint: —".into()
+            } else {
+                format!(
+                    "Endpoint: {} · {}",
+                    self.endpoint,
+                    if self.remote {
+                        "remote API; host counters are local"
+                    } else {
+                        "local"
+                    }
+                )
+            },
             format!(
                 "Credentials: {}",
                 if self.credentials_present {
@@ -197,6 +247,14 @@ impl RuntimeReport {
                     .collect::<String>()
             ));
         }
+        lines.extend(sample.native_runtime_lines());
+        lines.extend(crate::model_facts::lines(&sample.model));
+        lines.extend(crate::omlx::draft_lines(sample));
+        lines.extend(crate::providers::llama::lines(sample));
+        // How much more context fits, worked out from those facts.
+        lines.extend(crate::context_left::lines(sample));
+        // What requests lost before their first tokens, and the evidence.
+        lines.extend(crate::request_findings::lines(&sample.request_findings));
         for probe in &self.probes {
             lines.push(format!(
                 "{}: {}",
@@ -298,13 +356,7 @@ impl Capability {
                 telemetry_age(at)
             );
         }
-        let stale = sample.llm_status == "stale"
-            || (sample.llm_source == TelemetrySource::Live
-                && sample.llm_observed_at.is_some_and(|at| {
-                    SystemTime::now()
-                        .duration_since(at)
-                        .is_ok_and(|age| age.as_secs_f64() > 5.0)
-                }));
+        let stale = sample.llm_source == TelemetrySource::Live && !sample.llm_fresh();
         if stale {
             return format!("stale · {}", telemetry_age(sample.llm_observed_at));
         }
@@ -349,12 +401,12 @@ fn capabilities(provider: &str) -> Vec<Capability> {
             "native / request counters",
         ),
         "llama.cpp" => (
-            "not provided",
-            "native server average",
+            "native /v1/models",
+            "native live slots / server average",
             "native server average",
             "native slots / metrics",
-            "client recorder",
-            "client recorder",
+            "native answering slots / client recorder",
+            "native metrics and slots / client recorder",
         ),
         "KoboldCpp" => (
             "not provided",
@@ -382,7 +434,7 @@ fn capabilities(provider: &str) -> Vec<Capability> {
         ),
         "TensorFold" => (
             "native available-model catalogue",
-            "sampled completed-request throughput; needs two counter samples",
+            "live decode tokens; completion-counter averages otherwise",
             "sampled completed-request throughput; needs two counter samples",
             "native active / waiting",
             "client recorder",
@@ -446,8 +498,8 @@ fn capabilities(provider: &str) -> Vec<Capability> {
 
 fn setup(provider: &str) -> &'static [&'static str] {
     match provider {
-        "oMLX" => &["Endpoint: ~/.config/mlxtop/config.json → omx.host / omx.port, or discovered from server.env, OMLX_PORT or ~/.omlx/settings.json (default port 8000).", "Admin statistics require the existing oMLX API key configuration; health alone supplies partial monitoring.", "See docs/USER_GUIDE.md#omlx-telemetry for monitoring credentials."],
-        "llama.cpp" => &["Enable the server's --metrics endpoint; /slots and /metrics can work independently.", "Select with MLXTOP_PROVIDER=llama.cpp; mlxtop tries port 9931, then 8080. Set MLXTOP_PROVIDER_PORT for a custom port.", "For full request history, integrate the client usage recorder and set MLXTOP_USAGE_FILE to its JSONL file."],
+        "oMLX" => &["Endpoint: ~/.config/mlxtop/config.json → omx.host / omx.port, or discovered from server.env, OMLX_PORT or ~/.omlx/settings.json (default port 8000).", "Admin statistics need oMLX's API key: read from MLXTOP_PROVIDER_API_KEY, the API key in Settings (4), OMLX_API_KEY, ~/.config/omlx-coding/server.env (API_KEY=) or auth.api_key in ~/.omlx/settings.json. Health alone gives partial monitoring.", "Credentials: https://github.com/maximpri/mlxtop/blob/main/docs/USER_GUIDE.md#omlx-telemetry"],
+        "llama.cpp" => &["Enable the server's --metrics endpoint: mlxtop then reads /slots only while a request runs, so it never wakes a sleeping server or keeps an idle one awake. Without it, each /slots read counts as activity.", "Select with MLXTOP_PROVIDER=llama.cpp; mlxtop tries port 9931, then 8080. Set MLXTOP_PROVIDER_PORT for a custom port.", "For full request history, integrate the client usage recorder and set MLXTOP_USAGE_FILE to its JSONL file."],
         "vLLM" | "SGLang" => &["Expose /metrics (SGLang requires --enable-metrics); rates need two matching counter samples.", "Set MLXTOP_PROVIDER=vllm or MLXTOP_PROVIDER=sglang and MLXTOP_PROVIDER_URL for a custom server root.", "Aggregate first-token timing is not individual request latency; request history requires client recording."],
         "mlx-serve" => &["Start mlx-serve with --metrics; mlxtop reads /metrics for rates and queues and /metrics.json for running requests. Sushi serves the same endpoints under `sushi:` gauge names and needs no flag.", "Select with MLXTOP_PROVIDER=mlx-serve (default port 11234); set MLXTOP_PROVIDER_PORT for a custom port.", "Bearer keys use MLXTOP_PROVIDER_API_KEY. Sessions that only hold a prefix cache are not listed as requests."],
         "Splash" => &["mlxtop reads Splash's /status: running requests, decode and prefill counters, Metal memory and prefix-cache reuse.", "Select with MLXTOP_PROVIDER=splash (default port 8000); set MLXTOP_PROVIDER_PORT to match splash serve --port.", "With splash serve --api-key or SPLASH_API_KEY, set the same key in MLXTOP_PROVIDER_API_KEY."],

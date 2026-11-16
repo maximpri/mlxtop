@@ -7,6 +7,7 @@ use std::backtrace::Backtrace;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 use std::{env, fs, panic};
@@ -29,11 +30,12 @@ impl Diagnostics {
         {
             fs::create_dir_all(parent).ok()?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // Model names, endpoints and paths: readable by the user only.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&path).ok()?;
         Some(Self {
             path,
             file: Mutex::new(file),
@@ -223,6 +225,31 @@ pub(crate) fn panic_payload(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// Set while the dashboard owns the terminal: a panic message printed then
+/// lands on the dashboard, so it is kept and printed after the screen is
+/// restored.
+static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DEFERRED_PANIC: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn set_tui_active(active: bool) {
+    TUI_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// The first panic that happened while the dashboard owned the terminal.
+pub(crate) fn take_deferred_panic() -> Option<String> {
+    DEFERRED_PANIC.lock().ok().and_then(|mut slot| slot.take())
+}
+
+/// Print a panic kept while the dashboard owned the terminal, once it is gone.
+pub(crate) fn report_deferred_panic() {
+    if let Some(message) = take_deferred_panic() {
+        let log = diagnostics_path()
+            .map(|path| format!(" (details in {})", path.display()))
+            .unwrap_or_default();
+        eprintln!("mlxtop: internal error: {message}{log}");
+    }
+}
+
 pub(crate) fn install_panic_hook() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -249,6 +276,12 @@ pub(crate) fn install_panic_hook() {
                 log_field(&location),
             ),
         );
-        previous(info);
+        if TUI_ACTIVE.load(Ordering::SeqCst) {
+            if let Ok(mut slot) = DEFERRED_PANIC.lock() {
+                slot.get_or_insert(format!("{message} at {location}"));
+            }
+        } else {
+            previous(info);
+        }
     }));
 }

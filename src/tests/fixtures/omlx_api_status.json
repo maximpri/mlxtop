@@ -1,0 +1,48 @@
+{
+ "status": "ok",
+ "version": "0.7.3",
+ "uptime_seconds": 827030.7,
+ "models_discovered": 4,
+ "models_loaded": 1,
+ "models_loading": 0,
+ "default_model": "Qwen3.8-27B-oQ4e-mtp",
+ "loaded_models": [
+  "Qwen3.8-27B-oQ4e-mtp"
+ ],
+ "total_requests": 9465,
+ "active_requests": 0,
+ "waiting_requests": 0,
+ "total_prompt_tokens": 139794434,
+ "total_completion_tokens": 6823046,
+ "total_cached_tokens": 125783360,
+ "cache_efficiency": 90.0,
+ "avg_prefill_tps": 152.0,
+ "avg_generation_tps": 61.0,
+ "model_memory_used": 25837922488,
+ "model_memory_max": 34359738368,
+ "model_memory_used_formatted": "24.06GB",
+ "model_memory_max_formatted": "32.00GB",
+ "custom_kernels": {
+  "attention": {
+   "available": true,
+   "import_error": null
+  },
+  "lowbit": {
+   "available": true,
+   "import_error": null
+  },
+  "quant_matmul": {
+   "available": true,
+   "import_error": null
+  },
+  "sparse_index": {
+   "available": true,
+   "import_error": null
+  }
+ },
+ "ane_prefill": {
+  "patch_available": true,
+  "configured_models": 0,
+  "models": []
+ }
+}

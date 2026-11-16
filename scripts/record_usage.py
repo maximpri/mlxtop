@@ -40,6 +40,12 @@ def _identifier(value):
     return value
 
 
+def _rate(value, message):
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise ValueError(message)
+    return value
+
+
 def usage_record(provider, response, *, request_id=None, model=None,
                  observed_at=None, ttft_ms=None):
     """Extract a completed response; callers must pass the final usage chunk."""
@@ -64,10 +70,17 @@ def usage_record(provider, response, *, request_id=None, model=None,
                 break
     if "prompt_tokens" not in counters:
         raise ValueError("Missing full prompt count; enable final streaming usage")
+    # llama-server's timings, read whatever runtime sent them: Splash and
+    # proxies send the same shape.
+    supplied = response.get("timings", {})
+    if not isinstance(supplied, dict):
+        raise ValueError("Invalid timings")
     cached = usage.get("cached_tokens", usage.get("prompt_eval_cached_count"))
     for key in ("input_tokens_details", "prompt_tokens_details"):
         if isinstance(usage.get(key), dict):
             cached = usage[key].get("cached_tokens", cached)
+    if cached is None:
+        cached = supplied.get("cache_n")
     if cached is not None:
         if not _count(cached) or cached > counters["prompt_tokens"]:
             raise ValueError("Invalid cached token count")
@@ -83,9 +96,6 @@ def usage_record(provider, response, *, request_id=None, model=None,
     if model is not None:
         record["model"] = _identifier(model)
     timings = {}
-    supplied = response.get("timings", {})
-    if not isinstance(supplied, dict):
-        raise ValueError("Invalid timings")
     speed = supplied.get("output_tokens_per_second")
     if speed is None and provider == "LM Studio":
         speed = usage.get("tokens_per_second")
@@ -96,12 +106,48 @@ def usage_record(provider, response, *, request_id=None, model=None,
             raise ValueError("Invalid decode duration")
         if duration and _count(count):
             speed = count / duration * 1_000_000_000
-    if speed is None and provider == "llama.cpp":
+    if speed is None:
         speed = supplied.get("predicted_per_second")
     if speed is not None:
-        if type(speed) not in (int, float) or not math.isfinite(speed) or speed < 0:
-            raise ValueError("Invalid output throughput")
-        timings["output_tokens_per_second"] = speed
+        timings["output_tokens_per_second"] = _rate(speed, "Invalid output throughput")
+    # How fast the prompt was read, over the tokens the runtime computed:
+    # llama-server's prompt speed, oMLX's usage extension (which counts only
+    # the tokens it computed), or Ollama's prompt time (nanoseconds) over its
+    # uncached tokens. Zero is a time the runtime did not have.
+    prefill = supplied.get("prompt_tokens_per_second", supplied.get("prompt_per_second"))
+    if prefill is None and provider == "oMLX":
+        prefill = usage.get("prompt_tokens_per_second")
+    if prefill is None and provider == "Ollama":
+        duration = usage.get("prompt_eval_duration")
+        if duration is not None and not _count(duration):
+            raise ValueError("Invalid prompt evaluation duration")
+        if duration:
+            computed = counters["prompt_tokens"] - (cached or 0)
+            prefill = computed / duration * 1_000_000_000
+    if prefill is not None and _rate(prefill, "Invalid prompt throughput") > 0:
+        timings["prompt_tokens_per_second"] = prefill
+    # How long the request waited for the model to load: Ollama's
+    # `load_duration` (nanoseconds), LM Studio's `model_load_time_seconds`,
+    # which it sends only after a load, or oMLX's `model_load_duration`
+    # (seconds), which it sends only for a load that took over a second.
+    load_ms = supplied.get("model_load_ms")
+    if load_ms is None and provider == "Ollama":
+        duration = usage.get("load_duration")
+        if duration is not None and not _count(duration):
+            raise ValueError("Invalid load duration")
+        if duration:
+            load_ms = duration // 1_000_000
+    if load_ms is None and provider in ("LM Studio", "oMLX"):
+        seconds = usage.get("model_load_time_seconds" if provider == "LM Studio"
+                            else "model_load_duration")
+        if seconds is not None:
+            if _rate(seconds, "Invalid model load time") * 1000 >= 2**64:
+                raise ValueError("Invalid model load time")
+            load_ms = int(seconds * 1000)
+    if load_ms is not None:
+        if not _count(load_ms):
+            raise ValueError("Model load time must be whole milliseconds")
+        timings["model_load_ms"] = load_ms
     if ttft_ms is None:
         ttft_ms = supplied.get("time_to_first_token_ms")
     if ttft_ms is None and provider == "LM Studio":

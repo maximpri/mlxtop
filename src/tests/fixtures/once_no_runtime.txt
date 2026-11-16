@@ -1,0 +1,15 @@
+mlxtop · static report (1s sample)
+
+SIGNAL       IDLE · HEALTHY
+PRESSURE     normal
+MEMORY       27.0 / 36.0 GiB · 9.0 GiB left (free and file cache)
+PAGING       1.5 GiB / 2.0 GiB · 75% used · in 512.0 KiB/s · out 0 B/s · file in 512.0 KiB/s · out 0 B/s · memory not tight
+METAL        Apple M4 Max · 32 cores · 410 GB/s · GPU 2% · renderer 96% · tiler 41%
+RUNTIME      thermal nominal · LLM 0 · footprint — · Metal limit 27.3 GiB
+LLM          none detected
+SERVING      GEN — · PREFILL — · active — · cache —
+TOKENS       PROMPT — · OUT —
+MLX          version — · active — · cache — · peak —
+DIAGNOSIS    Healthy · no bottleneck
+EVIDENCE     GPU 2% · paging 0 B/s · Pressure normal · thermal nominal
+NOTE          No runtime found · d for setup

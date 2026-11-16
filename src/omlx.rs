@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: MIT
 //! oMLX monitoring, login, endpoint discovery and telemetry normalization.
 use crate::config::{Config, DEFAULT_OMLX_HOST, DEFAULT_OMLX_PORT};
-use crate::domain::{LlmTelemetry, MlxTelemetry, SsdCache, TelemetrySource};
+use crate::domain::{LlmTelemetry, MlxTelemetry, RequestUsage, Sample, SsdCache, TelemetrySource};
+use crate::host::Host;
 use crate::json::{
     gib_to_bytes, json_f64, json_f64_key, json_string, json_string_paths_or_keys, json_u64,
     json_u64_paths_or_keys,
 };
 use crate::logging::{diagnostics_log, log_field};
+use crate::model_facts::{mlx_facts, Engine, KvFormat, MlxModel, ModelFacts, ModelFiles};
 use crate::providers;
 use crate::runtime_diagnostics::{ProbeIssue, RuntimeReport};
 use crate::transport::{http_request, HttpResponse};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
@@ -29,14 +32,27 @@ pub(crate) struct LlmTelemetryClient {
     pub(crate) runtime: RuntimeReport,
     using_adapter: bool,
     configured_endpoint: bool,
+    /// Whether an oMLX was detected or chosen: only then is its port asked
+    /// anything, the admin key included, not whatever answers there.
+    pub(crate) login_allowed: bool,
+    /// When a login was last refused: a wrong key is retried once a minute,
+    /// not on every poll.
+    login_refused_at: Option<Instant>,
+    /// The key set in mlxtop's own config, when there is one.
+    api_key: Option<String>,
     decode: crate::decode_tracker::DecodeTracker,
+    /// Reads the served model's files for its facts.
+    pub(crate) files: Box<dyn Host>,
+    /// What oMLX says about how it serves its models.
+    pub(crate) models: OmlxModels,
 }
 
 impl LlmTelemetryClient {
     pub(crate) fn from_config(config: &Config, home: Option<PathBuf>) -> Self {
         let (host, port) = read_omlx_endpoint(config, home.as_deref());
         Self {
-            provider_adapter: providers::Adapter::new(),
+            provider_adapter: providers::Adapter::new(config.api_key()),
+            api_key: config.api_key(),
             home,
             host,
             port,
@@ -49,7 +65,14 @@ impl LlmTelemetryClient {
             retry_backoff: Duration::from_secs(1),
             runtime: RuntimeReport::default(),
             using_adapter: false,
+            login_allowed: config
+                .omx
+                .as_ref()
+                .is_some_and(|omx| omx.host.is_some() || omx.port.is_some()),
+            login_refused_at: None,
             decode: Default::default(),
+            files: Box::new(crate::host::System),
+            models: OmlxModels::default(),
             configured_endpoint: config
                 .omx
                 .as_ref()
@@ -60,26 +83,25 @@ impl LlmTelemetryClient {
     pub(crate) fn poll(&mut self, detected_provider: Option<&str>) -> Option<LlmTelemetry> {
         self.using_adapter = self.provider_adapter.selected(detected_provider);
         if self.using_adapter {
-            return self.provider_adapter.poll();
+            return providers::with_poll_deadline(|| self.provider_adapter.poll());
+        }
+        self.login_allowed = detected_provider == Some("oMLX")
+            || self.configured_endpoint
+            || self.provider_adapter.provider() == Some("oMLX");
+        if !self.login_allowed {
+            return self.no_runtime();
         }
         let now = Instant::now();
         if now < self.next_poll {
             return self.cached.clone();
         }
-        self.runtime.provider = self
-            .provider_adapter
-            .provider()
-            .map(str::to_owned)
-            .or_else(|| self.configured_endpoint.then(|| "oMLX".into()))
-            .or_else(|| self.runtime.provider.clone());
+        self.runtime.provider = Some("oMLX".into());
         self.runtime.selection = if self.provider_adapter.explicitly_selected() {
             "MLXTOP_PROVIDER; oMLX endpoint config"
         } else if self.configured_endpoint {
             "oMLX endpoint config"
-        } else if detected_provider.is_some() {
-            "process detection; oMLX endpoint config"
         } else {
-            "automatic oMLX discovery"
+            "process detection; oMLX endpoint config"
         };
         let authority = if self.host.contains(':') && !self.host.starts_with('[') {
             format!("[{}]", self.host)
@@ -90,24 +112,22 @@ impl LlmTelemetryClient {
             crate::runtime_diagnostics::safe_endpoint(&format!("http://{authority}:{}", self.port))
                 .unwrap_or_else(|| "<invalid endpoint>".into());
         self.runtime.remote = !is_loopback_host(&self.host);
-        self.runtime.credentials_present = read_omlx_api_key(self.home.as_deref()).is_some();
+        self.runtime.credentials_present =
+            omlx_api_key(self.home.as_deref(), self.api_key.as_deref()).is_some();
         self.runtime.begin();
         let telemetry = if self.runtime.endpoint == "<invalid endpoint>" {
             self.runtime
                 .record("configuration", Err(ProbeIssue::InvalidEndpoint))
         } else {
-            self.poll_once()
+            providers::with_poll_deadline(|| self.poll_once())
         };
         self.runtime.finish(telemetry.is_some());
-        if telemetry.is_some() {
-            self.runtime.provider = Some("oMLX".into());
-        }
 
         if let Some(mut telemetry) = telemetry {
             telemetry.remote = !is_loopback_host(&self.host);
             self.cached = Some(telemetry);
             self.retry_backoff = Duration::from_secs(1);
-            self.next_poll = now + self.retry_backoff;
+            self.next_poll = Instant::now() + self.retry_backoff;
         } else {
             diagnostics_log(
                 "WARN",
@@ -119,9 +139,34 @@ impl LlmTelemetryClient {
                     self.retry_backoff.as_secs()
                 ),
             );
-            self.next_poll = now + self.retry_backoff;
-            self.retry_backoff = (self.retry_backoff * 2).min(Duration::from_secs(30));
+            // Counted from the end of the poll; a refused connection is
+            // retried within seconds, a timed-out one backs off further.
+            let timed_out = self
+                .runtime
+                .probes
+                .iter()
+                .any(|probe| probe.issue == Some(ProbeIssue::Timeout));
+            self.next_poll = Instant::now() + self.retry_backoff;
+            self.retry_backoff = providers::next_backoff(self.retry_backoff, timed_out);
         }
+        self.cached.clone()
+    }
+
+    /// No oMLX process was found, and oMLX was neither chosen nor configured:
+    /// its port is asked nothing. Another runtime may listen there, unseen in
+    /// a container or behind a tunnel, and SGLang answers `/health` by
+    /// generating a token. An oMLX found later is asked at once.
+    fn no_runtime(&mut self) -> Option<LlmTelemetry> {
+        self.runtime = RuntimeReport {
+            selection: "process detection",
+            credentials_present: omlx_api_key(self.home.as_deref(), self.api_key.as_deref())
+                .is_some(),
+            attempted_at: Some(SystemTime::now()),
+            succeeded_at: self.runtime.succeeded_at,
+            ..RuntimeReport::default()
+        };
+        self.next_poll = Instant::now();
+        self.retry_backoff = Duration::from_secs(1);
         self.cached.clone()
     }
 
@@ -232,11 +277,15 @@ impl LlmTelemetryClient {
             self.last_stats_available = Some(stats_available);
         }
         let now = Instant::now();
-        if now >= self.next_metadata_poll {
+        let refresh = now >= self.next_metadata_poll;
+        if refresh {
             let device_info = self.fetch_json("/admin/api/device-info");
             let settings = self
                 .fetch_json("/admin/api/global-settings")
                 .or_else(|| self.fetch_json("/admin/api/settings"));
+            if let Some(settings) = &settings {
+                self.models.settings = OmlxSettings::parse(settings);
+            }
             let metadata = parse_mlx_metadata(device_info.as_ref(), settings.as_ref());
             let metadata_available = !mlx_metadata_is_empty(&metadata);
             self.mlx_metadata = merge_mlx_telemetry(&self.mlx_metadata, &metadata);
@@ -258,8 +307,132 @@ impl LlmTelemetryClient {
             &self.mlx_metadata,
             &parse_mlx_runtime_telemetry(&health, stats.as_ref()),
         );
+        telemetry.model_facts =
+            self.model_facts(telemetry.model.as_deref(), stats.as_ref(), refresh);
+        telemetry.max_concurrent = self.models.settings.max_concurrent_requests;
+        telemetry.details = telemetry.model.as_deref().and_then(|id| {
+            let splash = self
+                .models
+                .status
+                .iter()
+                .any(|status| status.id == id && status.engine.as_deref() == Some("splash"));
+            self.models.server.slowing(id, splash)
+        });
         telemetry.observed_at = Some(SystemTime::now());
         Some(telemetry)
+    }
+
+    /// The facts of the one model oMLX serves now, from `/v1/models/status`,
+    /// oMLX's settings and the model's own files. Each is asked for again
+    /// only on the metadata poll (`refresh`), or once when another model
+    /// comes in; files are read again only when they changed.
+    fn model_facts(
+        &mut self,
+        model: Option<&str>,
+        stats: Option<&Value>,
+        refresh: bool,
+    ) -> ModelFacts {
+        // Facts belong to a loaded model; several models at once have none.
+        let Some((id, loaded)) = model.zip(stats).and_then(|(id, stats)| {
+            let loaded = stats
+                .pointer("/active_models/models")?
+                .as_array()?
+                .iter()
+                .find(|entry| json_string(entry, &["id"]).as_deref() == Some(id))?;
+            Some((id, loaded))
+        }) else {
+            return ModelFacts::default();
+        };
+        let listed = self.models.status.iter().any(|status| status.id == id);
+        if refresh || (!listed && self.models.asked.as_deref() != Some(id)) {
+            self.models.asked = Some(id.to_owned());
+            if let Some(status) = self.fetch_api_json("/v1/models/status") {
+                self.models.status = parse_models_status(&status);
+            }
+            if let Some(status) = self.fetch_api_json("/api/status") {
+                // A server that stops naming its version keeps the one it gave.
+                let server = ServerStatus::parse(&status);
+                self.models.server = ServerStatus {
+                    version: server.version.or(self.models.server.version.take()),
+                    ..server
+                };
+            }
+        }
+        // A remote oMLX names files on its own machine, not this one.
+        let local = is_loopback_host(&self.host);
+        let base = self
+            .models
+            .settings
+            .base_path
+            .clone()
+            .or_else(|| json_string(stats?, &["runtime_cache", "base_path"]).map(PathBuf::from))
+            .filter(|_| local);
+        let model_settings = base.and_then(|base| {
+            self.models
+                .model_settings(
+                    self.files.as_ref(),
+                    &base.join("model_settings.json"),
+                    refresh,
+                )
+                .map(|all| all.get(id).cloned().unwrap_or_default())
+        });
+        let status = self
+            .models
+            .status
+            .iter()
+            .find(|status| status.id == id)
+            .cloned();
+        let files = self.files.as_ref();
+        let mut read = |dir: Option<&Path>| {
+            dir.filter(|_| local)
+                .and_then(|dir| self.models.files.model(files, dir, refresh))
+        };
+        let model = read(status.as_ref().and_then(|status| status.path.as_deref()));
+        // The configured draft is read only where a draft runs.
+        let drafting = through_splash(status.as_ref(), model_settings.as_ref())
+            || model_settings
+                .as_ref()
+                .is_some_and(|settings| settings.dflash);
+        let draft = read(
+            model_settings
+                .as_ref()
+                .and_then(|settings| settings.draft.as_deref())
+                .filter(|_| drafting),
+        );
+        omlx_model_facts(&Serving {
+            status: status.as_ref(),
+            settings: &self.models.settings,
+            model_settings: model_settings.as_ref(),
+            model: model.as_ref(),
+            draft: draft.as_ref(),
+            version: self.models.server.version.as_deref(),
+            loaded: Some(loaded),
+        })
+    }
+
+    /// JSON from an endpoint that takes oMLX's API key as a bearer token,
+    /// sent under the admin login's rules: to an oMLX found or chosen, on
+    /// a loopback address unless remote authentication is allowed.
+    fn fetch_api_json(&mut self, path: &str) -> Option<Value> {
+        let may_send = self.login_allowed
+            && (is_loopback_host(&self.host)
+                || env::var("MLXTOP_ALLOW_REMOTE_AUTH").as_deref() == Ok("1"));
+        let bearer = may_send
+            .then(|| omlx_api_key(self.home.as_deref(), self.api_key.as_deref()))
+            .flatten()
+            .map(|key| format!("Bearer {key}"));
+        let headers: Vec<(&str, &str)> = bearer
+            .iter()
+            .map(|value| ("Authorization", value.as_str()))
+            .collect();
+        let response = self.request("GET", path, &headers, None)?;
+        if response.status != 200 {
+            return None;
+        }
+        self.runtime.record(
+            path,
+            serde_json::from_str(&response.body).map_err(|_| ProbeIssue::InvalidResponse),
+        )
     }
 
     pub(crate) fn fetch_stats(&mut self) -> Option<Value> {
@@ -302,11 +475,26 @@ impl LlmTelemetryClient {
                 .record::<()>("/admin/api/login", Err(ProbeIssue::RemoteAuthBlocked));
             return;
         }
-        let Some(api_key) = read_omlx_api_key(self.home.as_deref()) else {
+        let Some(api_key) = omlx_api_key(self.home.as_deref(), self.api_key.as_deref()) else {
             self.runtime
                 .record::<()>("/admin/api/login", Err(ProbeIssue::CredentialsMissing));
             return;
         };
+        if !self.login_allowed {
+            // Something answers like oMLX on the polled port, but no oMLX
+            // process was found and none was chosen: keep the key.
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::NotDetected));
+            return;
+        }
+        if self
+            .login_refused_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::Http(401)));
+            return;
+        }
         let body = json!({ "api_key": api_key, "remember": true }).to_string();
         let Some(response) = self.request(
             "POST",
@@ -316,6 +504,13 @@ impl LlmTelemetryClient {
         ) else {
             return;
         };
+        if matches!(response.status, 401 | 403) {
+            self.login_refused_at = Some(Instant::now());
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::Http(response.status)));
+            return;
+        }
+        self.login_refused_at = None;
         if response.status == 200 {
             self.session_cookie = response
                 .header("set-cookie")
@@ -345,10 +540,12 @@ pub(crate) struct DiscoveredEndpoint {
 pub(crate) fn parse_omlx_server_env(text: &str) -> DiscoveredEndpoint {
     let mut discovered = DiscoveredEndpoint::default();
     for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let value = value.trim().trim_matches('"');
+        let value = value.trim().trim_matches(['"', '\'']);
         match key.trim() {
             "HOST" | "OMLX_HOST" if !value.is_empty() && value != "0.0.0.0" => {
                 discovered.host = Some(value.to_owned());
@@ -483,17 +680,84 @@ pub(crate) fn read_omlx_api_key(home: Option<&Path>) -> Option<String> {
         .find_map(|line| {
             let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
             let (key, value) = line.split_once('=')?;
-            (key.trim() == "API_KEY").then(|| value.trim().trim_matches('"').to_owned())
+            (key.trim() == "API_KEY").then(|| value.trim().trim_matches(['"', '\'']).to_owned())
         })
         .filter(|value| !value.is_empty())
+}
+
+/// The key a stock oMLX keeps as `auth.api_key` in its own `settings.json`.
+pub(crate) fn read_omlx_settings_api_key(base: &Path) -> Option<String> {
+    let text = fs::read_to_string(base.join("settings.json")).ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("auth")?
+        .get("api_key")?
+        .as_str()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+}
+
+/// The oMLX admin key, from the first source that has one:
+/// `MLXTOP_PROVIDER_API_KEY`, the key set in mlxtop's Settings, oMLX's own
+/// `OMLX_API_KEY`, the wrapper's `~/.config/omlx-coding/server.env`, then
+/// oMLX's `settings.json` (in `OMLX_BASE_PATH`, by default `~/.omlx`).
+pub(crate) fn omlx_api_key(home: Option<&Path>, configured: Option<&str>) -> Option<String> {
+    // Tests read keys from files only, whatever the developer's shell holds.
+    let var = |name: &str| {
+        if cfg!(test) {
+            None
+        } else {
+            env::var(name).ok()
+        }
+    };
+    omlx_api_key_from(
+        var("MLXTOP_PROVIDER_API_KEY"),
+        configured.map(str::to_owned),
+        var("OMLX_API_KEY"),
+        home,
+        env::var_os("OMLX_BASE_PATH").map(PathBuf::from).as_deref(),
+    )
+}
+
+pub(crate) fn omlx_api_key_from(
+    provider_key: Option<String>,
+    configured: Option<String>,
+    omlx_key: Option<String>,
+    home: Option<&Path>,
+    base_path: Option<&Path>,
+) -> Option<String> {
+    let set = |key: Option<String>| {
+        key.map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty())
+    };
+    set(provider_key)
+        .or_else(|| set(configured))
+        .or_else(|| set(omlx_key))
+        .or_else(|| read_omlx_api_key(home))
+        .or_else(|| {
+            let base = base_path
+                .map(Path::to_path_buf)
+                .or_else(|| home.map(|home| home.join(".omlx")))?;
+            read_omlx_settings_api_key(&base)
+        })
+}
+
+/// Text from the runtime without control characters, at most 120 of them.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 
 pub(crate) fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> LlmTelemetry {
     let mut telemetry = LlmTelemetry {
         source: TelemetrySource::Live,
         provider: Some("oMLX".into()),
-        status: Some(json_string(health, &["status"]).unwrap_or_else(|| "healthy".into())),
-        model: json_string(health, &["default_model"]),
+        status: Some(
+            json_string(health, &["status"])
+                .map(|status| printable(&status))
+                .unwrap_or_else(|| "healthy".into()),
+        ),
+        model: json_string(health, &["default_model"]).map(|model| printable(&model)),
         model_memory: json_u64(health, &["engine_pool", "current_model_memory"]),
         model_memory_max: json_u64(health, &["engine_pool", "final_ceiling"]),
         mlx: parse_mlx_runtime_telemetry(health, stats),
@@ -889,3 +1153,392 @@ pub(crate) fn merge_mlx_telemetry(base: &MlxTelemetry, update: &MlxTelemetry) ->
         process_footprint: update.process_footprint.or(base.process_footprint),
     }
 }
+
+/// What oMLX says about how it serves its models, kept between polls: the
+/// settings and status from the metadata poll, and the files read once.
+#[derive(Debug, Default)]
+pub(crate) struct OmlxModels {
+    pub(crate) settings: OmlxSettings,
+    /// `/v1/models/status`.
+    pub(crate) status: Vec<ModelStatus>,
+    /// `/api/status`.
+    pub(crate) server: ServerStatus,
+    model_settings: Option<SettingsFile>,
+    files: ModelFiles,
+    /// The model the status was last asked for between metadata polls.
+    asked: Option<String>,
+}
+
+/// What oMLX's `/api/status`, which takes the API key alone, adds to its admin statistics: its
+/// version, and what slows its own engine. A native kernel it could not load leaves the models
+/// that use it on much slower generic code; a model whose Neural Engine prefill was shed reads
+/// its prompts on the GPU alone. The import errors themselves are not kept.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ServerStatus {
+    pub(crate) version: Option<String>,
+    pub(crate) missing_kernels: Vec<String>,
+    pub(crate) shed_prefill: Vec<String>,
+}
+
+impl ServerStatus {
+    pub(crate) fn parse(status: &Value) -> Self {
+        let kernels = status.get("custom_kernels").and_then(Value::as_object);
+        let models = status
+            .pointer("/ane_prefill/models")
+            .and_then(Value::as_array);
+        Self {
+            version: json_string(status, &["version"]).map(|version| printable(&version)),
+            missing_kernels: kernels
+                .into_iter()
+                .flatten()
+                .filter(|(_, kernel)| {
+                    kernel.get("available").and_then(Value::as_bool) == Some(false)
+                })
+                .map(|(name, _)| printable(name))
+                .collect(),
+            shed_prefill: models
+                .into_iter()
+                .flatten()
+                .filter(|model| model.get("shed").and_then(Value::as_bool) == Some(true))
+                .filter_map(|model| json_string(model, &["model_id"]))
+                .map(|id| printable(&id))
+                .collect(),
+        }
+    }
+
+    /// What slows the model oMLX serves, in words; `splash` when Splash runs it, on kernels
+    /// of its own.
+    pub(crate) fn slowing(&self, model: &str, splash: bool) -> Option<String> {
+        let mut said = Vec::new();
+        if !splash && !self.missing_kernels.is_empty() {
+            said.push(format!(
+                "custom kernels not loaded: {}",
+                self.missing_kernels.join(", ")
+            ));
+        }
+        if self.shed_prefill.iter().any(|shed| shed == model) {
+            said.push("Neural Engine prefill shed: prompts read on the GPU alone".into());
+        }
+        (!said.is_empty()).then(|| said.join(" · "))
+    }
+}
+
+/// `model_settings.json` as last read: when it changed, and each model's
+/// settings (`None` when it could not be read).
+#[derive(Debug)]
+struct SettingsFile {
+    changed: Option<SystemTime>,
+    models: Option<HashMap<String, ModelSettings>>,
+}
+
+impl OmlxModels {
+    /// Every model's settings in `path`, read again only when `recheck`
+    /// finds the file changed.
+    fn model_settings(
+        &mut self,
+        host: &dyn Host,
+        path: &Path,
+        recheck: bool,
+    ) -> Option<&HashMap<String, ModelSettings>> {
+        if self.model_settings.is_none() || recheck {
+            let changed = host.modified(path);
+            if self
+                .model_settings
+                .as_ref()
+                .is_none_or(|file| file.changed != changed)
+            {
+                let models = match changed {
+                    Some(_) => host
+                        .read_prefix(path, 4 * 1024 * 1024)
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                        .as_ref()
+                        .and_then(parse_model_settings),
+                    // Without the file oMLX runs every model on its defaults: its own
+                    // engine, no draft. A base directory that cannot be read says nothing.
+                    None => path
+                        .parent()
+                        .filter(|base| {
+                            host.read_dir(base).iter().any(|entry| {
+                                entry
+                                    .file_name()
+                                    .is_some_and(|name| name == "settings.json")
+                            })
+                        })
+                        .map(|_| HashMap::new()),
+                };
+                self.model_settings = Some(SettingsFile { changed, models });
+            }
+        }
+        self.model_settings.as_ref()?.models.as_ref()
+    }
+}
+
+/// What oMLX's global settings say about serving: its base directory,
+/// which holds `model_settings.json`, the Splash engine's KV format and
+/// version, and how many requests it is set to run at once. Nothing else
+/// is kept, the API key least of all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct OmlxSettings {
+    pub(crate) base_path: Option<PathBuf>,
+    pub(crate) splash_kv_format: Option<String>,
+    pub(crate) splash_version: Option<String>,
+    pub(crate) max_concurrent_requests: Option<u64>,
+}
+
+impl OmlxSettings {
+    /// From `/admin/api/global-settings`.
+    pub(crate) fn parse(settings: &Value) -> Self {
+        let text = |path: &[&str]| json_string(settings, path).map(|text| printable(&text));
+        Self {
+            base_path: json_string(settings, &["base_path"]).map(PathBuf::from),
+            splash_kv_format: text(&["integrations", "splash_kv_format"]),
+            splash_version: text(&["external_engines", "splash", "version"]),
+            max_concurrent_requests: json_u64(settings, &["scheduler", "max_concurrent_requests"])
+                .filter(|limit| *limit > 0),
+        }
+    }
+}
+
+/// One model as `/v1/models/status` lists it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ModelStatus {
+    pub(crate) id: String,
+    /// Where its files are.
+    pub(crate) path: Option<PathBuf>,
+    /// The engine serving it when not oMLX's own: `splash`.
+    pub(crate) engine: Option<String>,
+    /// The context oMLX allows (lowered to what Splash planned), and the
+    /// context the model's config declares.
+    pub(crate) context: Option<u64>,
+    pub(crate) trained: Option<u64>,
+}
+
+pub(crate) fn parse_models_status(status: &Value) -> Vec<ModelStatus> {
+    status
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            Some(ModelStatus {
+                id: json_string(model, &["id"])?,
+                path: json_string(model, &["model_path"])
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute()),
+                engine: json_string(model, &["external_engine"]),
+                context: json_u64(model, &["max_context_window"]).filter(|tokens| *tokens > 0),
+                trained: json_u64(model, &["model_context_length"]).filter(|tokens| *tokens > 0),
+            })
+        })
+        .collect()
+}
+
+/// One model's own settings in oMLX's `model_settings.json`; a model
+/// without an entry runs with these defaults.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ModelSettings {
+    /// `splash` when the model is to be served through Splash.
+    pub(crate) engine: Option<String>,
+    /// The KV cache's quantized format on oMLX's own engine: `TurboQuant
+    /// 8-bit`, `affine 4-bit`; `None` when it is not quantized.
+    pub(crate) kv_quantized: Option<String>,
+    /// Speculative decoding on oMLX's own engine: the model's MTP head, a
+    /// DFlash draft (`draft`, the configured checkpoint), or for a vision
+    /// model an assistant model's MTP.
+    pub(crate) mtp: bool,
+    pub(crate) dflash: bool,
+    pub(crate) draft: Option<PathBuf>,
+    pub(crate) vlm_mtp: bool,
+}
+
+/// Each model's settings in `model_settings.json` (`{"models": {id: …}}`).
+pub(crate) fn parse_model_settings(file: &Value) -> Option<HashMap<String, ModelSettings>> {
+    let models = file.get("models")?.as_object()?;
+    Some(
+        models
+            .iter()
+            .map(|(id, model)| {
+                let on = |key: &str| model.get(key).and_then(Value::as_bool) == Some(true);
+                let text = |key: &str| model.get(key).and_then(Value::as_str);
+                let kv_quantized = on("turboquant_kv_enabled").then(|| {
+                    let bits = model
+                        .get("turboquant_kv_bits")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(4.0);
+                    match text("turboquant_kv_scheme").unwrap_or("turboquant") {
+                        "turboquant" => format!("TurboQuant {bits}-bit"),
+                        scheme => {
+                            printable(scheme.trim_end_matches(char::is_numeric))
+                                + &format!(" {bits}-bit")
+                        }
+                    }
+                });
+                (
+                    id.clone(),
+                    ModelSettings {
+                        engine: text("external_engine").map(printable),
+                        kv_quantized,
+                        mtp: on("mtp_enabled"),
+                        dflash: on("dflash_enabled"),
+                        // A configured draft is a path; anything else is
+                        // resolved by oMLX in ways not repeated here.
+                        draft: text("dflash_draft_model")
+                            .map(PathBuf::from)
+                            .filter(|path| path.is_absolute()),
+                        vlm_mtp: on("vlm_mtp_enabled"),
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Whether Splash serves the model: as its status says while it is loaded,
+/// else as its settings say.
+fn through_splash(status: Option<&ModelStatus>, settings: Option<&ModelSettings>) -> bool {
+    status
+        .and_then(|status| status.engine.as_deref())
+        .or_else(|| settings.and_then(|settings| settings.engine.as_deref()))
+        == Some("splash")
+}
+
+/// Everything known about how oMLX serves one model.
+pub(crate) struct Serving<'a> {
+    pub(crate) status: Option<&'a ModelStatus>,
+    pub(crate) settings: &'a OmlxSettings,
+    /// `None` when `model_settings.json` could not be read; a model it
+    /// does not list, or a missing file, means oMLX's defaults.
+    pub(crate) model_settings: Option<&'a ModelSettings>,
+    /// The model's files and the draft's, where they could be read.
+    pub(crate) model: Option<&'a MlxModel>,
+    pub(crate) draft: Option<&'a MlxModel>,
+    /// oMLX's version.
+    pub(crate) version: Option<&'a str>,
+    /// The model's entry in the admin stats' `active_models`.
+    pub(crate) loaded: Option<&'a Value>,
+}
+
+/// The model's facts: its files as its engine runs them, with the KV
+/// format oMLX's settings give, the draft, the context limits and the
+/// sizes oMLX reports.
+pub(crate) fn omlx_model_facts(serving: &Serving) -> ModelFacts {
+    let settings = serving.model_settings;
+    let splash = through_splash(serving.status, settings);
+    let kv = if splash {
+        serving
+            .settings
+            .splash_kv_format
+            .as_deref()
+            .map(|format| match format {
+                "int8" => KvFormat::SplashInt8,
+                "bf16" => KvFormat::Bf16,
+                other => KvFormat::Named(other.to_owned()),
+            })
+    } else {
+        settings.map(|settings| {
+            settings
+                .kv_quantized
+                .clone()
+                .map_or(KvFormat::Activations, KvFormat::Named)
+        })
+    };
+    let engine = if splash {
+        Engine::Splash
+    } else {
+        Engine::MlxLm
+    };
+    let files = MlxModel::default();
+    let mut facts = mlx_facts(serving.model.unwrap_or(&files), engine, kv.as_ref());
+    facts.context_configured = serving.status.and_then(|status| status.context);
+    facts.context_trained = facts
+        .context_trained
+        .or_else(|| serving.status.and_then(|status| status.trained));
+    (facts.draft, facts.draft_bytes) = if splash {
+        // Splash serves only with a DFlash draft, the configured one when
+        // it fits the model.
+        let fits = serving
+            .draft
+            .zip(serving.model)
+            .filter(|(draft, model)| draft.drafts_for(model));
+        (Some(true), fits.and_then(|(draft, _)| draft.weight_bytes))
+    } else {
+        match settings {
+            None => (None, None),
+            Some(settings) if settings.dflash => (
+                Some(true),
+                serving.draft.and_then(|draft| draft.weight_bytes),
+            ),
+            // An assistant model drafts for a vision model; its files are not read.
+            Some(settings) if settings.vlm_mtp => (Some(true), None),
+            // MTP drafts with the model's own head, where it has one.
+            Some(settings) if settings.mtp => {
+                match serving.model.and_then(|model| model.mtp_bytes) {
+                    Some(0) => (Some(false), None),
+                    Some(bytes) => (Some(true), Some(bytes)),
+                    None => (None, None),
+                }
+            }
+            Some(_) => (Some(false), None),
+        }
+    };
+    let engine_version = serving
+        .settings
+        .splash_version
+        .as_deref()
+        .filter(|_| splash);
+    facts.runtime_version = (serving.version.is_some() || engine_version.is_some()).then(|| {
+        let mut version = "oMLX".to_owned();
+        for (separator, part) in [(" ", serving.version), (" · Splash ", engine_version)] {
+            if let Some(part) = part {
+                version.push_str(separator);
+                version.push_str(part);
+            }
+        }
+        version
+    });
+    facts.loaded_bytes = serving
+        .loaded
+        .and_then(|model| json_u64(model, &["actual_size"]));
+    facts.estimated_bytes = serving
+        .loaded
+        .and_then(|model| json_u64(model, &["estimated_size"]));
+    facts
+}
+
+/// What Diagnostics says about the draft: why tokens per verify pass are missing where oMLX
+/// runs the model through Splash. oMLX starts Splash on a port and with an API key of its own
+/// and passes on none of its draft counters. Nothing once the figure is known, or with no
+/// draft.
+pub(crate) fn draft_lines(sample: &Sample) -> Vec<String> {
+    let hosted = sample.llm_provider == "oMLX" && sample.llm_engine.as_deref() == Some("Splash");
+    if hosted && sample.llm_tokens_per_pass.is_none() && sample.model.draft != Some(false) {
+        vec!["Draft: tokens per verify pass unknown · oMLX keeps Splash's status private".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The tokens each verify pass gives the request shown, for its output line: what the draft
+/// adds to its speed. Only while it is the one request writing, since the counters are the
+/// engine's; empty otherwise.
+pub(crate) fn draft_note(sample: &Sample, request: &RequestUsage, live: bool) -> String {
+    let writing = |request: &RequestUsage| {
+        !request.completed && !request.queued && request.prefilled.is_none()
+    };
+    let alone = sample
+        .llm_requests
+        .iter()
+        .filter(|request| writing(request))
+        .count()
+        == 1;
+    match sample.llm_tokens_per_pass {
+        Some(tokens) if live && alone && writing(request) && sample.llm_fresh() => {
+            format!("{tokens:.1} tok/pass")
+        }
+        _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/omlx.rs"]
+mod tests;

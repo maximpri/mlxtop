@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Weekly, so a new advisory against a locked crate is noticed without a push.
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -13,9 +16,10 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -25,20 +29,22 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --locked --all-targets
-      - name: Test client usage helper
-        if: runner.os != 'Windows'
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: Build release
         run: cargo build --release --locked
+      # After the build: the JSON output checks run the release binary.
+      - name: Test scripts and the JSON output
+        if: runner.os != 'Windows'
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
   coverage:
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           toolchain: stable
           components: llvm-tools-preview
@@ -53,6 +59,7 @@ jobs:
 
   shell:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install ShellCheck
@@ -62,9 +69,22 @@ jobs:
 
   licenses:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           rust-version: "1.88.0"
-          command: check licenses
+          command: check
+
+  msrv:
+    # Cargo.toml and the README promise Rust 1.88.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: "1.88"
+      - name: Check with the minimum supported Rust
+        run: cargo check --locked --all-targets

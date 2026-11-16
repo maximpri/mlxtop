@@ -20,6 +20,7 @@ impl crate::analysis::Speeds {
         let lone = crate::analysis::Work {
             requests: 1,
             context: Some(70_000),
+            ..crate::analysis::Work::default()
         };
         self.usual(lone).level()
     }
@@ -48,6 +49,7 @@ pub(super) fn defaults() -> Thresholds {
  * from the built-in default and survives normalization unchanged.
  */
 pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
+    "api_key": "test-key-not-a-secret",
     "interval": 7,
     "history": 1234,
     "omx": { "host": "10.1.2.3", "port": 9999 },
@@ -62,6 +64,7 @@ pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "compression_warn_rate": 100663296,
     "compression_warn_exit": 50331648,
     "alarms": false,
+    "baselines": false,
     "journal": {
         "prompts": false, "llm": false, "queue": false, "memory": false,
         "paging": false, "gpu": false, "thermal": false
@@ -82,21 +85,8 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
                 total_memory: 1,
                 ..Sample::default()
             },
-            generation_history: VecDeque::new(),
-            prefill_history: VecDeque::new(),
-            cache_history: VecDeque::new(),
-            disk_history: VecDeque::new(),
-            decode_reads: Default::default(),
-            session: Default::default(),
-            load_history: VecDeque::new(),
-            composition_history: VecDeque::new(),
-            swap_history: VecDeque::new(),
-            compression_history: VecDeque::new(),
             platform: Platform::MacOs,
-            gpu_history: VecDeque::new(),
-            signals: VecDeque::new(),
-            request_history: request_history::History::default(),
-            operator_history: operator_history::History::default(),
+            ..CollectorView::default()
         },
         sampler: Sampler {
             commands,
@@ -120,13 +110,20 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         diagnostics_open: false,
         diagnostics_scroll: 0,
         diagnostics_max_scroll: Default::default(),
+        journal_max_scroll: Default::default(),
+        key_prompted: false,
+        compact: Default::default(),
         quit: false,
         quit_prompt: false,
+        reset_prompt: false,
+        baselines: true,
         sampler_disconnected: false,
+        last_view_at: Instant::now(),
         alert: None,
         alert_bells: 0,
         bell: || {},
         critical_episode: false,
+        calm_samples: 0,
         alarms: true,
         thresholds: Thresholds::default(),
         settings: crate::settings::Settings::new(std::path::PathBuf::from(
@@ -144,21 +141,8 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
             updated: updated.into(),
             ..Sample::default()
         },
-        generation_history: VecDeque::new(),
-        prefill_history: VecDeque::new(),
-        cache_history: VecDeque::new(),
-        disk_history: VecDeque::new(),
-        decode_reads: Default::default(),
-        session: Default::default(),
-        load_history: VecDeque::new(),
-        composition_history: VecDeque::new(),
-        swap_history: VecDeque::new(),
-        compression_history: VecDeque::new(),
         platform: Platform::MacOs,
-        gpu_history: VecDeque::new(),
-        signals: VecDeque::new(),
-        request_history: request_history::History::default(),
-        operator_history: operator_history::History::default(),
+        ..CollectorView::default()
     }
 }
 
@@ -227,6 +211,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
                 state: "S".into(),
                 pageins: Some(25),
                 pagein_rate: Some(0.0),
+                footprint: None,
             },
             LlmProcess {
                 pid: 42002,
@@ -238,6 +223,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
                 state: "R".into(),
                 pageins: Some(10),
                 pagein_rate: Some(2.0),
+                footprint: None,
             },
         ],
         llm_pid: 41441,
@@ -739,11 +725,31 @@ mod config;
 mod dashboards;
 #[path = "main_detection.rs"]
 mod detection;
+#[path = "main_detection_baselines.rs"]
+mod detection_baselines;
+#[path = "main_detection_kv.rs"]
+mod detection_kv;
+#[path = "main_detection_per_pass.rs"]
+mod detection_per_pass;
 #[path = "main_journal.rs"]
 mod journal;
 #[path = "main_other.rs"]
 mod other;
 #[path = "main_qa.rs"]
 mod qa;
+#[path = "main_qa_baselines.rs"]
+mod qa_baselines;
+#[path = "main_qa_chip_facts.rs"]
+mod qa_chip_facts;
+#[path = "main_qa_context_left.rs"]
+mod qa_context_left;
+#[path = "main_qa_efficiency.rs"]
+mod qa_efficiency;
+#[path = "main_qa_native_runtimes.rs"]
+mod qa_native_runtimes;
+#[path = "main_qa_request_findings.rs"]
+mod qa_request_findings;
+#[path = "main_qa_slowdown_reasons.rs"]
+mod qa_slowdown_reasons;
 #[path = "main_runtimes.rs"]
 mod runtimes;

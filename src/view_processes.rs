@@ -13,6 +13,28 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
+/// The ` · `-separated readings of `text` that fit in `room` columns, whole
+/// and in order; the first alone is cut at a word when even it does not fit.
+fn whole_readings(text: &str, room: usize) -> String {
+    let mut shown = String::new();
+    for reading in text.split(" · ") {
+        let next = if shown.is_empty() {
+            reading.to_owned()
+        } else {
+            format!("{shown} · {reading}")
+        };
+        if Line::from(next.as_str()).width() > room {
+            break;
+        }
+        shown = next;
+    }
+    if shown.is_empty() {
+        crate::diagnostics_view::fit_words(text, room)
+    } else {
+        shown
+    }
+}
+
 impl App {
     pub(crate) fn draw_llm_top(&self, frame: &mut Frame, area: Rect) {
         let details = self.collector.current.llm_details.as_deref();
@@ -27,11 +49,15 @@ impl App {
         let sample = &self.collector.current;
         let filtered = self.filtered_llm_processes();
         let total_rss = filtered.iter().map(|p| p.rss).sum::<u64>();
-        let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>();
+        // An empty f64 sum is -0.0; adding 0.0 keeps the title at "0.0%".
+        let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>() + 0.0;
         if let Some(text) = details {
+            // One line inside the border: later readings drop whole before
+            // one is cut. Diagnostics has them all.
+            let room = usize::from(rows[0].width.saturating_sub(3));
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!(" {text}"),
+                    format!(" {}", whole_readings(text, room)),
                     Style::default().fg(CYAN),
                 )))
                 .block(panel(
@@ -53,7 +79,11 @@ impl App {
         } else {
             0
         };
-        let (headers, widths): (Vec<&str>, Vec<Constraint>) = match table_mode {
+        // What each process is charged for, GPU memory included, where the
+        // OS gives it: a runtime's resident size leaves its model out.
+        let footprints = table_mode > 0 && filtered.iter().any(|p| p.footprint.is_some());
+        let total_footprint = filtered.iter().filter_map(|p| p.footprint).sum::<u64>();
+        let (mut headers, mut widths): (Vec<&str>, Vec<Constraint>) = match table_mode {
             2 => (
                 vec![
                     "PID", "PROCESS", "CPU", "MEM%", "RSS", "PAGEIN/s", "OS STATE", "PROVIDER",
@@ -96,6 +126,15 @@ impl App {
                 ],
             ),
         };
+        if footprints {
+            // After RSS, which it is read against.
+            let at = headers
+                .iter()
+                .position(|h| *h == "RSS")
+                .map_or(0, |i| i + 1);
+            headers.insert(at, "FOOTPRINT");
+            widths.insert(at, Constraint::Length(12));
+        }
         let table_rows = filtered
             .iter()
             .skip(start)
@@ -128,6 +167,11 @@ impl App {
                     }));
                 }
                 cells.push(Cell::from(bytes(process.rss)));
+                if footprints {
+                    cells.push(Cell::from(
+                        process.footprint.map(bytes).unwrap_or_else(|| "—".into()),
+                    ));
+                }
                 if table_mode > 0 {
                     cells.push(Cell::from(pagein));
                 }
@@ -142,8 +186,13 @@ impl App {
             })
             .collect::<Vec<_>>();
         let mut title = format!(
-            "LLM PROCESSES · {} · RSS {} · CPU {:.1}% · sort {}",
+            "LLM PROCESSES · {} · {}RSS {} · CPU {:.1}% · sort {}",
             filtered.len(),
+            if footprints {
+                format!("footprint {} · ", bytes(total_footprint))
+            } else {
+                String::new()
+            },
             bytes(total_rss),
             total_cpu,
             self.top_sort.label()

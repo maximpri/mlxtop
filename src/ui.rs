@@ -17,7 +17,7 @@ use crate::{drop_marks, gpu_dashboard, model_dashboard, operator_charts, request
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 use std::collections::VecDeque;
 
@@ -41,15 +41,91 @@ fn overview_grid(area: Rect) -> [Rect; 3] {
     Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(area)
 }
 
+/// The last `visible` samples of a per-sample history spread over `width`
+/// plot columns, right-aligned, as every Overview chart's window is.
+fn window_columns<T: Copy>(
+    history: &VecDeque<Option<T>>,
+    visible: usize,
+    width: usize,
+) -> Vec<Option<T>> {
+    if visible == 0 || width == 0 {
+        return Vec::new();
+    }
+    let start = history.len().saturating_sub(visible);
+    let padding = visible - (history.len() - start);
+    (0..width)
+        .map(|column| {
+            (column * visible / width)
+                .checked_sub(padding)
+                .and_then(|offset| history.get(start + offset).copied().flatten())
+        })
+        .collect()
+}
+
+/// `text` with trailing ` · ` fields dropped until it fits `room`: a field
+/// goes whole, never cut mid-word. A single field longer than the room is
+/// left for the frame to clip.
+pub(crate) fn whole_fields(text: &str, room: usize) -> String {
+    let mut kept = text;
+    while kept.chars().count() > room {
+        match kept.rsplit_once(" · ") {
+            Some((rest, _)) => kept = rest,
+            None => break,
+        }
+    }
+    kept.to_owned()
+}
+
+/// A bar that always stands on the baseline: a measured zero is the thinnest
+/// sliver in its grade (a missing sample draws nothing), and any rate at all
+/// is taller than that. Zero and a trickle then sit on one line instead of
+/// at two heights.
+fn baseline_bar(mut glyphs: Vec<char>, value: u64) -> Vec<char> {
+    match (glyphs.as_slice(), value) {
+        ([], 0) => glyphs.push('▁'),
+        ([], _) => glyphs.push('▂'),
+        (['▁'], rate) if rate > 0 => glyphs[0] = '▂',
+        _ => {}
+    }
+    glyphs
+}
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.charts.regions.borrow_mut().clear();
         self.charts.overview_samples.set(None);
-        if area.width < 72 || area.height < 24 {
-            self.draw_compact_warning(frame, area);
+        self.compact.set(area.width < 72 || area.height < 24);
+        if self.compact.get() {
+            // Too small for the dashboard, but not for the verdict: a
+            // terminal with a tmux status line is 80×23.
+            let verdict_rows = if area.height >= 8 && area.width >= 30 {
+                2
+            } else {
+                0
+            };
+            if verdict_rows > 0 {
+                crate::diagnostics_view::summary(
+                    frame,
+                    Rect::new(area.x, area.y, area.width, verdict_rows),
+                    &self.collector.current,
+                    &self.collector.session.decode,
+                    self.paused,
+                    self.sampler_disconnected,
+                );
+            }
+            let rest = Rect::new(
+                area.x,
+                area.y + verdict_rows,
+                area.width,
+                area.height - verdict_rows,
+            );
+            self.draw_compact_warning(frame, rest);
             if self.quit_prompt {
                 self.draw_quit_prompt(frame, area);
+            }
+            if self.reset_prompt {
+                self.draw_reset_prompt(frame, area);
             }
             return;
         }
@@ -101,6 +177,54 @@ impl App {
         if self.quit_prompt {
             self.draw_quit_prompt(frame, area);
         }
+        if self.reset_prompt {
+            self.draw_reset_prompt(frame, area);
+        }
+    }
+
+    /// `r`: a reset clears what the session drew and counted, and `f`
+    /// forgets the usual speeds kept across sessions as well.
+    pub(crate) fn draw_reset_prompt(&self, frame: &mut Frame, area: Rect) {
+        let key = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let muted = Style::default().fg(MUTED);
+        let mut text = vec![
+            Line::from("Clears charts, the Journal and session totals."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key),
+                Span::styled(" reset · any other key keeps everything", muted),
+            ]),
+        ];
+        if self.baselines {
+            text.push(Line::from(vec![
+                Span::styled("f", key),
+                Span::styled(" also forgets usual speeds kept across sessions", muted),
+            ]));
+        }
+        let width = area.width.min(54);
+        let height = area.height.min(text.len() as u16 + 2);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .title(" RESET? ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(YELLOW))
+                        .style(Style::default().bg(PANEL)),
+                ),
+            popup,
+        );
     }
 
     /// Esc with nothing open: quitting discards the session's charts, prompts and Journal.
@@ -128,13 +252,16 @@ impl App {
             ]),
         ];
         frame.render_widget(
-            Paragraph::new(text).alignment(Alignment::Center).block(
-                Block::default()
-                    .title(" QUIT MLXTOP? ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(YELLOW))
-                    .style(Style::default().bg(PANEL)),
-            ),
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .title(" QUIT MLXTOP? ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(YELLOW))
+                        .style(Style::default().bg(PANEL)),
+                ),
             popup,
         );
     }
@@ -294,7 +421,18 @@ impl App {
         frame.render_widget(tabs, chunks[1]);
         // A heartbeat that turns with every sample, the refresh interval, and
         // the one time window every Overview chart shares.
-        let mut status = if self.paused {
+        let mut status = if let Some(age) = self.sampling_silent() {
+            // The heartbeat would only stand still; say that sampling stopped.
+            let text = if self.sampler_disconnected {
+                "STOPPED".to_owned()
+            } else {
+                format!("NO SAMPLE {}s", age.as_secs())
+            };
+            vec![Span::styled(
+                text,
+                Style::default().fg(RED).add_modifier(Modifier::BOLD),
+            )]
+        } else if self.paused {
             vec![Span::styled(
                 "PAUSED",
                 Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
@@ -513,7 +651,14 @@ impl App {
             &self.collector.current,
             &self.collector.request_history,
         );
-        crate::diagnostics_view::summary(frame, rows[1], &self.collector.current, self.paused);
+        crate::diagnostics_view::summary(
+            frame,
+            rows[1],
+            &self.collector.current,
+            &self.collector.session.decode,
+            self.paused,
+            self.sampler_disconnected,
+        );
         if devices {
             gpu_dashboard::draw(
                 frame,
@@ -653,6 +798,13 @@ impl App {
             metric,
             ChartMetric::Memory | ChartMetric::Gpu | ChartMetric::Cache
         );
+        // Paging and compression are judged against their warning rates, as
+        // on the full chart: a trickle stays a small bar, not a full one.
+        let floor = match metric {
+            ChartMetric::Swap => self.thresholds.swap_warn_rate,
+            ChartMetric::Compression => self.thresholds.compression_warn_rate,
+            _ => 1,
+        };
         let ceiling = if percent {
             100
         } else {
@@ -661,6 +813,7 @@ impl App {
                 .filter_map(|point| point.value)
                 .max()
                 .unwrap_or(0)
+                .max(floor)
                 .max(1)
         };
         for (column, point) in points.iter().enumerate() {
@@ -673,10 +826,7 @@ impl App {
                 value
             };
             let display = (u128::from(value) * 100 / u128::from(ceiling)).min(100) as u64;
-            let mut glyphs = bar_cells(display, usize::from(area.height));
-            if glyphs.is_empty() {
-                glyphs.push(if value > 0 { '▁' } else { '─' });
-            }
+            let glyphs = baseline_bar(bar_cells(display, usize::from(area.height)), value);
             let color = point.tone.color();
             for (height, glyph) in glyphs.into_iter().enumerate() {
                 let cell = &mut frame.buffer_mut()
@@ -698,20 +848,12 @@ impl App {
         visible: usize,
         width: usize,
     ) -> Vec<Option<[u64; 5]>> {
-        let history = &self.collector.composition_history;
-        if visible == 0 || width == 0 {
-            return Vec::new();
-        }
-        let start = history.len().saturating_sub(visible);
-        let padding = visible - (history.len() - start);
-        (0..width)
-            .map(|column| {
-                let index = column * visible / width;
-                index
-                    .checked_sub(padding)
-                    .and_then(|offset| history.get(start + offset).copied().flatten())
-            })
-            .collect()
+        window_columns(&self.collector.composition_history, visible, width)
+    }
+
+    /// GPU memory in use per plot column, over the same window.
+    pub(crate) fn gpu_memory_columns(&self, visible: usize, width: usize) -> Vec<Option<u64>> {
+        window_columns(&self.collector.gpu_memory_history, visible, width)
     }
 
     pub(crate) fn gpu_chart_title(&self) -> &'static str {
@@ -786,10 +928,11 @@ impl App {
         let scale = match warning {
             Some(rate) => (
                 0,
-                scale.1.max(crate::chart_scale::ceiling(
-                    rate,
-                    if normal.is_some() { 10 } else { 1 },
-                )),
+                scale.1.max(if metric.is_byte_rate() && normal.is_none() {
+                    crate::chart_scale::ceiling_bytes(rate, 1)
+                } else {
+                    crate::chart_scale::ceiling(rate, if normal.is_some() { 10 } else { 1 })
+                }),
             ),
             None => scale,
         };
@@ -799,7 +942,14 @@ impl App {
             "{} · {zoom}×",
             chart_window_label(history.len().min(visible_count), self.interval)
         );
-        let name = if metric == ChartMetric::Memory && area.width < 20 {
+        // The name gives way to the reading: " name " and " reading "
+        // inside the corners, with a dash between.
+        let crowded = |name: &str| {
+            name.chars().count() + current_label.chars().count() + 7 > usize::from(area.width)
+        };
+        let name = if metric == ChartMetric::Disk && crowded(name) {
+            "KV cache"
+        } else if metric == ChartMetric::Memory && area.width < 20 {
             "RAM"
         } else if metric == ChartMetric::Swap && area.width < 34 {
             "paging"
@@ -822,7 +972,11 @@ impl App {
         // Whole metadata fields fit or disappear. Never clip a token rate,
         // unit, time window or PID to squeeze in lower-priority statistics.
         let mut details = vec![window.clone()];
-        if average.is_some() {
+        // Memory's history is RAM by kind: a share "resident" over it reads
+        // 98% beside a panel that says 31.7 of 36.0 GiB.
+        let by_kind =
+            metric == ChartMetric::Memory && crate::memory_composition::segments(sample).is_some();
+        if average.is_some() && !by_kind {
             details.extend([
                 format!("avg {}", chart_stat_label(metric, average)),
                 format!("peak {}", chart_stat_label(metric, peak)),
@@ -843,7 +997,8 @@ impl App {
         // expanded chart, which zooms on its own, names its window here.
         if self.charts.expanded && area.width >= 38 {
             for detail in details {
-                let span = Span::styled(format!(" · {detail}"), Style::default().fg(MUTED));
+                // The name ends in a space of its own.
+                let span = Span::styled(format!("· {detail} "), Style::default().fg(MUTED));
                 if title.width() + span.width() + reading.width() + 2
                     <= usize::from(area.width.saturating_sub(2))
                 {
@@ -857,7 +1012,9 @@ impl App {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(DIM))
             .style(Style::default().bg(PANEL));
-        let summary = self.chart_summary(area, history, metric);
+        let summary = self
+            .chart_summary(area, history, metric)
+            .map(|summary| whole_fields(&summary, usize::from(area.width.saturating_sub(4))));
         if let Some(summary) = summary {
             let summary = if rate_chart {
                 if area.width < 38 {
@@ -973,7 +1130,6 @@ impl App {
         if visible_missing {
             // One vocabulary for absent data: "in this window" when older
             // samples exist, "yet" when none have been captured.
-            let idle = sample.llm_status == "idle";
             let message = match metric {
                 // Hit rate needs prompt tokens read in the window.
                 ChartMetric::Cache
@@ -981,11 +1137,13 @@ impl App {
                 {
                     "No prompts read in this window"
                 }
+                // The badge and the panel's title already say idle. A panel
+                // too narrow for the sentence gets a shorter one, whole.
                 _ if history.iter().any(|point| point.value.is_some()) => {
-                    if idle && inner.width >= 32 {
-                        "Idle · no samples in this window"
-                    } else {
+                    if inner.width >= 25 {
                         "No samples in this window"
+                    } else {
+                        "No samples in window"
                     }
                 }
                 ChartMetric::Cache if inner.width < 20 => "No cache samples",
@@ -998,9 +1156,6 @@ impl App {
                     } else {
                         "No live rates"
                     }
-                }
-                ChartMetric::Generation | ChartMetric::Prefill if idle && inner.width >= 26 => {
-                    "Idle · no rate samples yet"
                 }
                 ChartMetric::Generation | ChartMetric::Prefill => "No rate samples yet",
                 _ => "No samples yet",
@@ -1101,7 +1256,9 @@ impl App {
         };
         for (row, row_cells) in cells.iter_mut().enumerate() {
             let guide = if row + 1 == axis_rows {
-                Some(('─', Tone::Muted))
+                // Bars stand on the bottom of the cell, so their baseline
+                // is drawn there too, not through its middle.
+                Some((if bars { '▁' } else { '─' }, Tone::Muted))
             } else if Some(row) == guide_row {
                 Some((
                     if normal.is_some() { '━' } else { '┄' },
@@ -1139,12 +1296,7 @@ impl App {
                     continue;
                 }
                 let display_value = chart_display_value(metric, value, scale);
-                let mut glyphs = bar_cells(display_value, plot_height);
-                if glyphs.is_empty() {
-                    // A measured zero is a reading, unlike a missing sample:
-                    // it marks the baseline in its grade. Any rate shows.
-                    glyphs.push(if value > 0 { '▁' } else { '─' });
-                }
+                let glyphs = baseline_bar(bar_cells(display_value, plot_height), value);
                 for (height, glyph) in glyphs.into_iter().enumerate() {
                     cells[plot_height - 1 - height][column] = TraceCell {
                         glyph,
@@ -1277,7 +1429,12 @@ impl App {
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
         // An idle disk panel keeps its baseline: the rows above it say what
         // the cache holds, and a sentence would cover them.
-        if paging_idle && inner.height >= 4 && metric != ChartMetric::Disk {
+        // An idle paging panel keeps its baseline too: "no paging" is
+        // already its bottom edge, and a sentence repeating it is noise.
+        if paging_idle
+            && inner.height >= 4
+            && !matches!(metric, ChartMetric::Disk | ChartMetric::Swap)
+        {
             frame.render_widget(
                 Paragraph::new(match (metric, inner.width >= 32) {
                     (ChartMetric::Compression, true) => "No compression in this window",
@@ -1342,7 +1499,11 @@ impl App {
             )),
             Line::from(""),
             Line::from("This dashboard needs at least 72×24 terminal cells."),
-            Line::from(format!("Current size: {}×{}", area.width, area.height)),
+            Line::from(format!(
+                "Current size: {}×{}",
+                frame.area().width,
+                frame.area().height
+            )),
             Line::from("Resize the terminal, or use --once for a static report."),
             Line::from("q quit"),
         ];

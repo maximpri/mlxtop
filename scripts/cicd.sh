@@ -432,6 +432,7 @@ stage_dir=""
 # Replace the active symlink. macOS mv follows a symlink to a directory when
 # it is used as the destination, so remove the old link before moving in the
 # new one; never replace a real directory.
+previous_release="$(readlink "$base/current" 2>/dev/null || true)"
 next_link="$base/.current-$release_id"
 rm -f "$next_link"
 ln -s "$release_dir" "$next_link"
@@ -441,15 +442,25 @@ if [[ -e "$base/current" || -L "$base/current" ]]; then
 fi
 mv "$next_link" "$base/current"
 
+# The header's promise: a failed restart or health check leaves the
+# previous release current.
+rollback() {
+  if [[ -n "$previous_release" ]]; then
+    ln -sfn "$previous_release" "$base/.current-rollback"
+    mv -f "$base/.current-rollback" "$base/current"
+    printf 'restart or health check failed; current is back on %s\n' "$previous_release" >&2
+  fi
+  exit 1
+}
 cd "$base/current"
-if [[ -n "$restart_command" ]]; then bash -c "$restart_command"; fi
+if [[ -n "$restart_command" ]]; then bash -c "$restart_command" || rollback; fi
 if [[ -n "$healthcheck_command" ]]; then
-  bash -c "$healthcheck_command"
+  bash -c "$healthcheck_command" || rollback
 else
   if ((build_on_remote)); then
-    "$base/current/target/release/mlxtop" --help >/dev/null
+    "$base/current/target/release/mlxtop" --help >/dev/null || rollback
   else
-    "$base/current/mlxtop" --help >/dev/null
+    "$base/current/mlxtop" --help >/dev/null || rollback
   fi
 fi
 

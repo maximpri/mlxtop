@@ -1,0 +1,17 @@
+mlxtop · static report (1s sample)
+
+SIGNAL       LLM READY · HEALTHY
+PRESSURE     normal
+MEMORY       27.0 / 36.0 GiB · 9.0 GiB left (free and file cache)
+PAGING       1.5 GiB / 2.0 GiB · 75% used · in 512.0 KiB/s · out 0 B/s · file in 512.0 KiB/s · out 0 B/s · memory not tight
+METAL        Apple M4 Max · 32 cores · 410 GB/s · GPU 0% · renderer 96% · tiler 41%
+RUNTIME      thermal nominal · LLM 1 · footprint — · Metal limit 27.3 GiB
+LLM          oMLX · Splash · idle · LIVE · Qwen3.8-27B-oQ4e-mtp
+PROVIDER     context capacity 262144 tokens · server TTFT 1.8s
+SERVING      AVG GEN 123.4 tok/s · AVG PREFILL 298.4 tok/s · active 0 · cache 91.5%
+TOKENS       PROMPT 40.2k · OUT 812
+PROCESS OS   pid 4242 · footprint 19.0 GiB · lifetime peak 20.0 GiB · RSS 2.0 GiB · growth +1.0 MiB/s
+ENGINE       Splash under oMLX · engine status is private to oMLX
+USUAL SPEED   123.0 tok/s for 1 request · 41.0k context · slow below 98.4
+DIAGNOSIS    Healthy · no bottleneck
+EVIDENCE     GPU 0% · paging 0 B/s · Pressure normal · thermal nominal

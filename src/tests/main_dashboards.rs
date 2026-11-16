@@ -105,13 +105,10 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
         let at = headline.find(&pressure).unwrap();
         let column = headline[..at].chars().count() as u16;
         assert_eq!(buffer[(column, 0)].fg, tone.color());
-        let resident_label = format!("{resident}% resident");
-        assert!(reading.contains(&resident_label), "{reading}");
-        let at = reading.find(&resident_label).unwrap();
-        assert_eq!(
-            buffer[(reading[..at].chars().count() as u16, 1)].fg,
-            CYAN,
-            "resident percentage is occupancy; pressure has a separate severity label"
+        // Used and total, no "% resident" figure: it was removed as noise.
+        assert!(
+            !reading.contains(&format!("{resident}% resident")),
+            "{reading}"
         );
         assert!(!footer.contains("Includes file cache"), "no filler footer");
         let sample_cells: Vec<_> = buffer
@@ -239,9 +236,11 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
             ChartMetric::Memory,
         )
     });
-    for label in ["18.0 / 27.0 GiB", "17.2 / 36.0 GiB"] {
+    // One pool: RAM's reading, and how near the GPU is to its limit.
+    for label in ["17.2 / 36.0 GiB", "GPU 67% of limit"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
+    assert!(!screen.contains("│GPU  "), "no second meter\n{screen}");
     assert!(!screen.contains("50%"), "no percentage axis\n{screen}");
     let screen = render_view(40, 4, |frame| {
         app.render_indicator_chart(
@@ -311,7 +310,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Prefill,
             "prefill",
             None,
-            vec!["Idle · no rate samples yet", "tok/s"],
+            vec!["No rate samples yet"],
         ),
     ] {
         let mut point = ChartPoint::new(last, Tone::Cyan);
@@ -326,7 +325,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
         }
         if metric == ChartMetric::Generation {
             // A bar of filled cells (blank in text) cutting the guides, not a point.
-            assert!(screen.contains("┄ ┄") && screen.contains("─ ─"), "{screen}");
+            assert!(screen.contains("┄ ┄") && screen.contains("▁ ▁"), "{screen}");
             assert!(!screen.contains('●'), "{screen}");
         } else if chart_form(metric) == ChartForm::Bars {
             assert!(!screen.contains('●'), "bars, not points\n{screen}");
@@ -632,7 +631,8 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
     };
     let mut history = VecDeque::from([ChartPoint::new(Some(0), Tone::Green)]);
     let idle = draw(&history);
-    assert!(idle.contains("No paging traffic in this window"));
+    // The idle paging panel keeps its baseline; no sentence repeats it.
+    assert!(!idle.contains("No paging traffic in this window"));
     assert!(!idle.contains("1 B/s"));
     assert!(idle.contains("0 B/s"));
     // A measured zero marks the baseline in its grade; the empty guide is muted.
@@ -653,7 +653,7 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
         buffer
             .content()
             .iter()
-            .any(|cell| cell.symbol() == "─" && cell.fg == GREEN),
+            .any(|cell| cell.symbol() == "▁" && cell.fg == GREEN),
         "retain measured zero"
     );
     history.push_front(ChartPoint::new(Some(4096), Tone::Green));
@@ -671,7 +671,7 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
         ChartPoint::new(Some(0), Tone::Green),
         100,
     ));
-    assert!(draw(&history).contains("No paging traffic in this window"));
+    assert!(!draw(&history).contains("No paging traffic in this window"));
 }
 
 #[test]
@@ -987,7 +987,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     app.collector.current.llm_provider = "oMLX".into();
     app.collector.current.llm_model = "test-model".into();
     let empty = render_app(&app, 80, 24);
-    assert!(empty.contains("no requests yet"), "{empty}");
+    assert!(empty.contains("No requests yet"), "{empty}");
     assert!(!empty.contains("0–1 tokens"));
     assert!(
         app.charts
@@ -1184,6 +1184,11 @@ fn process_view_remains_scannable_at_eighty_columns() {
         );
     }
     assert!(!rendered.contains("This dashboard needs"));
+    assert!(
+        rendered.contains("CPU 0.0%"),
+        "no processes must not read -0.0"
+    );
+    assert!(!rendered.contains("-0.0"));
 }
 
 #[test]
@@ -1478,11 +1483,6 @@ fn file_paging_counts_against_the_system_only_while_memory_is_tight() {
     classify(&mut full, None, defaults());
     assert_eq!(full.impact, "HEAVY PAGING");
     assert_eq!(full.impact_tone, Tone::Red);
-    assert_eq!(full.guidance_badge, "ACT NOW");
-    assert_eq!(
-        full.guidance_cause,
-        "RAM full — reading evicted pages back from disk at 900.0 MiB/s."
-    );
     assert!(signal_summary(&full).starts_with("page-in 900.0 MiB/s"));
 
     // Lighter file paging under pressure is active paging, not yet heavy.
@@ -1498,10 +1498,6 @@ fn file_paging_counts_against_the_system_only_while_memory_is_tight() {
     pressured.availability = Some(5);
     classify(&mut pressured, None, defaults());
     assert_eq!(pressured.impact, "PAGING ACTIVE");
-    assert_eq!(
-        pressured.guidance_cause,
-        "Paging active — in 8.0 MiB/s + out 0 B/s."
-    );
 
     // Swap counts whatever the memory state, as before.
     let mut swapping = Sample {
@@ -1824,7 +1820,7 @@ fn overview_review_fixtures_keep_readouts_visible_at_supported_sizes() {
                 "GPU",
                 "cache",
                 "queue",
-                "? help q quit",
+                "? help  q quit",
             ] {
                 assert!(
                     screen.contains(label),
@@ -1858,8 +1854,11 @@ fn host_row_is_memory_cache_and_paging_and_compression_sits_above_the_queue() {
     let screen = render_app(&app, 120, 40);
     for label in [
         "PRESSURE normal",
-        "█wired █app █comp █cache",
-        "18.8 GiB left",
+        // A narrow panel wraps the kinds; it never drops their sizes.
+        "█wired 3.2 █app 12.4",
+        "█comp 1.6 █cache 3.3 GiB",
+        // The GPU limit is nearer than what RAM has left.
+        "9.0 GiB to GPU limit",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
@@ -2061,11 +2060,14 @@ fn bars_keep_a_gap_between_samples_when_there_is_room_and_show_raw_heights() {
                     let cell = &buffer[(x, y)];
                     if cell.bg == GREEN {
                         8
-                    } else {
+                    } else if cell.fg == GREEN {
                         "▁▂▃▄▅▆▇"
                             .chars()
                             .position(|glyph| cell.symbol().starts_with(glyph))
                             .map_or(0, |index| index + 1)
+                    } else {
+                        // The muted baseline is the axis, not a bar.
+                        0
                     }
                 })
                 .sum()
@@ -2142,11 +2144,28 @@ fn meters_fill_in_eighths_and_the_wide_process_table_shows_one_per_share() {
         state: "S".into(),
         pageins: None,
         pagein_rate: None,
+        footprint: None,
     }];
     let rendered = render_app(&app, 180, 40);
     assert!(rendered.contains("MEM%"), "{rendered}");
     // 40% of three cells is 9.6 eighths: one full cell and a quarter.
     assert!(rendered.contains("█▎  40.0%"), "{rendered}");
+    // No footprint from the OS: no column of dashes.
+    assert!(!rendered.contains("FOOTPRINT"), "{rendered}");
+    // A runtime's resident size leaves its GPU memory out; the footprint
+    // has it, per process and in the title's total.
+    app.collector.current.llm_processes[0].footprint = Some(23 << 30);
+    for width in [180, 100] {
+        let rendered = render_app(&app, width, 40);
+        assert!(
+            rendered.contains("FOOTPRINT") && rendered.contains("23.0 GiB"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("footprint 23.0 GiB · RSS 14.0 GiB"),
+            "{rendered}"
+        );
+    }
 }
 
 #[test]
@@ -2219,6 +2238,10 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
             })
         })
         .collect();
+    // GPU memory follows the load: 4 GiB, then 20, against a 32 GiB limit.
+    app.collector.gpu_memory_history = (0..40)
+        .map(|i| Some(if i < 20 { 4 * gib } else { 20 * gib }))
+        .collect();
     {
         let sample = &mut app.collector.current;
         sample.total_memory = 36 * gib;
@@ -2247,76 +2270,166 @@ fn memory_shows_headroom_against_the_gpu_limit_and_what_ram_has_left() {
             .unwrap();
         terminal.backend().buffer().clone()
     };
-    let buffer = draw(&app, 60, 20);
-    let text: String = (0..20)
-        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
-        .collect();
+    let render = |app: &App| {
+        let buffer = draw(app, 60, 20);
+        let text: String = (0..20)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        (buffer, text)
+    };
+    let (buffer, text) = render(&app);
     for label in [
-        "GPU",
-        "20.0 / 32.0 GiB",
-        "wired, against the GPU limit",
-        "12.0 GiB left",
-        "RAM",
+        // One pool: all of RAM in one bar, and what is left of it.
+        "│RAM ",
         "28.0 / 36.0 GiB",
-        "█wired █app █comp █cache",
         "8.0 GiB left",
-        // The axis rounds up past the 18 GiB peak, as every chart's does.
-        "20.0 GiB",
+        // How near wired memory is to the GPU limit, in words beside it.
+        "GPU at 63% of 32.0 GiB limit",
+        // The legend is the breakdown: each kind with its size.
+        "█wired 20.0 █app 6.0 █comp 2.0 █cache 4.0 GiB",
+        // The same pool over time, against all of RAM.
+        "│36.0 GiB ",
     ] {
         assert!(text.contains(label), "missing {label}\n{text}");
     }
+    // Memory is unified: the GPU is a part of the RAM bar, never a meter
+    // or a chart of its own.
+    assert!(!text.contains("│GPU "), "{text}");
+    assert!(!text.contains("32.0 GiB \n"), "{text}");
     assert!(!text.contains("resident"), "{text}");
-    // The GPU meter fills to wired over the limit.
-    let filled = (0..60).filter(|x| buffer[(*x, 1)].bg == CYAN).count();
-    let track = (0..60).filter(|x| buffer[(*x, 1)].bg == EDGE).count();
-    assert!(
-        filled > track,
-        "20 of 32 GiB: {filled} filled, {track} empty"
-    );
-    // What was left: 18 GiB before the load, 8 GiB after, under its pressure.
-    let height = |x: u16| {
+    // The model load shows as the GPU band rising: 4 GiB, then 20.
+    let gpu_band = crate::memory_headroom::history_colors()[0];
+    let band = |x: u16| {
         (0..20)
-            .filter(|y| "▁▂▃▄▅▆▇█".contains(buffer[(x, *y)].symbol()))
+            .filter(|y| buffer[(x, *y)].bg == gpu_band || buffer[(x, *y)].fg == gpu_band)
             .count()
     };
-    assert!(
-        height(30) > height(57) + 2,
-        "{} vs {}",
-        height(30),
-        height(57)
-    );
-    // A steady reading stands below the top, never a solid block.
-    let plot_top = (0..20)
-        .find(|y| buffer[(1, *y)].symbol() == "2")
-        .expect("axis label");
-    assert!(
-        !"▁▂▃▄▅▆▇█".contains(buffer[(30, plot_top)].symbol()),
-        "the peak reaches the top of the axis"
-    );
-    assert_eq!(buffer[(57, 18)].fg, YELLOW);
-    assert_eq!(buffer[(30, 18)].fg, GREEN);
+    assert!(band(57) > band(30) + 2, "{} vs {}", band(57), band(30));
 
-    // With Metal's own count, the meter reads it, as the header does.
-    app.collector.current.gpu_in_use = Some(24 * gib);
-    let buffer = draw(&app, 60, 20);
-    let text: String = (0..20)
-        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
-        .collect();
-    assert!(text.contains("24.0 / 32.0 GiB"), "{text}");
+    // With Metal's count and the model's size, wired RAM splits into the
+    // model, the rest of what the GPU holds, and wired RAM that is not its.
+    app.collector.current.gpu_in_use = Some(19 * gib);
+    app.collector.current.llm_model_memory = Some(16 * gib);
+    let (buffer, text) = render(&app);
+    for label in [
+        "█model 16.0",
+        "█KV cache & other 3.0",
+        "█other wired 1.0",
+        "GPU at 59% of 32.0 GiB limit",
+        "28.0 / 36.0 GiB",
+    ] {
+        assert!(text.contains(label), "missing {label}\n{text}");
+    }
+    let fill = crate::memory_headroom::gpu_fill();
+    let wired_cells = (0..60).filter(|x| buffer[(*x, 1)].bg == fill).count();
     assert!(
-        text.contains("GPU memory in use, against the GPU limit"),
+        wired_cells > 10,
+        "the model's part of the bar: {wired_cells}"
+    );
+    // The same RAM, so the bar's parts are the pool's: nothing counted twice.
+    assert!(text.matches("GiB left").count() == 1, "{text}");
+
+    // The GPU limit nearer than what RAM has left: that is the headroom.
+    app.collector.current.wired = 31 * gib;
+    app.collector.current.gpu_in_use = Some(30 * gib);
+    app.collector.current.anonymous = gib;
+    app.collector.current.compressor = 0;
+    app.collector.current.file_backed = 3 * gib;
+    let (buffer, text) = render(&app);
+    assert!(text.contains("2.0 GiB to GPU limit"), "{text}");
+    assert_eq!(buffer[(6, 1)].bg, YELLOW, "94% of the limit");
+    // Past the limit says so, in red.
+    app.collector.current.wired = 33 * gib;
+    app.collector.current.gpu_in_use = Some(33 * gib);
+    let (buffer, text) = render(&app);
+    assert!(text.contains("over the GPU limit"), "{text}");
+    assert_eq!(buffer[(6, 1)].bg, RED);
+    // A count above wired RAM is not a part of it: the kinds stay whole.
+    app.collector.current.wired = 20 * gib;
+    app.collector.current.gpu_in_use = Some(24 * gib);
+    app.collector.current.llm_model_memory = None;
+    let (_, text) = render(&app);
+    assert!(
+        text.contains("█wired 20.0") && !text.contains("other wired"),
         "{text}"
     );
+    assert!(text.contains("GPU at 75% of 32.0 GiB limit"), "{text}");
     app.collector.current.gpu_in_use = None;
-    // Wired past the limit says so, in red.
-    app.collector.current.wired = 33 * gib;
-    let buffer = draw(&app, 60, 20);
-    let text: String = (0..20)
-        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
-        .collect();
-    assert!(text.contains("wired over the GPU limit"), "{text}");
-    assert!(text.contains("0 B left"), "{text}");
-    assert_eq!(buffer[(6, 1)].bg, RED);
+    app.collector.current.anonymous = 6 * gib;
+    app.collector.current.compressor = 2 * gib;
+    app.collector.current.file_backed = 4 * gib;
+
+    // Cards with memory of their own are a second pool: VRAM and RAM each
+    // get a meter, what is left, and a chart. Nothing of VRAM is in RAM.
+    let pools = |app: &App, memory: crate::gpu::Memory| {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                let columns = |width: usize| {
+                    app.composition_columns(40, width)
+                        .into_iter()
+                        .zip(app.gpu_memory_columns(40, width))
+                        .map(|(sizes, gpu)| {
+                            sizes.map(|sizes| crate::memory_headroom::Column {
+                                sizes,
+                                gpu,
+                                tone: Tone::Green,
+                            })
+                        })
+                        .collect()
+                };
+                crate::memory_headroom::draw_for(
+                    frame,
+                    frame.area(),
+                    &app.collector.current,
+                    memory,
+                    columns,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = (0..20)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>() + "\n")
+            .collect();
+        text
+    };
+    let text = pools(
+        &app,
+        crate::gpu::Memory::Dedicated {
+            used: 20 * gib,
+            total: 24 * gib,
+        },
+    );
+    for label in [
+        "VRAM ",
+        "20.0 / 24.0 GiB",
+        "4.0 GiB left",
+        "RAM ",
+        "28.0 / 36.0 GiB",
+        "8.0 GiB left",
+        "█wired 20.0 █app 6.0 █comp 2.0 █cache 4.0 GiB",
+        // Each pool over time, against its own size.
+        "24.0 GiB ",
+        "    VRAM ",
+        "36.0 GiB ",
+        "     RAM ",
+    ] {
+        assert!(text.contains(label), "missing {label}\n{text}");
+    }
+    assert!(
+        !text.contains("GPU limit") && !text.contains("other wired"),
+        "{text}"
+    );
+    // A GPU that shares RAM and gives no count of its part (DGX Spark):
+    // one pool, and a line saying there is no VRAM to look for.
+    app.collector.current.gpus = crate::gpu::parse("0, GPU-s, NVIDIA GB10, 42, [N/A], [N/A], 51\n");
+    app.collector.current.metal.resource_limit = None;
+    app.collector.current.mlx.recommended_working_set = None;
+    let text = pools(&app, crate::gpu::memory(&app.collector.current.gpus));
+    assert!(text.contains("GPU shares this RAM"), "{text}");
+    assert!(text.contains("28.0 / 36.0 GiB") && text.contains("8.0 GiB left"));
+    assert!(!text.contains("VRAM"), "{text}");
+    app.collector.current.gpus.clear();
 
     // No GPU limit known: RAM alone. A short panel keeps the meters only.
     app.collector.current.metal.resource_limit = None;
@@ -2568,6 +2681,18 @@ fn cache_impact_reads_activity_speed_and_shares() {
             disk: 1
         })
     );
+    // The SSD tier counting more lookups than the session's hits does not
+    // widen the bar: its two tiers add up to the title's rate.
+    let mut overcounted = sample.clone();
+    overcounted.ssd_cache = Some(domain::SsdCache {
+        capacity: 1,
+        hit_tokens: Some(640),
+        disk_hit_tokens: Some(20),
+        ..Default::default()
+    });
+    let split = crate::cache_impact::tiers(&overcounted).unwrap();
+    assert_eq!(split.memory + split.disk, 600, "60% of 1000, as the title");
+
     let bar = render_view(60, 1, |frame| {
         crate::cache_impact::draw_tiers(
             frame,
@@ -2674,7 +2799,8 @@ fn the_ssd_row_shows_fill_or_says_the_cache_is_off() {
         ..Default::default()
     });
     assert!(
-        row(&sample).contains("SSD 120.0 GiB · ↑1.5k ↓1.3k ✕327"),
+        row(&sample).contains("SSD 120.0 GiB · 1.5k loaded · 1.3k saved")
+            && !row(&sample).contains('↑'),
         "{}",
         row(&sample)
     );
@@ -2838,18 +2964,18 @@ fn the_enlarged_memory_view_gives_each_kinds_size() {
         })
     };
     let tall = render(20);
-    // One unit for the row, and no kind cut off.
-    assert!(tall.contains("wired 3.2 · app"), "{tall}");
-    assert!(tall.contains("· free") && tall.contains(" GiB"), "{tall}");
+    // The legend is the breakdown: each kind with its size, in one unit.
+    assert!(
+        tall.contains("wired 3.2") && tall.contains("app 12.4"),
+        "{tall}"
+    );
+    assert!(tall.contains("cache 3.3 GiB"), "{tall}");
+    // Narrower, the kinds wrap onto a second row: sizes whole, never cut.
     let narrow = render_view(40, 20, |frame| {
         app.render_indicator_chart(frame, frame.area(), "memory", &history, ChartMetric::Memory)
     });
-    let sizes = narrow
-        .lines()
-        .find(|l| l.contains("wired 3.2"))
-        .unwrap_or_default();
     assert!(
-        sizes.trim_end_matches('│').trim_end().ends_with("GiB"),
+        narrow.contains("█wired 3.2 █app 12.4") && narrow.contains("█comp 1.6 █cache 3.3 GiB"),
         "{narrow}"
     );
     assert!(
@@ -2905,7 +3031,16 @@ fn one_moment_sits_at_the_same_place_on_every_chart() {
             for y in area.top() + 1..area.bottom() - 1 {
                 for x in area.left() + 1..area.right() - 1 {
                     let marked = painted(x, y, UNUSUAL);
-                    if marked || painted(x, y, GREEN) {
+                    // Memory plots RAM by kind in the kinds' own colours.
+                    let plotted = painted(x, y, GREEN)
+                        || (chart == Chart::Memory
+                            && x >= area.left() + 1 + crate::memory_headroom::AXIS_GUTTER
+                            && crate::memory_headroom::history_colors()
+                                .iter()
+                                .any(|color| {
+                                    buffer[(x, y)].bg == *color || buffer[(x, y)].fg == *color
+                                }));
+                    if marked || plotted {
                         first = first.min(x);
                         last = last.max(x);
                     }
@@ -2934,4 +3069,292 @@ fn one_moment_sits_at_the_same_place_on_every_chart() {
             );
         }
     }
+}
+
+#[test]
+fn a_stopped_sampler_is_shown_on_every_view() {
+    for tab in 0..4 {
+        let mut app = test_app(tab);
+        populate_dashboard_fixture(&mut app);
+        app.sampler_disconnected = true;
+        for (width, height) in [(120, 40), (80, 24)] {
+            let rendered = render_app(&app, width, height);
+            assert!(
+                rendered.contains("STOPPED"),
+                "tab {tab} at {width}x{height}:\n{rendered}"
+            );
+            if tab == 0 {
+                assert!(rendered.contains("Sampling stopped"));
+                assert!(!rendered.contains("Healthy"));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_late_sample_is_named_and_a_live_one_is_quiet() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let rendered = render_app(&app, 120, 40);
+    assert!(!rendered.contains("NO SAMPLE") && !rendered.contains("STOPPED"));
+    app.last_view_at = Instant::now() - Duration::from_secs(12);
+    assert!(render_app(&app, 120, 40).contains("NO SAMPLE 12s"));
+    app.paused = true;
+    assert!(
+        !render_app(&app, 120, 40).contains("NO SAMPLE"),
+        "a paused sampler is not silent"
+    );
+}
+
+#[test]
+fn the_overview_headline_names_a_slowdown_while_paging_is_active() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    app.collector.current.impact = "PAGING ACTIVE".into();
+    app.collector.current.impact_tone = Tone::Yellow;
+    app.collector.current.correlation = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::Paging,
+        summary: "GEN ↓50.0% (50.0→25.0 tok/s) · paging 6.0 MiB/s".into(),
+        lead: "paging 6.0 MiB/s (usual 0.5 MiB/s)".into(),
+        ..CorrelationInsight::default()
+    };
+    let rendered = render_app(&app, 80, 24);
+    assert!(rendered.contains("Generation slowed"), "{rendered}");
+}
+
+#[test]
+fn with_no_runtime_the_header_says_so_once() {
+    let mut app = test_app(0);
+    app.collector.current.llm_provider = "none".into();
+    app.collector.current.llm_model = "not detected".into();
+    let rendered = render_app(&app, 120, 40);
+    assert!(rendered.contains("No LLM runtime detected"), "{rendered}");
+    assert!(!rendered.contains("none · not detected"));
+}
+
+#[test]
+fn a_terminal_too_small_for_the_dashboard_still_shows_the_verdict() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    for (width, height) in [(80, 23), (60, 15)] {
+        let rendered = render_app(&app, width, height);
+        assert!(
+            rendered.contains("Healthy") || rendered.contains("bottleneck"),
+            "{width}x{height}:\n{rendered}"
+        );
+        assert!(rendered.contains("72"), "the notice says the size needed");
+    }
+    // Keys whose effect cannot be seen do nothing while the notice shows.
+    let history = app.collector.load_history.len();
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert_eq!(app.tab, 0);
+    assert_eq!(app.collector.load_history.len(), history);
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(app.quit);
+}
+
+#[test]
+fn the_oldest_journal_event_is_reachable_with_wrapped_rows() {
+    let mut app = test_app(2);
+    for index in 0..60 {
+        app.collector.signals.push_back(crate::domain::SignalEvent {
+            time: format!("12:{:02}:00", index % 60),
+            recorded_at: SystemTime::now(),
+            kind: crate::domain::EventKind::from_state("SLOWDOWN"),
+            state: "SLOWDOWN".into(),
+            summary: format!(
+                "event {index:02} · GEN ↓50% (50.0→25.0 tok/s) · paging 6.0 MiB/s → The model no longer fits in RAM; reduce context or load a smaller quant"
+            ),
+            tone: Tone::Unusual,
+        });
+    }
+    render_app(&app, 80, 24);
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    let rendered = render_app(&app, 80, 24);
+    assert!(rendered.contains("event 00"), "{rendered}");
+    // Up moves at once after scrolling past the end.
+    for _ in 0..50 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let before = app.journal_scroll;
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.journal_scroll, before - 1);
+}
+
+#[test]
+fn a_short_compression_panel_keeps_a_trickle_small() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let draw = |app: &App| {
+        render_view(75, 4, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "compression",
+                &app.collector.compression_history,
+                ChartMetric::Compression,
+            )
+        })
+    };
+    // 16 KiB/s against a warning rate of tens of MiB/s: a baseline, not bars.
+    app.collector.compression_history.clear();
+    for _ in 0..60 {
+        push_history_with_tone(
+            &mut app.collector.compression_history,
+            Some(16_000),
+            Tone::Green,
+            120,
+        );
+    }
+    let trickle = draw(&app);
+    assert!(
+        !trickle.contains('▇') && !trickle.contains('█'),
+        "{trickle}"
+    );
+    assert!(trickle.contains('▂'), "the trickle still shows: {trickle}");
+    // A trickle that comes and goes stays one line on the baseline: zero is
+    // the thinnest sliver there, not a dash through the middle of the row.
+    app.collector.compression_history.clear();
+    for index in 0..60 {
+        push_history_with_tone(
+            &mut app.collector.compression_history,
+            Some(if index % 2 == 0 { 16_000 } else { 0 }),
+            Tone::Green,
+            120,
+        );
+    }
+    let flicker = draw(&app);
+    assert!(flicker.contains("▂▁▂▁▂▁"), "{flicker}");
+    assert!(
+        !flicker.lines().nth(2).unwrap_or_default().contains('─'),
+        "{flicker}"
+    );
+}
+
+#[test]
+fn what_the_acceptance_run_found_stays_fixed() {
+    // The KV bar's two shares add up to the title's rate as printed: 88.6%
+    // and 1.5% under "KV hit 90%" read 88 and 2, not 89 and 2.
+    let tiers = |memory, disk| crate::cache_impact::Tiers {
+        prompt: 10_000,
+        memory,
+        disk,
+    };
+    let row = |tiers| {
+        render_view(60, 1, |frame| {
+            crate::cache_impact::draw_tiers(frame, frame.area(), tiers)
+        })
+    };
+    assert!(
+        row(tiers(8_860, 150)).contains("RAM 88% · SSD 2%"),
+        "{}",
+        row(tiers(8_860, 150))
+    );
+    assert!(
+        row(tiers(8_960, 50)).contains("RAM 90% · SSD <1%"),
+        "{}",
+        row(tiers(8_960, 50))
+    );
+
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    // An expanded memory chart's title carries no share "resident" over a
+    // panel that gives RAM by kind, and no doubled space.
+    app.charts.expanded = true;
+    let load = app.collector.load_history.clone();
+    let screen = render_view(120, 20, |frame| {
+        app.render_indicator_chart(frame, frame.area(), "memory", &load, ChartMetric::Memory)
+    });
+    let title = screen.lines().next().unwrap_or_default();
+    assert!(title.contains(" memory · "), "{title}");
+    assert!(!title.contains("avg") && !title.contains("peak"), "{title}");
+    app.charts.expanded = false;
+
+    // A narrow KV panel shortens its name, not its reading.
+    for _ in 0..30 {
+        push_history_with_tone(&mut app.collector.disk_history, Some(0), Tone::Green, 60);
+    }
+    let (name, _, metric) = app.cache_panel();
+    assert_eq!(name, "KV cache / model I/O");
+    let disk = app.collector.disk_history.clone();
+    let draw = |width| {
+        render_view(width, 8, |frame| {
+            app.render_indicator_chart(frame, frame.area(), name, &disk, metric)
+        })
+    };
+    let narrow = draw(26);
+    let title = narrow.lines().next().unwrap_or_default();
+    assert!(
+        title.contains("┌ KV cache ─") && title.contains("KV hit 62% ┐"),
+        "{title}"
+    );
+    assert!(draw(60).contains("KV cache / model I/O"), "{}", draw(60));
+
+    // The paging footer is a whole wording that fits, never a cut word.
+    {
+        let sample = &mut app.collector.current;
+        sample.rate_ready = true;
+        sample.paging_unavailable = false;
+        sample.swap_in = 0;
+        sample.swap_out = 0;
+        sample.page_in = 4096;
+    }
+    let swap = app.collector.swap_history.clone();
+    let footer = |width| {
+        render_view(width, 8, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "paging / I/O",
+                &swap,
+                ChartMetric::Swap,
+            )
+        })
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_owned()
+    };
+    assert!(footer(26).contains("└ reading files ─"), "{}", footer(26));
+    assert!(
+        footer(60).contains("reading files · memory not tight"),
+        "{}",
+        footer(60)
+    );
+    assert_eq!(crate::ui::whole_fields("a · bb · ccc", 6), "a · bb");
+    assert_eq!(crate::ui::whole_fields("abcdef", 3), "abcdef");
+
+    // A window with nothing plotted carries no unit on its edge.
+    let mut history = VecDeque::from([ChartPoint::new(Some(400), Tone::Green)]);
+    history.extend(std::iter::repeat_n(ChartPoint::new(None, Tone::Muted), 200));
+    let screen = render_view(40, 6, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "generation",
+            &history,
+            ChartMetric::Generation,
+        )
+    });
+    assert!(screen.contains("No samples in this window"), "{screen}");
+    assert!(
+        !screen.lines().last().unwrap_or_default().contains("tok/s"),
+        "{screen}"
+    );
+    // A panel narrower than that sentence says it shorter, never cut.
+    let screen = render_view(26, 6, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &history,
+            ChartMetric::Prefill,
+        )
+    });
+    assert!(
+        screen.contains("No samples in window") && !screen.contains("windo│"),
+        "{screen}"
+    );
 }

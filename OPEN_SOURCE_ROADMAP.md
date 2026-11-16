@@ -20,7 +20,11 @@ That is a stronger position than becoming another general-purpose `top` clone.
 The product should remain local-first and read-only by default, combine provider
 telemetry with host evidence, and explain conclusions without inventing data.
 
-The current package version is 1.1.2, with documented Apple Silicon installation
+> Status, 2026-11: this plan was written for 1.1.2 and is kept as history.
+> The modular layout, provider adapters, fake-server tests and release
+> automation it asks for have landed; see CHANGELOG.md for the current state.
+
+The package version at the time was 1.1.2, with documented Apple Silicon installation
 and useful macOS pressure analysis. The next development priorities are modular
 architecture, provider breadth, integration testing, and automated releases.
 

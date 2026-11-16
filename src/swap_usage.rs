@@ -68,7 +68,8 @@ pub(super) fn draw_ssd_cache(frame: &mut Frame, area: Rect, sample: &Sample) {
     let text = [
         format!("SSD {size} · {loads} blocks loaded · {saves} saved · {evicted} evicted"),
         format!("SSD {size} · {loads} loaded · {saves} saved · {evicted} evicted"),
-        format!("SSD {size} · ↑{loads} ↓{saves} ✕{evicted}"),
+        format!("SSD {size} · {loads} loaded · {saves} saved"),
+        format!("SSD {size} · {loads} loaded"),
         format!("SSD {size}"),
     ]
     .into_iter()

@@ -53,6 +53,7 @@ fn every_config_key_has_a_field_and_every_field_round_trips() {
             Kind::Toggle { default } => Value::from(!default),
             Kind::Host => Value::from("10.0.0.2"),
             Kind::Port => Value::from(9000),
+            Kind::Secret => Value::from("test-key"),
         };
         let mut doc = Map::new();
         match field.key.split_once('.') {
@@ -61,6 +62,13 @@ fn every_config_key_has_a_field_and_every_field_round_trips() {
         };
         let config: Config = serde_json::from_value(Value::Object(doc)).unwrap();
         assert_ne!(config, Config::default(), "{} reaches Config", field.key);
+        if field.kind == Kind::Secret {
+            // A stored credential is never loaded back for editing or shown.
+            assert_eq!(field.edit_text(&value), "");
+            assert!(!field.display(&value).contains("test-key"));
+            assert_eq!(field.parse(" test-key "), Ok(value));
+            continue;
+        }
         assert_eq!(
             field.parse(&field.edit_text(&value)),
             Ok(value),
@@ -259,4 +267,171 @@ fn the_view_lists_every_setting_and_shows_the_file() {
     app.settings.selected = FIELDS.len() - 1;
     let screen = render_app(&app, 80, 24);
     assert!(screen.contains("Compression clears below"));
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_keeps_a_symlinked_config_linked_and_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("settings-symlink");
+    let target = dir.write("dotfiles/mlxtop.json", "{\"interval\": 2}\n");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let link = dir.0.join("config.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let settings = Settings::new(link.clone());
+    let mut doc = serde_json::Map::new();
+    doc.insert("interval".into(), serde_json::json!(3));
+    settings.write(&doc).unwrap();
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_to_string(&target)
+        .unwrap()
+        .contains("\"interval\": 3"));
+    let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn the_api_key_is_typed_as_dots_saved_privately_and_applied() {
+    let dir = TempDir::new("settings-api-key");
+    let (mut app, commands) = settings_app(&dir);
+    select(&mut app, "api_key");
+    let unset = render_app(&app, 120, 40);
+    assert!(
+        unset.contains("Inference engine") && unset.contains("API key"),
+        "{unset}"
+    );
+    press(&mut app, &[KeyCode::Enter]);
+    type_text(&mut app, "sk-test-0123456789");
+    // What was typed shows as dots, on the screen and nowhere else.
+    let typing = render_app(&app, 120, 40);
+    assert!(typing.contains("••••••••••••••••••▏"), "{typing}");
+    assert!(!typing.contains("sk-test"), "{typing}");
+    press(&mut app, &[KeyCode::Enter]);
+    assert_eq!(file(&dir)["api_key"], "sk-test-0123456789");
+    let saved = render_app(&app, 120, 40);
+    assert!(saved.contains("API key set to ••••••••"), "{saved}");
+    assert!(!saved.contains("sk-test"), "{saved}");
+    // The sampler gets the key now, without a restart.
+    let applied = std::iter::from_fn(|| commands.try_recv().ok())
+        .filter_map(|command| match command {
+            SamplerCommand::SetConfig(config) => Some(config),
+            _ => None,
+        })
+        .last()
+        .expect("a new config reaches the sampler");
+    assert_eq!(applied.api_key().as_deref(), Some("sk-test-0123456789"));
+    assert!(
+        !format!("{applied:?}").contains("sk-test"),
+        "Debug never prints it"
+    );
+    // A file holding a key is readable by its owner only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.0.join("mlxtop/config.json");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    // A refusal from the engine shows with the confirmation, not instead
+    // of it.
+    {
+        use crate::runtime_diagnostics::ProbeIssue;
+        let runtime = &mut app.collector.current.runtime;
+        runtime.provider = Some("oMLX".into());
+        runtime.credentials_present = true;
+        runtime.record::<()>("/admin/api/login", Err(ProbeIssue::Http(401)));
+    }
+    let refused = render_app(&app, 120, 40);
+    assert!(
+        refused.contains("oMLX refused the key it was sent")
+            && refused.contains("saved and applied"),
+        "{refused}"
+    );
+    app.collector.current.runtime.probes.clear();
+    // Editing again starts empty: the stored key is replaced, not shown.
+    press(&mut app, &[KeyCode::Enter]);
+    assert_eq!(app.settings.editing.as_deref(), Some(""));
+    type_text(&mut app, "has space");
+    press(&mut app, &[KeyCode::Enter]);
+    assert!(matches!(app.settings.status, Some(Status::Error(_))));
+    assert_eq!(file(&dir)["api_key"], "sk-test-0123456789");
+    press(&mut app, &[KeyCode::Esc, KeyCode::Char('x')]);
+    assert!(file(&dir).get("api_key").is_none(), "x removes the key");
+}
+
+#[test]
+fn a_runtime_that_wants_a_key_opens_settings_once_to_ask_for_it() {
+    use crate::runtime_diagnostics::{KeyNeed, ProbeIssue};
+    let dir = TempDir::new("settings-key-prompt");
+    let (mut app, _commands) = settings_app(&dir);
+    press(&mut app, &[KeyCode::Char('1')]);
+    assert_eq!(app.tab, 0);
+    // Nothing asked for: no prompt.
+    app.prompt_for_key();
+    assert_eq!(app.tab, 0);
+    assert!(!app.key_prompted);
+    // oMLX answered, and its statistics want a key nobody gave.
+    {
+        let runtime = &mut app.collector.current.runtime;
+        runtime.provider = Some("oMLX".into());
+        runtime.endpoint = "http://127.0.0.1:8000".into();
+        runtime.record::<()>("/admin/api/login", Err(ProbeIssue::CredentialsMissing));
+        assert_eq!(runtime.key_need(), Some(KeyNeed::Missing));
+    }
+    // Not over something the user has open.
+    app.help = true;
+    app.prompt_for_key();
+    assert_eq!(app.tab, 0);
+    app.help = false;
+    app.prompt_for_key();
+    assert_eq!(app.tab, 3, "Settings opens");
+    assert_eq!(app.settings.field().key, "api_key");
+    assert_eq!(app.settings.editing.as_deref(), Some(""), "ready to type");
+    let screen = render_app(&app, 120, 40);
+    assert!(
+        screen.contains("oMLX at http://127.0.0.1:8000 asks for an API key"),
+        "{screen}"
+    );
+    // On a small terminal the request still leads the box.
+    let small = render_app(&app, 80, 24);
+    assert!(small.contains("asks for an API key"), "{small}");
+    // Typing and Enter saves it; the prompt is not repeated this session.
+    type_text(&mut app, "sk-test-key");
+    press(&mut app, &[KeyCode::Enter]);
+    assert_eq!(file(&dir)["api_key"], "sk-test-key");
+    press(&mut app, &[KeyCode::Char('1')]);
+    app.prompt_for_key();
+    assert_eq!(app.tab, 0, "asked once");
+
+    // A refused key asks too, and says so; Esc carries on without it.
+    let (mut app, _commands) = settings_app(&dir);
+    press(&mut app, &[KeyCode::Char('1')]);
+    {
+        let runtime = &mut app.collector.current.runtime;
+        runtime.provider = Some("llama.cpp".into());
+        runtime.endpoint = "http://127.0.0.1:8080".into();
+        runtime.credentials_present = true;
+        runtime.record::<()>("/metrics", Err(ProbeIssue::Http(401)));
+        assert_eq!(runtime.key_need(), Some(KeyNeed::Rejected));
+        // Without a key sent, the same answer means one is wanted.
+        runtime.credentials_present = false;
+        assert_eq!(runtime.key_need(), Some(KeyNeed::Missing));
+        runtime.credentials_present = true;
+    }
+    app.prompt_for_key();
+    assert_eq!(app.tab, 3);
+    let screen = render_app(&app, 120, 40);
+    assert!(screen.contains("refused the API key"), "{screen}");
+    press(&mut app, &[KeyCode::Esc]);
+    assert_eq!(app.settings.editing, None);
+    assert!(!app.quit_prompt, "Esc leaves the field, not the app");
+    // A runtime that is merely down asks for nothing.
+    let mut down = crate::runtime_diagnostics::RuntimeReport::default();
+    down.record::<()>("/health", Err(ProbeIssue::Transport));
+    assert_eq!(down.key_need(), None);
 }

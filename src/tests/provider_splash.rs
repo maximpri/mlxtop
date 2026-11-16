@@ -77,13 +77,15 @@ fn reads_model_requests_memory_and_cache_from_status() {
     let details = result.details.unwrap();
     for part in [
         "prefill 2000 / 8000 tokens (25%)",
-        "context capacity 131072 tokens",
         "DFlash draft acceptance 75%",
         "server TTFT p50 282 ms",
     ] {
         assert!(details.contains(part), "{details}");
     }
     assert!(!details.contains("thermal") && !details.contains("pressure"));
+    // The context Splash allows is a model fact, said once there.
+    assert!(!details.contains("context"), "{details}");
+    assert_eq!(result.model_facts.context_configured, Some(131_072));
     // The first capture has no rate yet.
     assert_eq!(result.generation_tps, None);
     assert_eq!(result.prefill_tps, None);
@@ -456,4 +458,417 @@ fn draft_acceptance_is_measured_between_polls_not_over_the_engines_life() {
         .observe(&plain, now + Duration::from_secs(4))
         .unwrap();
     assert_eq!(later.draft_acceptance, None);
+}
+
+#[test]
+fn an_absurd_status_age_from_splash_is_ignored_not_fatal() {
+    let mut history = SplashHistory::default();
+    let mut absurd = status(1000, 0, 0.0, json!([]));
+    absurd["transport"]["status_age_ms"] = json!(1e30);
+    assert!(history.observe(&absurd, Instant::now()).is_some());
+}
+
+/// Splash 1.5.0's `/status` on the owner's Mac Studio, where oMLX 0.7.3 runs it: redacted,
+/// its instance id replaced and its latency histograms left out.
+const OWNER_STATUS: &str = include_str!("fixtures/splash_status.json");
+/// That engine's counters every 2 s while six requests ran one after another, and the
+/// Splash log's Done line for each.
+const OWNER_COUNTERS: &str = include_str!("fixtures/splash_counters.json");
+
+fn owner_status() -> Value {
+    serde_json::from_str(OWNER_STATUS).unwrap()
+}
+
+/// The owner's status with one capture's counters.
+fn owner_capture(capture: &Value) -> Value {
+    let mut status = owner_status();
+    for field in [
+        "decode_output_tokens",
+        "drafted_tokens",
+        "accepted_draft_tokens",
+    ] {
+        status["metrics"][field] = capture[field].clone();
+    }
+    status["scheduler"]["decode_batches"] = capture["decode_batches"].clone();
+    status["scheduler"]["decode_batches_by_width"] = capture["by_width"].clone();
+    status
+}
+
+#[test]
+fn the_owners_status_gives_kv_room_suspensions_and_the_models_facts() {
+    let result = SplashHistory::default()
+        .observe(&owner_status(), Instant::now())
+        .unwrap();
+    assert_eq!(result.status.as_deref(), Some("idle"));
+    assert_eq!(
+        result.model.as_deref(),
+        Some("omlx/Qwen3.8-27B-oQ4e-mtp-e5133ef4")
+    );
+    // The plan's 4,736 KV pages of 32 tokens, none held by a running request: the 505
+    // holding cached prefixes are room.
+    assert_eq!(result.kv_free_bytes, Some(4_736 * 1_064_960));
+    assert_eq!(result.kv_free_tokens, Some(151_552));
+    assert_eq!(result.preemptions_total, Some(4));
+    assert_eq!(result.tokens_per_pass, None, "one capture has no interval");
+    let facts = result.model_facts;
+    assert_eq!(
+        (facts.kv_layers, facts.kv_heads, facts.head_dim),
+        (Some(16), Some(4), Some(256))
+    );
+    assert_eq!(facts.kv_dtype.as_deref(), Some("int8"));
+    // What Splash plans with is what the model's own files give: 33,280 bytes of int8 KV a
+    // token, and a 152.6 MiB state per request.
+    assert_eq!(facts.kv_bytes_per_token(), Some(33_280));
+    assert_eq!(facts.fixed_state_bytes, Some(160_038_912));
+    assert_eq!(
+        (facts.context_configured, facts.context_trained),
+        (Some(131_072), Some(262_144))
+    );
+    assert_eq!(facts.draft, Some(true));
+    // It names neither what a pass reads nor the draft's size as stored.
+    assert_eq!((facts.bytes_per_pass, facts.draft_bytes), (None, None));
+    let details = result.details.unwrap();
+    for part in [
+        "46 cancelled of 9512 requests",
+        "DFlash draft acceptance 65%",
+        "server TTFT p50 2705 ms · p95 28949 ms",
+    ] {
+        assert!(details.contains(part), "{details}");
+    }
+    // Splash 1.5 counts no decode gaps or first-token parts.
+    assert!(
+        !details.contains("paused") && !details.contains("first token"),
+        "{details}"
+    );
+}
+
+#[test]
+fn tokens_per_pass_from_the_owners_counters_match_the_splash_logs_tokens_per_cycle() {
+    let fixture: Value = serde_json::from_str(OWNER_COUNTERS).unwrap();
+    let captures = fixture["captures"].as_array().unwrap();
+    let logged: Vec<f64> = fixture["done"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|done| done["tok_per_cycle"].as_f64().unwrap())
+        .collect();
+    let passes = |capture: &Value| -> u64 {
+        capture["by_width"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(width, n)| width[1..].parse::<u64>().unwrap() * n.as_u64().unwrap())
+            .sum()
+    };
+    let completed = |capture: &Value| capture["completed"].as_u64().unwrap();
+    let start = Instant::now();
+    let at = |capture: &Value| start + Duration::from_millis(capture["ms"].as_u64().unwrap());
+    let first = completed(&captures[0]);
+    // Each poll's reading lies near the request that ran in it; a poll with fewer than eight
+    // passes gives none.
+    let mut history = SplashHistory::default();
+    let mut read = 0;
+    for pair in captures.windows(2) {
+        history.observe(&owner_capture(&pair[0]), at(&pair[0]));
+        let result = history
+            .observe(&owner_capture(&pair[1]), at(&pair[1]))
+            .unwrap();
+        let interval = passes(&pair[1]) - passes(&pair[0]);
+        let request = (completed(&pair[0]) - first) as usize;
+        match result.tokens_per_pass {
+            Some(tokens) => {
+                assert!(interval >= MIN_PASSES);
+                let logged = logged[request];
+                assert!(
+                    (tokens / logged - 1.0).abs() < 0.06,
+                    "request {request}: {tokens:.3} a pass against {logged} logged"
+                );
+                read += 1;
+            }
+            None => assert!(interval < MIN_PASSES, "{interval} passes unread"),
+        }
+    }
+    assert!(read >= 12, "{read} polls read");
+    // Over each whole request, from the capture before it to the one after it finished, the
+    // counters give the log's figure to its last digit.
+    for (request, logged) in logged.iter().enumerate() {
+        let index = |n: u64| {
+            captures
+                .iter()
+                .position(|capture| completed(capture) == first + n)
+                .unwrap()
+        };
+        let (before, after) = (
+            &captures[index(request as u64)],
+            &captures[index(request as u64 + 1)],
+        );
+        let tokens = Counters::read(&owner_capture(after), at(after))
+            .unwrap()
+            .tokens_per_pass(&Counters::read(&owner_capture(before), at(before)).unwrap());
+        if passes(after) - passes(before) < MIN_PASSES {
+            // The 29-token answer took four passes: too few to say.
+            assert_eq!(tokens, None);
+        } else {
+            let tokens = tokens.unwrap();
+            assert!(
+                (tokens - logged).abs() <= 0.05,
+                "request {request}: {tokens:.3} against {logged}"
+            );
+        }
+    }
+    // Over the engine's life: 1 + 5,611,796 accepted over 1,227,137 passes. The log's 9,466
+    // Done lines since that engine started give 6,824,523 tokens over 1,221,782 cycles, 5.586
+    // (a request's first token comes from its prefill, so the log's figure is a little higher).
+    let mut fresh = owner_status();
+    for field in [
+        "decode_output_tokens",
+        "drafted_tokens",
+        "accepted_draft_tokens",
+    ] {
+        fresh["metrics"][field] = json!(0);
+    }
+    fresh["scheduler"]["decode_batches_by_width"] = json!({"b1": 0, "b2": 0, "b3": 0, "b4": 0});
+    let life = Counters::read(&owner_status(), start)
+        .unwrap()
+        .tokens_per_pass(&Counters::read(&fresh, start).unwrap())
+        .unwrap();
+    assert!((life / 5.586 - 1.0).abs() < 0.01, "{life}");
+}
+
+#[test]
+fn tokens_per_pass_needs_a_draft_enough_passes_and_widths_it_knows() {
+    let start = Instant::now();
+    let at = |seconds| start + Duration::from_secs(seconds);
+    let with = |decoded: u64, drafted: u64, accepted: u64, widths: Value| {
+        let mut value = status(
+            decoded,
+            6000,
+            3000.0,
+            json!([request(1, "decode", 100, 100, 9)]),
+        );
+        value["metrics"]["drafted_tokens"] = json!(drafted);
+        value["metrics"]["accepted_draft_tokens"] = json!(accepted);
+        value["scheduler"] = json!({"decode_batches_by_width": widths});
+        value
+    };
+    let mut history = SplashHistory::default();
+    history.observe(&with(1000, 400, 300, json!({"b1": 100, "b2": 10})), at(0));
+    // Eight batches alone and one beside another request: ten passes, 60 of 70 drafted
+    // tokens accepted.
+    let result = history
+        .observe(&with(1070, 470, 360, json!({"b1": 108, "b2": 11})), at(1))
+        .unwrap();
+    assert_eq!(result.tokens_per_pass, Some(7.0));
+    assert_eq!(result.draft_acceptance, Some(60.0 / 70.0));
+    // A busy loop answering with the capture it gave: the same reading.
+    let mut stale = with(1070, 470, 360, json!({"b1": 108, "b2": 11}));
+    stale["transport"]["status_age_ms"] = json!(1000.0);
+    let result = history.observe(&stale, at(2)).unwrap();
+    assert_eq!(result.tokens_per_pass, Some(7.0));
+    assert_eq!(result.draft_acceptance, Some(60.0 / 70.0));
+    // Four passes say too little.
+    let result = history
+        .observe(&with(1100, 498, 386, json!({"b1": 112, "b2": 11})), at(3))
+        .unwrap();
+    assert_eq!(result.tokens_per_pass, None);
+    // A width it does not know leaves the passes uncounted.
+    history.observe(&with(1100, 498, 386, json!({"b1": 112, "wide": 1})), at(4));
+    let result = history
+        .observe(&with(1200, 598, 486, json!({"b1": 125, "wide": 1})), at(5))
+        .unwrap();
+    assert_eq!(result.tokens_per_pass, None);
+    // Without a draft there are no draft counters.
+    let mut plain = with(1300, 0, 0, json!({"b1": 125}));
+    plain["metrics"]
+        .as_object_mut()
+        .unwrap()
+        .retain(|key, _| !key.contains("draft"));
+    history.observe(&plain, at(6));
+    let mut later = plain.clone();
+    later["metrics"]["decode_output_tokens"] = json!(1340);
+    later["scheduler"] = json!({"decode_batches_by_width": {"b1": 165}});
+    assert_eq!(
+        history.observe(&later, at(7)).unwrap().tokens_per_pass,
+        None
+    );
+    // A restarted engine's counters are not compared with the old one's.
+    history.observe(&with(2000, 900, 700, json!({"b1": 200})), at(8));
+    let mut restarted = with(80, 70, 60, json!({"b1": 10}));
+    restarted["transport"]["restarts"] = json!(1);
+    assert_eq!(
+        history.observe(&restarted, at(9)).unwrap().tokens_per_pass,
+        None
+    );
+}
+
+#[test]
+fn kv_room_is_the_plans_pages_less_those_running_requests_hold() {
+    let room = |edit: &dyn Fn(&mut Value)| {
+        let mut status = owner_status();
+        edit(&mut status);
+        let result = SplashHistory::default()
+            .observe(&status, Instant::now())
+            .unwrap();
+        result.kv_free_bytes.zip(result.kv_free_tokens)
+    };
+    // A 63,680-token context holds 1,990 pages.
+    assert_eq!(
+        room(&|status| status["kv"]["pages_active"] = json!(1_990)),
+        Some((2_746 * 1_064_960, 87_872))
+    );
+    // Sliding-window and spilling targets count their pages otherwise, a plan that did not
+    // hold says nothing, and without the pages in use the room is unknown.
+    let budget = |field: &'static str, value: Value| {
+        move |status: &mut Value| status["memory_plan"]["budget"][field] = value.clone()
+    };
+    assert_eq!(
+        room(&budget("kv_window", json!({"slim_page_bytes": 4096}))),
+        None
+    );
+    assert_eq!(room(&budget("kv_spill", json!({"quota_bytes": 1}))), None);
+    assert_eq!(
+        room(&|status| status["memory_plan"]["valid"] = json!(false)),
+        None
+    );
+    assert_eq!(
+        room(&|status| status["kv"] = json!({"pages_allocated": 512})),
+        None
+    );
+}
+
+/// The owner's status with Splash 1.6's attribution, shaped as its api.md documents it (the
+/// owner's Splash 1.5.0 has none): decode gaps by first cause, first-token parts in the shape
+/// of `decode_gap_ms`, Metal pipelines and KV on the SSD.
+fn holdups(
+    prefill: (u64, f64),
+    memory: (u64, f64),
+    first: (u64, [f64; 5]),
+    pipelines: u64,
+    spill: (u64, u64, f64),
+) -> Value {
+    let mut status = owner_status();
+    status["metrics"]["decode_gap_causes"] = json!({
+        "prefill_unit": {"gaps": prefill.0, "ms": prefill.1, "prefill_ms": prefill.1 / 2.0},
+        "claim_wait": {"gaps": memory.0, "ms": memory.1},
+        "ssd_read": {"gaps": 0, "ms": 0.0},
+        "pool_release": {"gaps": 0, "ms": 0.0},
+        "replan": {"gaps": 0, "ms": 0.0},
+        "other": {"gaps": 0, "ms": 0.0},
+        "a_cause_not_documented": {"gaps": prefill.0, "ms": prefill.1}
+    });
+    let part = |total: f64| json!({"p50": 1.0, "p95": 2.0, "p99": 3.0, "max": 4.0, "total": total, "samples": first.0});
+    let [own, claim, decode, other, rest] = first.1;
+    status["metrics"]["ttft_parts_ms"] = json!({
+        "own_prefill": part(own), "claim_wait": part(claim), "decode": part(decode),
+        "other_prefill": part(other), "rest": part(rest),
+        "a_part_not_documented": part(own)
+    });
+    status["metal"]["pipelines_created_while_serving"] = json!(pipelines);
+    status["kv_spill"] = json!({
+        "releases": spill.0, "released_pages": spill.0 * 4,
+        "history_stream": {"bytes": spill.1, "read_ms": {"total": spill.2, "p50": 1.0}}
+    });
+    status["memory_plan"]["budget"]["kv_spill"] = json!({"quota_bytes": 1});
+    status
+}
+
+#[test]
+fn splash_1_6_says_what_held_decoding_and_first_tokens_up_between_polls() {
+    let start = Instant::now();
+    let mut history = SplashHistory::default();
+    let gib = 1_u64 << 30;
+    history.observe(
+        &holdups(
+            (10, 900.0),
+            (2, 100.0),
+            (100, [1e5, 0.0, 2e4, 3e5, 1e4]),
+            5,
+            (1, gib, 1000.0),
+        ),
+        start,
+    );
+    let busy = || {
+        holdups(
+            (13, 1320.0),
+            (3, 180.0),
+            (101, [101_200.0, 0.0, 20_010.0, 303_400.0, 10_500.0]),
+            7,
+            (3, gib + (600 << 20), 1500.0),
+        )
+    };
+    let mut later = busy();
+    later["memory_governor"]["claims"] = json!({"waiting": 1, "bytes": 2 * gib, "oldest_ms": 3200});
+    let result = history
+        .observe(&later, start + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!((result.kv_free_bytes, result.kv_free_tokens), (None, None));
+    let details = result.details.unwrap();
+    let parts: Vec<&str> = details.split(" · ").collect();
+    // Problems lead: a request waiting to grow, kernels compiled while serving.
+    assert_eq!(
+        &parts[..3],
+        [
+            "46 cancelled of 9512 requests",
+            "1 waiting 3s for 2.0 GiB more memory",
+            "2 Metal pipelines compiled while serving",
+        ],
+        "{details}"
+    );
+    for part in [
+        "decode paused 3× for prefill (420 ms), 1× for memory (80 ms)",
+        // The first token's 10 ms behind decoding is under a twentieth of its 5.1 s.
+        "first token 5.1 s: 3.4 s behind another prefill, 1.2 s own prefill, 500 ms host and queue",
+        "KV released to the SSD 2× for memory",
+        "KV read from the SSD at 1.2 GiB/s",
+    ] {
+        assert!(details.contains(part), "{part:?} in {details}");
+    }
+    assert!(!details.contains("not_documented"), "{details}");
+    // Nothing held anything up since: nothing to say.
+    let quiet = history
+        .observe(&busy(), start + Duration::from_secs(2))
+        .unwrap()
+        .details
+        .unwrap();
+    for word in ["more memory", "pipeline", "paused", "first token", "KV "] {
+        assert!(!quiet.contains(word), "{word:?} in {quiet}");
+    }
+    // Several first tokens: what held them on average.
+    let mut two = busy();
+    for (part, total) in [("own_prefill", 103_200.0), ("other_prefill", 303_400.0)] {
+        two["metrics"]["ttft_parts_ms"][part]["total"] = json!(total);
+    }
+    for part in [
+        "own_prefill",
+        "claim_wait",
+        "decode",
+        "other_prefill",
+        "rest",
+    ] {
+        two["metrics"]["ttft_parts_ms"][part]["samples"] = json!(103);
+    }
+    let details = history
+        .observe(&two, start + Duration::from_secs(3))
+        .unwrap()
+        .details
+        .unwrap();
+    assert!(
+        details.contains("2 first tokens, 1.0 s each: 1.0 s own prefill"),
+        "{details}"
+    );
+    // A first token that took no time has nothing to say.
+    let mut instant = two.clone();
+    for part in instant["metrics"]["ttft_parts_ms"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        part["samples"] = json!(104);
+    }
+    let details = history
+        .observe(&instant, start + Duration::from_secs(4))
+        .unwrap()
+        .details
+        .unwrap();
+    assert!(!details.contains("first token"), "{details}");
 }

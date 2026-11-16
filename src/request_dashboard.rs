@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 use crate::config::Thresholds;
-use crate::domain::{ChartMetric, Sample, TelemetrySource};
+use crate::domain::{ChartMetric, Sample};
 
 /// Prompts smaller than this keep a neutral CACHED color.
 const CACHE_GRADED_PROMPT: u64 = 4096;
 use crate::chart_render::meter_cells;
 use crate::formatting::{
-    compact_label, compact_tokens, progress_percent, telemetry_age, time_left_label,
+    compact_label, compact_tokens, duration_label, progress_percent, telemetry_age, time_left_label,
 };
 use crate::request_history::{same_request, Entry, History};
 use crate::theme::{BLUE, CYAN, DIM, EDGE, GREEN, MUTED, PANEL};
@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 fn exact(n: u64) -> String {
     let digits = n.to_string();
     let mut output = String::new();
@@ -127,6 +127,27 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
 /// Plot rows the bars keep before a row of generated tokens goes under them.
 const OUTPUT_ROW_MIN_PLOT: u16 = 4;
 
+/// Plot rows the bars keep before a row of generation speeds does: fewer,
+/// so the Overview's panel shows each prompt's speed without being expanded.
+const SPEED_ROW_MIN_PLOT: u16 = 2;
+
+/// The speed a bar's request generated at, so prompts can be compared by
+/// what they cost: the fullest wording that leaves a gap to the next bar.
+fn speed_label(entry: &Entry, width: u16) -> String {
+    let Some(speed) = entry.output_speed.filter(|speed| speed.tps > 0.0) else {
+        return String::new();
+    };
+    let room = usize::from(width.saturating_sub(1));
+    [
+        format!("{:.1} tok/s", speed.tps),
+        format!("{:.1}/s", speed.tps),
+        format!("{:.0}/s", speed.tps),
+    ]
+    .into_iter()
+    .find(|label| label.chars().count() <= room)
+    .unwrap_or_default()
+}
+
 /// The tokens a bar's request has generated, so the size above needs no subtraction.
 fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
     let Some(output) = usage.output.filter(|output| *output > 0) else {
@@ -140,17 +161,11 @@ fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
     }
 }
 
-fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
-    sample.llm_source == TelemetrySource::Live
-        && sample.llm_status != "stale"
+fn is_live(entry: &Entry, sample: &Sample) -> bool {
+    // Live means listed in the current, fresh sample: decided when the
+    // sample was taken, not against the clock while it is drawn.
+    sample.llm_fresh()
         && !entry.usage.completed
-        && now
-            .duration_since(entry.last_seen)
-            .is_ok_and(|age| age <= Duration::from_secs(5))
-        && sample.llm_observed_at.is_some_and(|at| {
-            now.duration_since(at)
-                .is_ok_and(|age| age <= Duration::from_secs(5))
-        })
         && sample
             .llm_requests
             .iter()
@@ -276,7 +291,61 @@ fn output_summary(entry: &Entry, live: bool, sample: &Sample, width: u16) -> Lin
             width,
         );
     }
+    append_detail(
+        &mut line,
+        crate::omlx::draft_note(sample, &entry.usage, live),
+        MUTED,
+        width,
+    );
+    if let Some(timing) = reported_timing(sample, &entry.usage) {
+        if let Some(ms) = timing.load_ms.filter(|ms| *ms >= SHOWN_LOAD_MS) {
+            append_detail(
+                &mut line,
+                format!("MODEL LOAD {}", load_label(ms)),
+                CYAN,
+                width,
+            );
+        }
+        let usage = &entry.usage;
+        let computed = usage.prompt.saturating_sub(usage.cached.unwrap_or(0));
+        if let Some(speed) = timing
+            .prefill_tps
+            .filter(|_| computed >= TIMED_PROMPT_TOKENS)
+        {
+            append_detail(&mut line, format!("PREFILL {speed:.0} tok/s"), CYAN, width);
+        }
+    }
     line
+}
+
+/// A prompt computed in less than one batch of this many tokens (llama.cpp's
+/// and Ollama's default) is timed mostly by fixed costs: its speed says
+/// nothing about prefill.
+const TIMED_PROMPT_TOKENS: u64 = 512;
+
+/// A model load under a second is a runtime handing over a model it already
+/// holds: Ollama reports one with every request.
+const SHOWN_LOAD_MS: u64 = 1000;
+
+/// What the runtime reported of a finished request's timing, if anything.
+fn reported_timing<'a>(
+    sample: &'a Sample,
+    usage: &domain::RequestUsage,
+) -> Option<&'a domain::RequestTiming> {
+    sample
+        .llm_request_timings
+        .iter()
+        .rev()
+        .find(|timing| timing.belongs_to(usage))
+}
+
+fn load_label(ms: u64) -> String {
+    let seconds = ms as f64 / 1000.0;
+    if seconds < 10.0 {
+        format!("{seconds:.1}s")
+    } else {
+        duration_label(seconds)
+    }
 }
 
 fn draw_bar(
@@ -371,8 +440,7 @@ pub(super) fn draw(
             .unwrap_or(0),
         1,
     );
-    let now = SystemTime::now();
-    let live = selected.is_some_and(|i| is_live(&history.entries[i], sample, now));
+    let live = selected.is_some_and(|i| is_live(&history.entries[i], sample));
     let cached = selected.and_then(|i| {
         let usage = &history.entries[i].usage;
         usage.cached.filter(|n| *n <= usage.prompt)
@@ -391,7 +459,10 @@ pub(super) fn draw(
             Style::default().fg(MUTED),
         ),
     ]);
-    title.spans.push(Span::raw(" "));
+    // The range's trailing space; an empty title already ends in one.
+    if selected.is_some() {
+        title.spans.push(Span::raw(" "));
+    }
     let mut block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -413,7 +484,7 @@ pub(super) fn draw(
         } else if sample.llm_active_requests.is_some_and(|n| n > 0) {
             "waiting for the prompt size"
         } else {
-            "no requests yet"
+            "No requests yet"
         };
         frame.render_widget(
             Paragraph::new(line)
@@ -579,12 +650,14 @@ pub(super) fn draw(
         2
     };
     let (start, visible, slot_width) = window.unwrap();
-    // The prompt size sets the bar's height; the tokens generated so far go
-    // under it when the plot keeps enough rows without it. That depends on the
-    // panel's height alone, so the bars never shrink when output first
-    // arrives. Size labels outrank it.
-    let show_outputs = inner.height >= metadata_height + 2 + OUTPUT_ROW_MIN_PLOT;
-    let footer = 1 + u16::from(show_outputs);
+    // The prompt size sets the bar's height and is named under it. Under
+    // that go the speed each request generated at, then the tokens it
+    // generated, each when the plot keeps enough rows without it. That
+    // depends on the panel's height alone, so the bars never shrink when
+    // output first arrives. Size labels outrank both, speed outranks counts.
+    let show_speeds = inner.height >= metadata_height + 2 + SPEED_ROW_MIN_PLOT;
+    let show_outputs = inner.height >= metadata_height + 3 + OUTPUT_ROW_MIN_PLOT;
+    let footer = 1 + u16::from(show_speeds) + u16::from(show_outputs);
     if inner.height < metadata_height + footer + 1 {
         return;
     }
@@ -599,11 +672,7 @@ pub(super) fn draw(
     let first_x = plot.right() - visible as u16 * slot_width;
     for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
         let x = first_x + offset as u16 * slot_width;
-        let color = if is_live(old, sample, now) {
-            CYAN
-        } else {
-            BLUE
-        };
+        let color = if is_live(old, sample) { CYAN } else { BLUE };
         let bar_width = slot_width
             .saturating_sub(2)
             .min(12_u16.saturating_mul(zoom.max(1)))
@@ -633,12 +702,24 @@ pub(super) fn draw(
             }),
             Rect::new(x, plot.bottom(), slot_width, 1),
         );
+        if show_speeds {
+            frame.render_widget(
+                Paragraph::new(speed_label(old, slot_width))
+                    .alignment(Alignment::Center)
+                    .style(if selected {
+                        Style::default().fg(color)
+                    } else {
+                        Style::default().fg(MUTED)
+                    }),
+                Rect::new(x, plot.bottom() + 1, slot_width, 1),
+            );
+        }
         if show_outputs {
             frame.render_widget(
                 Paragraph::new(output_label(&old.usage, slot_width))
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(MUTED)),
-                Rect::new(x, plot.bottom() + 1, slot_width, 1),
+                Rect::new(x, plot.bottom() + 2, slot_width, 1),
             );
         }
     }

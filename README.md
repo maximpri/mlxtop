@@ -35,13 +35,16 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no usage tracking. It never
   sends prompts or touches your models or runtime settings.
 
-**What's new in 3.3.0:** mlxtop finds slow answers and slow prompt reads
-by judging speed against earlier work of the same size, names what else was
-happening (paging, memory, heat, disk, the queue, draft acceptance) and says
-what to change. Memory shows headroom against the GPU limit, the KV cache
-its hit rate and the prefill time it saved, and `u` sums up a session: what
-each cause cost and where requests' time went. `--record` and `mlxtop
-replay` check the rules against real sessions.
+**What's new in 3.4.0:** mlxtop knows what fast means for your machine. It
+reads what the model reads per forward pass and the chip's published memory
+bandwidth, estimates how close decode runs to that limit (per verify pass with
+a draft model), and judges usual speed at the same context depth and across
+sessions, so an upgrade that slows a model gets named. It says how much more
+context fits, names heat on Apple Silicon, and tells what first tokens lose to
+cache misses, model loads and overlapping requests. `--once --json`, `mlxtop
+stream` and `mlxtop serve` (Prometheus, loopback only) bring it to scripts and
+dashboards. 3.4.0 also carries every fix from the review of 3.3.0: if you run
+3.3.0, update with the install script or Homebrew, not `mlxtop update`.
 [Release notes →](CHANGELOG.md)
 
 ## Install
@@ -65,7 +68,8 @@ curl -fsSL https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/instal
 irm https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/install.ps1 | iex
 ```
 
-Both scripts verify the download's SHA-256 checksum. Linux builds are static
+Both scripts verify the download's SHA-256 checksum, which detects a damaged
+download; it comes from the same release, so it is not a signature. Linux builds are static
 binaries with no runtime dependencies. You can also download a macOS
 installer (`.dmg`, unsigned) or an archive from the
 [latest release](https://github.com/maximpri/mlxtop/releases/latest).
@@ -91,11 +95,15 @@ cargo install --path . --locked
 ```sh
 mlxtop            # open the dashboard
 mlxtop --once     # print a text report and exit (works over SSH)
+mlxtop stream     # one line of JSON per sample, for scripts (--once --json for one)
+mlxtop serve      # /metrics for Prometheus at 127.0.0.1:10063, loopback only
 mlxtop doctor     # check the runtime connection and which readings are available
 ```
 
 Memory and GPU readings appear straight away, even with no model loaded. Start
-your runtime, send it a prompt, and watch Overview while it answers.
+your runtime, send it a prompt, and watch Overview while it answers. The
+dashboard needs a terminal of at least 72×24; smaller, it shows the verdict
+and a note.
 
 | View | What it shows |
 | --- | --- |
@@ -124,13 +132,14 @@ where each reading comes from.
 | [oMLX](docs/USER_GUIDE.md#omlx-telemetry) | ✓ | Models, prompt and generation speed, requests with prefill progress, cache activity; follows oMLX serving through Splash |
 | [Splash](https://github.com/incoai/splash) | ✓ | Running and waiting requests, prefill progress, decode and prefill speed, prefix-cache reuse, Metal memory, DFlash acceptance, TTFT |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | ✓ | Generation and prefill rates, running requests with their own speeds, prefix-cache reuse, MLX memory (start it with `--metrics`; sushi's `sushi:` gauges are read too) |
-| vLLM, SGLang | ✓ | Active and waiting queues, server token rates, KV-cache occupancy, mean first-token time |
+| vLLM | ✓ | Active and waiting queues, server token rates, KV-cache occupancy and room left, preemptions, draft tokens per verify pass, queue wait and time between tokens, mean first-token time |
+| SGLang | ✓ | Active and waiting queues, live decode rate, KV-cache occupancy and room left, retractions, draft tokens per verify pass, where the scheduler's time goes, prefix-cache reuse |
 | [Strata](https://github.com/niko1221/strata) | ✓ | Live engine decode and prefill rates, active and waiting queues, KV-cache occupancy, prefix-cache reuse, mean first-token time, engine GPU memory |
 | llama.cpp | ✓ | Active slots, output counts and live generation speed; average rates and queues when `/metrics` is enabled |
 | KoboldCpp | last request | Input and output counts and rates |
-| Ollama | after completion | Loaded models, VRAM, context size, CPU/GPU placement |
-| LM Studio | after completion | Loaded instances and context size |
-| TensorFold | after completion | Model catalogue, active/queued requests, sampled completion throughput, prefix-cache reuse and device memory |
+| Ollama | after completion | Loaded models, VRAM, CPU/GPU placement, the runner, quantization, parameters and context size |
+| LM Studio | after completion | Loaded instances, quantization, experts per token, context size and parallel requests |
+| TensorFold | ✓ | Model catalogue, active/queued requests, live decode rate, draft tokens per verify pass, preemptions and refused requests, prefix-cache reuse and device memory |
 | MLX-LM, LocalAI, Jan, GPT4All | after completion | Process detection and model catalogue |
 
 "After completion" means the speed of each finished request, recorded by the

@@ -180,6 +180,7 @@ fn command_line_options_override_config_and_validate_ranges() {
         interval,
         history,
         once,
+        json: false,
         record: None,
     };
     assert_eq!(parse_args(&[], &config).unwrap(), run(5, 600, false));
@@ -190,6 +191,7 @@ fn command_line_options_override_config_and_validate_ranges() {
             interval: 5,
             history: 600,
             once: false,
+            json: false,
             record: Some("/tmp/s.jsonl".into()),
         }
     );
@@ -197,8 +199,27 @@ fn command_line_options_override_config_and_validate_ranges() {
     assert_eq!(
         parse_args(&args(&["replay", "s.jsonl"]), &config).unwrap(),
         CliAction::Replay {
-            path: "s.jsonl".into()
+            path: "s.jsonl".into(),
+            baselines: None,
         }
+    );
+    // A replay can judge against usual speeds kept across sessions.
+    assert_eq!(
+        parse_args(
+            &args(&["replay", "s.jsonl", "--baselines", "kept.json"]),
+            &config
+        )
+        .unwrap(),
+        CliAction::Replay {
+            path: "s.jsonl".into(),
+            baselines: Some("kept.json".into()),
+        }
+    );
+    assert_eq!(
+        parse_args(&args(&["replay", "s.jsonl", "--baselines"]), &config)
+            .unwrap_err()
+            .to_string(),
+        "--baselines needs the file usual speeds are kept in"
     );
     assert!(parse_args(&args(&["replay"]), &config).is_err());
     assert!(parse_args(&args(&["replay", "a", "--x"]), &config).is_err());
@@ -262,6 +283,106 @@ fn command_line_options_override_config_and_validate_ranges() {
     }
     assert!(parse_args(&args(&["fast"]), &Config::default()).is_err());
     assert!(help_text(Platform::MacOs).contains("~/Library/Logs/mlxtop/mlxtop.log"));
+}
+
+#[test]
+fn json_and_the_stream_sample_at_the_dashboards_interval_and_check_the_schema() {
+    let config = Config {
+        interval: Some(5),
+        history: Some(600),
+        ..Config::default()
+    };
+    // --json is the static report as JSON: it implies --once.
+    for input in [
+        &["--json"][..],
+        &["--once", "--json"],
+        &["-1", "--json", "--schema", "1"],
+    ] {
+        assert_eq!(
+            parse_args(&args(input), &config).unwrap(),
+            CliAction::Run {
+                interval: 5,
+                history: 600,
+                once: true,
+                json: true,
+                record: None,
+            },
+            "{input:?}"
+        );
+    }
+    // The stream samples at the dashboard's interval: the config's, unless
+    // one is given.
+    let stream = |interval, record: Option<&str>| CliAction::Stream {
+        interval,
+        history: 600,
+        record: record.map(Into::into),
+    };
+    assert_eq!(
+        parse_args(&args(&["stream"]), &config).unwrap(),
+        stream(5, None)
+    );
+    assert_eq!(
+        parse_args(
+            &args(&["stream", "-i", "2", "--schema", "1", "--json"]),
+            &config
+        )
+        .unwrap(),
+        stream(2, None)
+    );
+    assert_eq!(
+        parse_args(&args(&["stream", "--record", "s.jsonl"]), &config).unwrap(),
+        stream(5, Some("s.jsonl"))
+    );
+    assert!(matches!(
+        parse_args(&args(&["stream", "--help"]), &config).unwrap(),
+        CliAction::Print(_)
+    ));
+    for (input, error) in [
+        (
+            &["stream", "--once"][..],
+            "stream cannot be combined with --once",
+        ),
+        (
+            &["stream", "-i", "0"][..],
+            "interval must be between 1 and 60 seconds",
+        ),
+        (
+            &["stream", "--schema", "2"][..],
+            "unsupported JSON schema 2: this mlxtop writes schema 1",
+        ),
+        (
+            &["--json", "--schema", "7"][..],
+            "unsupported JSON schema 7: this mlxtop writes schema 1",
+        ),
+        (
+            &["--schema", "1"][..],
+            "--schema goes with --json or stream",
+        ),
+        (
+            &["--once", "--schema", "x"][..],
+            "schema must be a whole number (got \"x\")",
+        ),
+        (&["stream", "--schema"][..], "missing schema"),
+        (
+            &["doctor", "--json"][..],
+            "doctor cannot be combined with --json",
+        ),
+        (&["--once", "stream"][..], "unknown option: stream"),
+    ] {
+        assert_eq!(
+            parse_args(&args(input), &config).unwrap_err().to_string(),
+            error,
+            "{input:?}"
+        );
+    }
+    let help = help_text(Platform::MacOs);
+    for words in [
+        "mlxtop stream [--interval N] [--schema 1]",
+        "--json            static report as one line of JSON (schema 1, experimental)",
+        "--schema N",
+    ] {
+        assert!(help.contains(words), "help lacks {words}");
+    }
 }
 
 // --- static report ----------------------------------------------------------
@@ -392,7 +513,8 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     assert!(text.contains("SIGNAL       LLM READY · HEALTHY"));
     assert!(text.contains("MEMORY       16.0 GiB resident / 32.0 GiB total"));
     assert!(text.contains("PAGING       1.0 GiB / 4.0 GiB · 25% used · in 2.0 KiB/s · out 0 B/s"));
-    assert!(text.contains("METAL        Apple M3 · 10 cores · GPU 45% · renderer 40%"));
+    // The chip's peak bandwidth follows its cores.
+    assert!(text.contains("METAL        Apple M3 · 10 cores · 100 GB/s · GPU 45% · renderer 40%"));
     assert!(text.contains("LLM          oMLX · ready"));
     assert!(text.contains("PROVIDER     remote API · context capacity 8192 tokens"));
     assert!(text.contains("active 1"));
@@ -443,6 +565,8 @@ fn static_report_marks_missing_swap_and_unknown_hardware() {
     let empty = report(&Sample::default(), Platform::MacOs);
     assert!(empty.contains("PAGING       —"));
     assert!(empty.contains("METAL        unavailable · — cores · GPU — "));
+    // An unknown chip has no bandwidth to show, not a zero.
+    assert!(!empty.contains("GB/s"));
     assert!(empty.contains("MEMORY       — resident"));
     assert!(empty.contains("MLX          version — · active —"));
     assert!(!empty.contains("SLOWDOWN  "));
@@ -493,7 +617,7 @@ fn once_mode_samples_twice_and_reports_measured_rates() {
         None,
     );
     let mut out = Vec::new();
-    run_once(&mut collector, Duration::ZERO, &mut out).unwrap();
+    run_once(&mut collector, Duration::ZERO, false, &mut out).unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(text.starts_with("mlxtop · static report (0s sample)"));
     assert!(text.contains("PRESSURE     "));
@@ -601,6 +725,15 @@ fn help_overlay_swallows_keys_until_dismissed() {
     assert!(app.quit);
 }
 
+#[test]
+fn ctrl_c_quits_while_help_is_open() {
+    let mut app = test_app(0);
+    press(&mut app, &[KeyCode::Char('?')]);
+    assert!(app.help);
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.quit);
+}
+
 fn process(pid: u32, name: &str, rss: u64, cpu: f64) -> LlmProcess {
     LlmProcess {
         pid,
@@ -612,6 +745,7 @@ fn process(pid: u32, name: &str, rss: u64, cpu: f64) -> LlmProcess {
         state: "S".into(),
         pageins: None,
         pagein_rate: None,
+        footprint: None,
     }
 }
 
@@ -824,7 +958,12 @@ fn global_keys_pause_resize_interval_switch_tabs_and_reset() {
         summary: "swap".into(),
         time: "now".into(),
     });
+    // r asks first; nothing is cleared until y answers it.
     press(&mut app, &[KeyCode::Char('r')]);
+    assert!(app.reset_prompt && app.alert.is_some());
+    assert_eq!(app.journal_filter, JournalFilter::Gpu);
+    press(&mut app, &[KeyCode::Char('y')]);
+    assert!(!app.reset_prompt);
     assert!(app.alert.is_none());
     assert_eq!(app.journal_filter, JournalFilter::All);
     assert!(matches!(
@@ -1181,18 +1320,7 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ),
         ("MEMORY BOTTLENECK", "CRITICAL", Some(10))
     );
-    assert_eq!(critical.guidance_badge, "ACT NOW");
-    assert!(critical
-        .guidance_action
-        .starts_with("Pause or quit the largest app"));
     assert!(signal_summary(&critical).starts_with("native pressure critical"));
-    let critical_llm = classified(Sample {
-        llm_count: 1,
-        ..measured("RED")
-    });
-    assert!(critical_llm
-        .guidance_action
-        .starts_with("Stop unused models/requests"));
 
     let thrash = classified(Sample {
         swap_in: 32 * MIB,
@@ -1200,9 +1328,6 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ..measured("GREEN")
     });
     assert_eq!(thrash.impact, "SWAP THRASHING");
-    assert!(thrash
-        .guidance_cause
-        .starts_with("Swap thrash — 32.0 MiB/s in"));
     assert_eq!(signal_summary(&thrash), "in 32.0 MiB/s / out 32.0 MiB/s");
 
     let heavy = classified(Sample {
@@ -1210,15 +1335,7 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ..measured("GREEN")
     });
     assert_eq!(heavy.impact, "HEAVY PAGING");
-    assert!(heavy.guidance_cause.starts_with("RAM overflow"));
-    assert!(heavy.guidance_action.contains("Pause or quit Xcode"));
     assert!(signal_summary(&heavy).starts_with("swap 40.0 MiB/s / growth"));
-    let heavy_llm = classified(Sample {
-        swap_out: 40 * MIB,
-        llm_count: 1,
-        ..measured("GREEN")
-    });
-    assert!(heavy_llm.guidance_action.starts_with("Stop unused models"));
 
     let recovery = classified(Sample {
         swap_in: 40 * MIB,
@@ -1231,28 +1348,49 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
 
     let stress = classified(measured("YELLOW"));
     assert_eq!(stress.impact, "MEMORY STRESS");
-    assert_eq!(stress.guidance_badge, "REDUCE");
-    assert!(stress.guidance_action.contains("start with Xcode"));
-    let stress_llm = classified(Sample {
-        llm_count: 1,
-        ..measured("YELLOW")
-    });
-    assert!(stress_llm
-        .guidance_action
-        .starts_with("Reduce model/context/cache"));
 
-    for thermal in ["limited 70%", "warning reported"] {
+    // macOS holding the machine back for heat: a pressure level from Heavy
+    // up, or (Intel) a CPU speed limit.
+    for thermal in [
+        ThermalState {
+            level: Some(ThermalLevel::Heavy),
+            cpu_speed_limit: None,
+        },
+        ThermalState {
+            level: Some(ThermalLevel::Nominal),
+            cpu_speed_limit: Some(70),
+        },
+    ] {
         let hot = classified(Sample {
-            thermal: thermal.into(),
+            thermal: thermal.label(),
+            thermal_state: thermal,
             ..measured("GREEN")
         });
-        assert_eq!(hot.impact, "THERMAL LIMIT");
-        assert_eq!(hot.guidance_badge, "COOL");
+        assert_eq!(hot.impact, "THERMAL LIMIT", "{thermal:?}");
+    }
+    // Nominal, Moderate ("slightly elevated"), no limit, or nothing read:
+    // not a limit on its own, and words alone are not a reading.
+    for thermal in [
+        ThermalState {
+            level: Some(ThermalLevel::Nominal),
+            cpu_speed_limit: Some(100),
+        },
+        ThermalState {
+            level: Some(ThermalLevel::Moderate),
+            cpu_speed_limit: None,
+        },
+        ThermalState::default(),
+    ] {
+        let cool = classified(Sample {
+            thermal: "limited 70%".into(),
+            thermal_state: thermal,
+            ..measured("GREEN")
+        });
+        assert_eq!(cool.impact, "IDLE", "{thermal:?}");
     }
 
     let idle = classified(measured("GREEN"));
     assert_eq!((idle.impact.as_str(), idle.health), ("IDLE", Some(100)));
-    assert_eq!(idle.guidance_badge, "OK");
     assert_eq!(signal_summary(&idle), "none");
 
     let limited = classified(Sample {
@@ -1260,7 +1398,6 @@ fn classification_ranks_memory_paging_and_thermal_conditions() {
         ..measured("GREEN")
     });
     assert_eq!(limited.impact, "DATA LIMITED");
-    assert_eq!(limited.guidance_badge, "CHECK");
 }
 
 #[test]
@@ -1278,7 +1415,7 @@ fn gpu_and_llm_summaries_prefer_correlation_and_rates() {
         llm_count: 2,
         ..Sample::default()
     };
-    assert!(signal_summary(&ready).starts_with("2 process(es) · "));
+    assert!(signal_summary(&ready).starts_with("2 processes · "));
 }
 
 #[test]
@@ -1307,12 +1444,6 @@ fn small_formatters_cover_every_unit() {
     assert_eq!(
         signed_rate_bytes(0, u64::MAX, Duration::from_nanos(1)),
         i64::MIN
-    );
-    assert_eq!(parse_thermal("CPU_Speed_Limit = 80"), "limited 80%");
-    assert_eq!(parse_thermal("CPU_Speed_Limit = 100"), "no limit");
-    assert_eq!(
-        parse_thermal("Thermal warning level set to 2"),
-        "warning reported"
     );
     assert_eq!(find_number("Limit = 42", "Limit"), Some(42));
     assert_eq!(find_number("Limit 42", "Limit"), None);
@@ -1417,7 +1548,7 @@ fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
         "pressure is a measurement, not a doctor failure"
     );
     let text = String::from_utf8(text).unwrap();
-    for line in diagnostic_lines(&sample) {
+    for line in diagnostic_lines(&sample, None) {
         assert!(text.contains(&line));
     }
     sample.runtime.provider = Some("Ollama".into());
@@ -1428,4 +1559,76 @@ fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
     assert!(write_doctor(&mut Vec::new(), &sample).unwrap());
     sample.vm_available = false;
     assert!(!write_doctor(&mut Vec::new(), &sample).unwrap());
+}
+
+#[test]
+fn the_static_report_says_plainly_when_no_runtime_was_found() {
+    let sample = Sample {
+        llm_provider: "none".into(),
+        llm_status: "offline".into(),
+        llm_model: "not detected".into(),
+        ..Sample::default()
+    };
+    let mut out = Vec::new();
+    write_static(&mut out, &sample, 2, Thresholds::default(), Platform::MacOs).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let line = text.lines().find(|line| line.starts_with("LLM ")).unwrap();
+    assert_eq!(line.trim_end(), "LLM          none detected");
+    assert!(!text.contains("·  ·"));
+}
+
+#[test]
+fn command_line_errors_name_the_word_at_fault() {
+    let error = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        match parse_args(&args, &Config::default()) {
+            Err(error) => error.to_string(),
+            Ok(_) => String::from("accepted"),
+        }
+    };
+    assert_eq!(
+        error(&["dcotor"]),
+        "unknown command: dcotor; see mlxtop --help"
+    );
+    assert_eq!(
+        error(&["-i", "abc"]),
+        "interval must be a whole number of seconds (got \"abc\")"
+    );
+    assert_eq!(
+        error(&["-n", "x"]),
+        "history must be a whole number of samples (got \"x\")"
+    );
+    assert_eq!(
+        error(&["update", "--rc", "extra"]),
+        "unknown option for update: extra"
+    );
+    assert_eq!(
+        error(&["doctor", "--record", "f.jsonl"]),
+        "doctor cannot be combined with --record"
+    );
+}
+
+#[test]
+fn plain_text_output_drops_control_characters() {
+    use std::io::Write as _;
+    let mut out = crate::report::PlainText(Vec::new());
+    writeln!(out, "LLM a\x1b[31mb · \x1b]0;title\x07model\u{9b}x").unwrap();
+    let text = String::from_utf8(out.0).unwrap();
+    assert!(!text.bytes().any(|b| b < 0x20 && b != b'\n'), "{text:?}");
+    assert!(text.contains("a[31mb · ]0;titlemodelx\n"), "{text:?}");
+}
+
+#[test]
+fn help_text_names_every_view_and_the_runtime_variables() {
+    let help = crate::cli::help_text(Platform::MacOs);
+    for word in [
+        "2 processes",
+        "4 settings",
+        "p pause",
+        "r reset",
+        "MLXTOP_PROVIDER",
+    ] {
+        assert!(help.contains(word), "help lacks {word}");
+    }
+    assert!(!help.contains("2 top"));
 }

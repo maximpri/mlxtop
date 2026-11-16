@@ -105,16 +105,39 @@ impl App {
     pub(crate) fn draw_journal_events(&self, frame: &mut Frame, area: Rect) {
         let capacity = area.height.saturating_sub(2) as usize;
         let filtered_events = self.filtered_journal_events();
-        let max_scroll = filtered_events.len().saturating_sub(capacity);
+        // Rows wrap: count the rows each event takes, so the last page ends
+        // at the oldest event and the title's range is what is shown.
+        let inner = usize::from(area.width.saturating_sub(3)).max(1);
+        let rows = |event: &&crate::domain::SignalEvent| {
+            let width = event.time.chars().count() + 2 + 16 + 5 + event.summary.chars().count();
+            // Word wrap leaves part of a line empty; count conservatively.
+            width.div_ceil((inner * 4 / 5).max(1)).max(1)
+        };
+        let newest_first: Vec<_> = filtered_events.iter().rev().collect();
+        let fits = |events: &[&&crate::domain::SignalEvent]| {
+            let mut used = 0;
+            events
+                .iter()
+                .take_while(|event| {
+                    used += rows(event);
+                    used <= capacity
+                })
+                .count()
+                .max(1)
+        };
+        let oldest: Vec<_> = newest_first.iter().rev().copied().collect();
+        let max_scroll = newest_first.len().saturating_sub(fits(&oldest));
+        self.journal_max_scroll.set(max_scroll);
         let scroll = self.journal_scroll.min(max_scroll);
+        let shown = fits(&newest_first[scroll.min(newest_first.len())..]);
         let lines = filtered_events
             .iter()
             .rev()
             .skip(scroll)
-            .take(capacity)
+            .take(shown)
             .map(|event| {
                 Line::from(vec![
-                    Span::styled(format!(" {} ", event.time), Style::default().fg(DIM)),
+                    Span::styled(format!(" {} ", event.time), Style::default().fg(MUTED)),
                     Span::styled(
                         format!("{:<16}", compact_label(&event.state, 16)),
                         Style::default()
@@ -142,7 +165,7 @@ impl App {
             } else {
                 scroll + 1
             },
-            (scroll + capacity).min(filtered_events.len()),
+            (scroll + shown).min(filtered_events.len()),
             filtered_events.len()
         );
         frame.render_widget(

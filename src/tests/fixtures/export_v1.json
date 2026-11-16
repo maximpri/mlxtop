@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "mlxtop_version": "<version>",
+  "ts_ms": 1763190207123,
+  "interval_s": 1,
+  "verdict": {
+    "state": "generation_slowed",
+    "severity": "critical",
+    "title": "Generation slowed",
+    "evidence": "GEN ↓49.8% (123.0→61.8 tok/s) for 12s",
+    "context": "WITH paging 8.0 MiB/s (usual none)",
+    "next": "The model no longer fits in RAM (9.0 GiB of RAM left): close other apps or models, or use a smaller quant.",
+    "actionable": true
+  },
+  "host": {
+    "source": "host",
+    "platform": "macos",
+    "arch": "arm64",
+    "chip": "Apple M4 Max",
+    "gpu_cores": 32,
+    "ram_bytes": 38654705664,
+    "published_bandwidth_bytes_per_s": 410000000000,
+    "published_bandwidth_source": "estimate",
+    "memory": {
+      "layout": "unified",
+      "pressure": "normal",
+      "tight": false,
+      "available_ratio": 0.24,
+      "ram": {
+        "used_bytes": 28991029248,
+        "left_bytes": 9663676416,
+        "wired_bytes": 21474836480,
+        "app_bytes": 6442450944,
+        "compressed_bytes": 1073741824,
+        "file_cache_bytes": 5368709120,
+        "free_bytes": 4294967296
+      },
+      "gpu": {
+        "used_bytes": 19327352832,
+        "limit_bytes": 29360128000,
+        "limit_source": "host",
+        "left_bytes": 10032775168
+      },
+      "vram": null,
+      "swap": {
+        "total_bytes": 2147483648,
+        "used_bytes": 1610612736,
+        "in_bytes_per_s": 6291456,
+        "out_bytes_per_s": 2097152,
+        "growth_bytes_per_s": 2097152
+      },
+      "file_paging": {
+        "in_bytes_per_s": 524288,
+        "out_bytes_per_s": 0
+      },
+      "compression": {
+        "compress_bytes_per_s": 3145728,
+        "decompress_bytes_per_s": 1048576
+      }
+    },
+    "gpus": [
+      {
+        "index": 0,
+        "vendor": "apple",
+        "name": "Apple M4 Max",
+        "busy_ratio": 0.96,
+        "renderer_ratio": 0.96,
+        "tiler_ratio": 0.41,
+        "memory_used_bytes": null,
+        "memory_total_bytes": null,
+        "temperature_celsius": null,
+        "throttle": null
+      }
+    ],
+    "thermal": {
+      "level": "nominal",
+      "limited": false,
+      "cpu_speed_limit_ratio": null,
+      "hottest_celsius": null
+    },
+    "system_power_w": 35.712,
+    "runtime_process": {
+      "count": 1,
+      "memory_bytes": 20401094656,
+      "peak_bytes": 21474836480,
+      "growth_bytes_per_s": 1048576,
+      "cpu_cores": 0.45,
+      "disk_read_bytes_per_s": 0,
+      "disk_write_bytes_per_s": 65536
+    }
+  },
+  "runtime": {
+    "source": "runtime",
+    "provider": "Splash",
+    "engine": null,
+    "model": "Qwen3.8-27B-oQ4e-mtp",
+    "status": "generating",
+    "telemetry": "live_api",
+    "fresh": true,
+    "observed_at_ms": 1763190206873,
+    "connected": null,
+    "remote": false,
+    "details": "DFlash draft acceptance 78% · server TTFT 1.8s",
+    "model_memory_bytes": 17179869184,
+    "model_memory_ceiling_bytes": 32212254720,
+    "model_size_bytes": null,
+    "model_offloaded_bytes": null,
+    "context_allowed_tokens": 131072,
+    "kv_free_tokens": 110528,
+    "kv_free_bytes": 3678371840,
+    "preemptions_total": 2,
+    "model_facts": {
+      "source": "estimate",
+      "weight_bytes_per_pass": 15020479488,
+      "bits_per_weight": 4.691,
+      "kv_bytes_per_token": 33280,
+      "kv_bytes_per_token_source": "estimate",
+      "state_bytes_per_sequence": 160038912,
+      "context_trained_tokens": 262144,
+      "draft_weight_bytes": 3848808960
+    },
+    "mlx": null,
+    "generation": {
+      "tok_per_s": 61.8,
+      "basis": "live"
+    },
+    "prefill": {
+      "tok_per_s": 298.4,
+      "basis": "average",
+      "done_tokens": null,
+      "expected_tokens": null
+    },
+    "requests": {
+      "active": 1,
+      "waiting": 0,
+      "prefilling": 0,
+      "generating": 1,
+      "context_tokens": 41023,
+      "prompt_tokens": 40211,
+      "output_tokens": 812,
+      "list": [
+        {
+          "id": "req-7f3a",
+          "state": "generating",
+          "prompt_tokens": 40211,
+          "cached_tokens": 39936,
+          "prefilled_tokens": null,
+          "output_tokens": 812,
+          "tok_per_s": 61.8,
+          "first_token_ms": 1840,
+          "idle_s": null
+        }
+      ]
+    },
+    "cache": {
+      "reuse_ratio": 0.915,
+      "recent_reuse_ratio": 0.993,
+      "prefix_hit_ratio": null,
+      "prompt_tokens_total": 195000000,
+      "cached_tokens_total": 178425000,
+      "ssd_used_bytes": 42949672960,
+      "ssd_capacity_bytes": 107374182400
+    },
+    "draft": {
+      "acceptance_ratio": 0.78,
+      "tokens_per_pass": 7.8
+    }
+  },
+  "efficiency": {
+    "source": "estimate",
+    "draft": true,
+    "verify_passes_per_s": 7.92,
+    "tokens_per_pass": 7.8,
+    "bytes_per_pass": 16545763840,
+    "bandwidth_share_ratio": 0.3197,
+    "best_bandwidth_share_ratio": 0.6364,
+    "no_draft_ceiling_tok_per_s": 24.78
+  },
+  "context_left": {
+    "source": "estimate",
+    "tokens_per_request": 90049,
+    "requests": 1,
+    "by_memory_tokens": 110528,
+    "by_window_tokens": 90049,
+    "limited_by": "window"
+  },
+  "usual_speed": {
+    "source": "estimate",
+    "phase": "generation",
+    "tok_per_s": 123.0,
+    "slow_below_tok_per_s": 98.4,
+    "work": "1 request · 41.0k context",
+    "relative_change": -0.4976
+  },
+  "earlier_sessions": null,
+  "unusual": [
+    {
+      "cause": "paging",
+      "note": "paging 8.0 MiB/s (usual none)"
+    }
+  ],
+  "slowdown": {
+    "source": "estimate",
+    "phase": "generation",
+    "stalled": false,
+    "cause": "paging",
+    "reason": "paging 8.0 MiB/s (usual none)",
+    "usual_tok_per_s": 123.0,
+    "lowest_tok_per_s": 58.4,
+    "duration_s": 12.0,
+    "samples": 12,
+    "stalled_s": null
+  },
+  "slowdown_ended": null,
+  "lost_before_first_tokens": {
+    "source": "estimate",
+    "cache_misses_s": 124.0,
+    "model_loads_s": 6.5,
+    "overlap_s": 40.0,
+    "overlap_told": true
+  }
+}

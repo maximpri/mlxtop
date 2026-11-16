@@ -2,11 +2,33 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 
 use crate::logging::{diagnostics_log, log_field};
 pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Programs whose start has failed and been logged since they last ran.
+static SPAWN_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// True the first time `program` fails to start (until it starts again).
+pub(crate) fn first_spawn_failure(program: &str) -> bool {
+    let Ok(mut failed) = SPAWN_FAILED.lock() else {
+        return true;
+    };
+    if failed.iter().any(|name| name == program) {
+        false
+    } else {
+        failed.push(program.to_owned());
+        true
+    }
+}
+
+fn spawned(program: &str) {
+    if let Ok(mut failed) = SPAWN_FAILED.lock() {
+        failed.retain(|name| name != program);
+    }
+}
 
 pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
     let command = || {
@@ -19,19 +41,35 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
                 .join(",")
         )
     };
-    let mut child = match Command::new(program)
+    let mut builder = Command::new(program);
+    // Numbers are parsed with a dot whatever the user's locale: `ps` and
+    // `sysctl` print `2,6` under a comma-decimal locale. Text stays UTF-8.
+    builder.env_remove("LC_ALL").env("LC_NUMERIC", "C");
+    if let Ok(all) = std::env::var("LC_ALL") {
+        if !all.is_empty() {
+            builder.env("LC_CTYPE", all);
+        }
+    }
+    let mut child = match builder
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(child) => child,
+        Ok(child) => {
+            spawned(program);
+            child
+        }
         Err(error) => {
-            diagnostics_log(
-                "WARN",
-                "command_spawn_failed",
-                format!("{} error={}", command(), log_field(&error.to_string())),
-            );
+            // A missing optional tool (nvidia-smi without NVIDIA drivers) is
+            // said once, not on every sample.
+            if first_spawn_failure(program) {
+                diagnostics_log(
+                    "WARN",
+                    "command_spawn_failed",
+                    format!("{} error={}", command(), log_field(&error.to_string())),
+                );
+            }
             return None;
         }
     };
@@ -43,9 +81,11 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
     };
     let command_context = command();
     let reader = thread::spawn(move || {
-        let mut output = String::new();
-        match stdout.read_to_string(&mut output) {
-            Ok(_) => Some(output),
+        // One undecodable byte (a process argument in another encoding)
+        // must not discard the whole reading.
+        let mut output = Vec::new();
+        match stdout.read_to_end(&mut output) {
+            Ok(_) => Some(String::from_utf8_lossy(&output).into_owned()),
             Err(error) => {
                 diagnostics_log(
                     "WARN",
@@ -157,6 +197,16 @@ pub(crate) trait Host: Send {
     fn command(&self, program: &str, args: &[&str]) -> Option<String>;
     /// Whole text file, or `None` when it cannot be read.
     fn read_file(&self, path: &Path) -> Option<String>;
+    /// At most the first `max_bytes` of a regular file, so a large one is
+    /// never read whole (a safetensors shard's header, not its weights);
+    /// `None` when it cannot be read, as on a host with no files.
+    fn read_prefix(&self, _path: &Path, _max_bytes: u64) -> Option<Vec<u8>> {
+        None
+    }
+    /// When a file last changed, or `None` when it cannot be read.
+    fn modified(&self, _path: &Path) -> Option<SystemTime> {
+        None
+    }
     /// Entries of a directory; empty when it cannot be listed.
     fn read_dir(&self, path: &Path) -> Vec<PathBuf>;
     /// Memory and processes from the Windows APIs; `None` on other systems,
@@ -205,6 +255,21 @@ impl Host for System {
         fs::read_to_string(path).ok()
     }
 
+    fn read_prefix(&self, path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+        // A pipe or device would block or never end; only files are read.
+        if !fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut reader = fs::File::open(path).ok()?.take(max_bytes);
+        reader.read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    }
+
+    fn modified(&self, path: &Path) -> Option<SystemTime> {
+        fs::metadata(path).ok()?.modified().ok()
+    }
+
     fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
         fs::read_dir(path)
             .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
@@ -230,6 +295,14 @@ mod windows {
 
         fn read_file(&self, path: &Path) -> Option<String> {
             System.read_file(path)
+        }
+
+        fn read_prefix(&self, path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
+            System.read_prefix(path, max_bytes)
+        }
+
+        fn modified(&self, path: &Path) -> Option<SystemTime> {
+            System.modified(path)
         }
 
         fn read_dir(&self, path: &Path) -> Vec<PathBuf> {
@@ -308,6 +381,13 @@ impl Platform {
         } else {
             Self::Linux
         }
+    }
+}
+
+/// The platform this build samples.
+impl Default for Platform {
+    fn default() -> Self {
+        Self::current()
     }
 }
 

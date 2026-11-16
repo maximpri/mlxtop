@@ -41,6 +41,8 @@ pub(crate) enum Kind {
     },
     Host,
     Port,
+    /// A credential: typed and shown as dots, never as its text.
+    Secret,
 }
 
 pub(crate) struct Field {
@@ -92,6 +94,20 @@ pub(crate) const FIELDS: &[Field] = &[
         label: "Critical alarms",
         help: "The bell and banner for critical memory pressure and heavy paging. Off still shows the condition in charts, the assessment and the Journal.",
         kind: Kind::Toggle { default: true },
+    },
+    Field {
+        key: "baselines",
+        section: "General",
+        label: "Keep usual speeds",
+        help: BASELINES_HELP,
+        kind: Kind::Toggle { default: true },
+    },
+    Field {
+        key: "api_key",
+        section: "Inference engine",
+        label: "API key",
+        help: "Sent when the monitored inference engine asks for a key: oMLX's admin key, or the key a server was started with. Kept in this file, readable by you only. MLXTOP_PROVIDER_API_KEY overrides it; unset, mlxtop uses the key oMLX keeps for itself.",
+        kind: Kind::Secret,
     },
     Field {
         key: "journal.prompts",
@@ -146,7 +162,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "omx.host",
         section: "oMLX server",
         label: "Host",
-        help: "oMLX server host. Unset, mlxtop reads ~/.config/omlx-coding/server.env, then uses 127.0.0.1.",
+        help: "oMLX server host. Unset, mlxtop reads ~/.config/omlx-coding/server.env, then oMLX's settings.json, then uses 127.0.0.1.",
         kind: Kind::Host,
     },
     Field {
@@ -160,7 +176,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "memory_warn_load",
         section: "Thresholds",
         label: "Memory warning",
-        help: "Unavailable memory that turns Linux pressure yellow. macOS uses its own pressure level.",
+        help: "Unavailable memory that turns Linux pressure to a warning. macOS uses its own pressure level.",
         kind: percent(MEMORY_WARN_LOAD),
     },
     Field {
@@ -174,7 +190,7 @@ pub(crate) const FIELDS: &[Field] = &[
         key: "gpu_warn_load",
         section: "Thresholds",
         label: "GPU busy",
-        help: "GPU load reported as busy and shown in yellow.",
+        help: "GPU load reported as busy.",
         kind: percent(GPU_WARN_LOAD),
     },
     Field {
@@ -238,6 +254,26 @@ pub(crate) const FIELDS: &[Field] = &[
     },
 ];
 
+/// Where usual speeds are kept, as each platform's help says it.
+const BASELINES_HELP: &str = if cfg!(target_os = "macos") {
+    "Each model's usual generation speed by context, kept across sessions in ~/Library/Application Support/mlxtop/baselines.json: numbers only, readable by you only. Slowdowns are then judged from the first request, and an update that slows a model is named. Off neither reads nor writes it."
+} else if cfg!(windows) {
+    r"Each model's usual generation speed by context, kept across sessions in %LOCALAPPDATA%\mlxtop\baselines.json: numbers only. Slowdowns are then judged from the first request, and an update that slows a model is named. Off neither reads nor writes it."
+} else {
+    "Each model's usual generation speed by context, kept across sessions in ~/.local/state/mlxtop/baselines.json ($XDG_STATE_HOME): numbers only, readable by you only. Slowdowns are then judged from the first request, and an update that slows a model is named. Off neither reads nor writes it."
+};
+
+/// What a stored credential shows as, whatever its length.
+const SECRET_SHOWN: &str = "••••••••";
+
+/// The longest text a field takes: a key is longer than a number.
+const fn text_limit(kind: Kind) -> usize {
+    match kind {
+        Kind::Secret => 512,
+        _ => 64,
+    }
+}
+
 /// MiB/s without trailing zeros: 1, 0.5, 16.
 fn mib(bytes: u64) -> String {
     let text = format!("{:.2}", bytes as f64 / MIB as f64);
@@ -248,6 +284,8 @@ impl Field {
     /// The value as the user types it, without a unit.
     fn edit_text(&self, value: &Value) -> String {
         match (self.kind, value) {
+            // A stored credential is replaced, never loaded for editing.
+            (Kind::Secret, _) => String::new(),
             (Kind::Rate { .. }, Value::Number(n)) => n.as_u64().map(mib).unwrap_or_default(),
             (_, Value::String(text)) => text.clone(),
             (_, other) => other.to_string(),
@@ -261,6 +299,7 @@ impl Field {
             (Kind::Number { unit, .. }, _) => format!("{} {unit}", self.edit_text(value)),
             (Kind::Rate { .. }, _) => format!("{} MiB/s", self.edit_text(value)),
             (Kind::Toggle { .. }, Value::Bool(on)) => if *on { "on" } else { "off" }.into(),
+            (Kind::Secret, _) => SECRET_SHOWN.into(),
             _ => self.edit_text(value),
         }
     }
@@ -270,7 +309,7 @@ impl Field {
             Kind::Number { default, .. } => self.display(&Value::from(default)),
             Kind::Rate { default } => self.display(&Value::from(default)),
             Kind::Toggle { default } => self.display(&Value::from(default)),
-            Kind::Host | Kind::Port => "auto".into(),
+            Kind::Host | Kind::Port | Kind::Secret => "auto".into(),
         }
     }
 
@@ -297,6 +336,13 @@ impl Field {
                 Ok(Value::from(text))
             }
             Kind::Host => Err("Enter a host name or address, without spaces".into()),
+            Kind::Secret
+                if !text.is_empty()
+                    && !text.contains(|c: char| c.is_whitespace() || c.is_control()) =>
+            {
+                Ok(Value::from(text))
+            }
+            Kind::Secret => Err("Enter the key, without spaces".into()),
             Kind::Toggle { .. } => match text {
                 "on" | "true" | "yes" => Ok(Value::Bool(true)),
                 "off" | "false" | "no" => Ok(Value::Bool(false)),
@@ -311,6 +357,8 @@ impl Field {
 pub(crate) enum Status {
     Saved(String),
     Error(String),
+    /// Something the view is asking for.
+    Notice(String),
 }
 
 pub(crate) struct Settings {
@@ -393,6 +441,13 @@ impl Settings {
         .filter(|value| !value.is_null())
     }
 
+    /// Select the field stored under `key`.
+    pub(crate) fn select(&mut self, key: &str) {
+        if let Some(index) = FIELDS.iter().position(|field| field.key == key) {
+            self.selected = index;
+        }
+    }
+
     pub(crate) fn move_selection(&mut self, down: bool) {
         self.selected = if down {
             (self.selected + 1).min(FIELDS.len() - 1)
@@ -451,15 +506,29 @@ impl Settings {
 
     /// Write to a temporary file beside the config, then rename it over the
     /// config, so an interrupted save never leaves half a file.
-    fn write(&self, doc: &Map<String, Value>) -> std::io::Result<()> {
+    pub(crate) fn write(&self, doc: &Map<String, Value>) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
+        // A config kept in a dotfiles repository is a symlink: write to its
+        // target, so the link survives and later edits there still apply.
+        let target = fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
         let mut text = serde_json::to_string_pretty(doc)?;
         text.push('\n');
-        let temporary = self.path.with_extension("json.tmp");
+        let temporary = target.with_extension("json.tmp");
         fs::write(&temporary, text)?;
-        fs::rename(&temporary, &self.path)
+        // Keep the file's permissions: a private file stays private.
+        if let Ok(metadata) = fs::metadata(&target) {
+            fs::set_permissions(&temporary, metadata.permissions())?;
+        }
+        // A file holding a credential is readable by its owner only,
+        // whatever it was before.
+        #[cfg(unix)]
+        if doc.contains_key("api_key") {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        }
+        fs::rename(&temporary, &target)
     }
 }
 
@@ -467,6 +536,7 @@ impl App {
     /// Keys while the Settings view is open. Returns whether the key was used.
     pub(crate) fn handle_settings_key(&mut self, code: crossterm::event::KeyCode) -> bool {
         use crossterm::event::KeyCode;
+        let limit = text_limit(self.settings.field().kind);
         if let Some(text) = self.settings.editing.as_mut() {
             match code {
                 KeyCode::Esc => self.settings.editing = None,
@@ -481,7 +551,7 @@ impl App {
                 KeyCode::Backspace => {
                     text.pop();
                 }
-                KeyCode::Char(c) if text.chars().count() < 64 => text.push(c),
+                KeyCode::Char(c) if text.chars().count() < limit => text.push(c),
                 _ => {}
             }
             return true;
@@ -533,7 +603,7 @@ impl App {
     pub(crate) fn draw_settings(&self, frame: &mut Frame, area: Rect) {
         let [list_area, detail_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(6)])
+            .constraints([Constraint::Min(5), Constraint::Length(7)])
             .areas(area);
         let settings = &self.settings;
         let label_width = FIELDS.iter().map(|f| f.label.len()).max().unwrap_or(0) + 4;
@@ -572,8 +642,13 @@ impl App {
             ];
             match (selected, &settings.editing) {
                 (true, Some(text)) => {
+                    // A credential shows how much was typed, not what.
+                    let shown = match field.kind {
+                        Kind::Secret => "•".repeat(text.chars().count().min(40)),
+                        _ => text.clone(),
+                    };
                     spans.push(Span::styled(
-                        format!("{text}▏"),
+                        format!("{shown}▏"),
                         Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
                     ));
                     if let Kind::Rate { .. } = field.kind {
@@ -624,16 +699,31 @@ impl App {
             field.help,
             Style::default().fg(Color::White),
         ))];
-        detail.push(Line::from(Span::styled(
-            if settings.editing.is_some() {
-                "Enter save · Esc cancel"
-            } else if matches!(field.kind, Kind::Toggle { .. }) {
-                "Enter / Space toggle · x reset to default · changes apply now and are saved"
-            } else {
-                "Enter edit · x reset to default · changes apply now and are saved"
-            },
-            Style::default().fg(MUTED),
-        )));
+        // What the engine says about its key, while that field is selected
+        // and the view is not already asking for it.
+        let asking = matches!(settings.status, Some(Status::Notice(_)));
+        if field.kind == Kind::Secret && !asking {
+            let runtime = &self.collector.current.runtime;
+            let engine = runtime
+                .provider
+                .as_deref()
+                .unwrap_or("The inference engine");
+            match runtime.key_need() {
+                Some(crate::runtime_diagnostics::KeyNeed::Missing) => {
+                    detail.push(Line::from(Span::styled(
+                        format!("{engine} asks for an API key."),
+                        Style::default().fg(YELLOW),
+                    )))
+                }
+                Some(crate::runtime_diagnostics::KeyNeed::Rejected) => {
+                    detail.push(Line::from(Span::styled(
+                        format!("✖ {engine} refused the key it was sent."),
+                        Style::default().fg(RED),
+                    )))
+                }
+                None => {}
+            }
+        }
         if let Some(reason) = &settings.broken {
             detail.push(Line::from(Span::styled(
                 format!("{reason}. Fix it by hand; Settings won't overwrite it."),
@@ -648,7 +738,27 @@ impl App {
                 Status::Error(text) => {
                     Line::from(Span::styled(format!("✖ {text}"), Style::default().fg(RED)))
                 }
+                Status::Notice(text) => {
+                    Line::from(Span::styled(text.clone(), Style::default().fg(YELLOW)))
+                }
             });
+        }
+        detail.push(Line::from(Span::styled(
+            if settings.editing.is_some() && field.kind == Kind::Secret {
+                "Type or paste the key · Enter save · Esc cancel"
+            } else if settings.editing.is_some() {
+                "Enter save · Esc cancel"
+            } else if matches!(field.kind, Kind::Toggle { .. }) {
+                "Enter / Space toggle · x reset to default · changes apply now and are saved"
+            } else {
+                "Enter edit · x reset to default · changes apply now and are saved"
+            },
+            Style::default().fg(MUTED),
+        )));
+        // What the view asks for comes first: it must not wrap out of sight.
+        if asking {
+            let last = detail.len() - 1;
+            detail[..last].rotate_right(1);
         }
         frame.render_widget(
             Paragraph::new(detail).wrap(Wrap { trim: true }).block(

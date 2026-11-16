@@ -2,9 +2,11 @@
 //! GPU placement and discrete card problems that limit local inference: a model
 //! split onto the CPU, a card whose memory is full, and clocks held down by
 //! heat, power or hardware limits. High utilization alone is never a problem.
+//! What else holds a card back (its power cap, a low clock, a slow link, who
+//! holds its memory) is evidence in words, never a finding or a colour.
 use crate::domain::Sample;
 use crate::formatting::bytes;
-use crate::gpu::Throttle;
+use crate::gpu::{self, Throttle};
 
 /// Enter the full state at 97% and leave it below 94%, so a card hovering
 /// at its limit does not flap. vLLM and SGLang reserve 90% by default.
@@ -13,7 +15,12 @@ pub(crate) const VRAM_FULL_EXIT: u16 = 94;
 /// Runtimes keep small buffers in RAM even when every layer is on the GPU.
 const OFFLOAD_MIN_PERCENT: u64 = 2;
 /// Clock limits on an idle or lightly used card cost no throughput.
-const THROTTLE_MIN_UTILIZATION: u8 = 20;
+const THROTTLE_MIN_UTILIZATION: u8 = gpu::BUSY_PERCENT;
+/// System RAM a card with its own memory holds beyond staging buffers: a
+/// model spilling out of VRAM.
+const SPILL_BYTES: u64 = 1 << 30;
+/// Processes named in a line before the rest are counted.
+const PROCESSES_NAMED: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum GpuIssue {
@@ -116,41 +123,6 @@ impl GpuIssue {
             Self::Throttled { .. } => "Check GPU cooling and power delivery.",
         }
     }
-
-    /// Overview guidance: badge, cause and action.
-    pub(crate) fn guidance(&self) -> (&'static str, String, &'static str) {
-        match self {
-            Self::Offload { offloaded, size } => (
-                "FIT",
-                format!(
-                    "{}% of the model runs on CPU — generation is limited by RAM bandwidth.",
-                    Self::offload_percent(*offloaded, *size)
-                ),
-                "Choose a smaller quantization, a shorter context or fewer parallel slots.",
-            ),
-            Self::VramFull { index, percent, .. } => (
-                "VRAM",
-                if cfg!(target_os = "windows") {
-                    format!("GPU {index} memory {percent}% full — the driver may spill to shared memory.")
-                } else {
-                    format!("GPU {index} memory {percent}% full — the next allocation may fail.")
-                },
-                "Unload unused models or reduce context and KV cache.",
-            ),
-            Self::Throttled { index, cause, .. } => (
-                if *cause == Throttle::Thermal {
-                    "COOL"
-                } else {
-                    "POWER"
-                },
-                format!(
-                    "GPU {index} {} under load — clocks are held down.",
-                    cause.label()
-                ),
-                self.next(),
-            ),
-        }
-    }
 }
 
 /// The most severe issue: placement first, then memory, then clocks.
@@ -212,6 +184,110 @@ fn throttled(sample: &Sample) -> Option<GpuIssue> {
             temperature: gpu.temperature,
         })
     })
+}
+
+/// What holds each card back, in words for Diagnostics and the static
+/// report; none of it is a finding or a colour. A busy card's clock limit
+/// with its cause, or a clock under two thirds of its maximum; a busy card's
+/// PCIe link below what it and its slot allow; who holds a card's memory,
+/// where that was read; and the system RAM a card with VRAM of its own
+/// holds beyond staging buffers.
+pub(crate) fn evidence(sample: &Sample) -> Vec<String> {
+    let mut lines = Vec::new();
+    for gpu in &sample.gpus {
+        let limits = &gpu.limits;
+        let clock = limits
+            .clock_mhz
+            .map(|_| gpu::clock_label(limits.clock_mhz, limits.clock_max_mhz));
+        match gpu.throttle().filter(|_| gpu.busy()) {
+            Some(cause) => {
+                let mut parts = vec![format!(
+                    "GPU {} clocks limited by {}",
+                    gpu.index,
+                    cause.label()
+                )];
+                match cause {
+                    Throttle::PowerCap if limits.power_mw.is_some() => {
+                        parts.push(gpu::power_label(limits.power_mw, limits.power_cap_mw));
+                    }
+                    Throttle::Thermal => parts.extend(gpu.temperature.map(|c| format!("{c}°C"))),
+                    _ => {}
+                }
+                parts.extend(clock);
+                lines.push(parts.join(" · "));
+            }
+            None => {
+                if let (Some(share), Some(clock)) = (gpu.clock_held(), clock) {
+                    lines.push(format!(
+                        "GPU {} clock at {share}% of its maximum ({clock}) while {}% busy",
+                        gpu.index,
+                        gpu.utilization.unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        if gpu.link_reduced() {
+            lines.push(format!(
+                "GPU {} PCIe link at {} while busy; it and its slot allow {}",
+                gpu.index,
+                gpu::link_label(limits.link_gen, limits.link_width),
+                gpu::link_label(limits.link_gen_max, limits.link_width_max)
+            ));
+        }
+        if !limits.processes.is_empty() {
+            let name = |pid: u32| {
+                sample
+                    .llm_processes
+                    .iter()
+                    .find(|process| process.pid == pid)
+                    .map_or_else(
+                        || format!("pid {pid}"),
+                        |process| format!("{} ({pid})", process.name),
+                    )
+            };
+            let mut held: Vec<String> = limits
+                .processes
+                .iter()
+                .take(PROCESSES_NAMED)
+                .map(|(pid, used)| format!("{} {}", name(*pid), bytes(*used)))
+                .collect();
+            if limits.processes.len() > PROCESSES_NAMED {
+                held.push(format!("{} more", limits.processes.len() - PROCESSES_NAMED));
+            }
+            lines.push(format!(
+                "GPU {} memory by process: {}",
+                gpu.index,
+                held.join(" · ")
+            ));
+        }
+        if let Some(spill) = limits
+            .ram_used
+            .filter(|used| !gpu.unified && *used >= SPILL_BYTES)
+        {
+            lines.push(format!(
+                "GPU {} also holds {} of system RAM (GTT)",
+                gpu.index,
+                bytes(spill)
+            ));
+        }
+    }
+    lines
+}
+
+/// What to change when a slowdown is put down to heat and a card is holding
+/// its clocks down for it: that card's cooling. Short enough to stay whole
+/// on the assessment's second line at 80 columns.
+pub(crate) fn heat_step(sample: &Sample) -> String {
+    let hot = sample
+        .gpus
+        .iter()
+        .find(|gpu| gpu.throttle() == Some(Throttle::Thermal));
+    let card = hot.map_or_else(|| "A GPU".to_owned(), |gpu| format!("GPU {}", gpu.index));
+    let at = hot
+        .and_then(|gpu| gpu.temperature)
+        .map(|celsius| format!(" at {celsius}°C"))
+        .unwrap_or_default();
+    format!("{card} slows its clocks for heat{at}: improve its cooling or airflow.")
 }
 
 #[cfg(test)]
