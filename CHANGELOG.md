@@ -9,8 +9,8 @@ the same context depth, keeps it across sessions, says how much more context
 fits, and names what first tokens lose to cache misses, model loads and
 overlapping requests. It also carries every fix from the review of 3.3.0
 (3.3.1 was never released; its fixes ship here). **Update with the install
-script or Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS
-crates this release replaces.
+script or Homebrew:** 3.3.0's updater runs on the TLS crates this release
+replaces; if you use it anyway, check what it installed as shown below.
 
 ### Updating from 3.3.0 with `mlxtop update`
 
