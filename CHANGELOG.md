@@ -154,6 +154,11 @@ crates this release replaces.
   its layout from the build target, so four tests failed on Linux in the
   3.3.1 test builds (and would in CI there), and a Mac's recording replayed on Linux
   drew the wrong panel. An Apple GPU reading now decides.
+- **A local port nobody listens on is asked again within seconds on
+  Windows too.** Windows retries a refused connect for about two seconds, so
+  the oMLX client read it as a hung server and waited up to 30 s. A connect
+  that times out on a loopback address is now a refusal; a hung server still
+  waits up to 30 s.
 
 ### Fixes from the review of 3.3.0
 
