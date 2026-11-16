@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.4.0-rc.1 — 2026-11-15
+## 3.4.0 — 2026-11-16
 
 mlxtop learns what fast means for the machine it watches. It reads what the
 model reads per forward pass and what the chip can move, and estimates how
@@ -10,8 +10,7 @@ fits, and names what first tokens lose to cache misses, model loads and
 overlapping requests. It also carries every fix from the review of 3.3.0
 (3.3.1 was never released; its fixes ship here). **Update with the install
 script or Homebrew, not `mlxtop update`:** 3.3.0's updater runs on the TLS
-crates this release replaces. The detection changes wait for the owner's
-review of their tallies on real server logs before a release.
+crates this release replaces.
 
 ### Is this speed normal?
 

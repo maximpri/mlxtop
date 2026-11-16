@@ -35,13 +35,16 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no usage tracking. It never
   sends prompts or touches your models or runtime settings.
 
-**What's new in 3.3.0:** mlxtop finds slow answers and slow prompt reads
-by judging speed against earlier work of the same size, names what else was
-happening (paging, memory, heat, disk, the queue, draft acceptance) and says
-what to change. Memory shows headroom against the GPU limit, the KV cache
-its hit rate and the prefill time it saved, and `u` sums up a session: what
-each cause cost and where requests' time went. `--record` and `mlxtop
-replay` check the rules against real sessions.
+**What's new in 3.4.0:** mlxtop knows what fast means for your machine. It
+reads what the model reads per forward pass and the chip's published memory
+bandwidth, estimates how close decode runs to that limit (per verify pass with
+a draft model), and judges usual speed at the same context depth and across
+sessions, so an upgrade that slows a model gets named. It says how much more
+context fits, names heat on Apple Silicon, and tells what first tokens lose to
+cache misses, model loads and overlapping requests. `--once --json`, `mlxtop
+stream` and `mlxtop serve` (Prometheus, loopback only) bring it to scripts and
+dashboards. 3.4.0 also carries every fix from the review of 3.3.0: if you run
+3.3.0, update with the install script or Homebrew, not `mlxtop update`.
 [Release notes →](CHANGELOG.md)
 
 ## Install
