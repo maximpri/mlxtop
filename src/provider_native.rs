@@ -7,7 +7,7 @@ use crate::formatting::{bytes, compact_tokens};
 use crate::json::json_value;
 use crate::logging::{diagnostics_log, log_field};
 use crate::model_facts::ModelFacts;
-use crate::omlx::is_loopback_host;
+use crate::omlx::{is_local_host, is_loopback_host};
 use crate::providers::{counter, identifier};
 use crate::runtime_diagnostics::ProbeIssue;
 use crate::transport::MAX_HTTP_RESPONSE_BYTES;
@@ -82,12 +82,26 @@ impl Endpoint {
         }
     }
 
+    /// Whether the server runs on another machine, so its load is not this
+    /// machine's hardware.
     pub fn is_remote(&self) -> bool {
+        !self.host_is(is_local_host)
+    }
+
+    /// Credentials go only to loopback unless remote authentication is
+    /// allowed, even to a server on another of this machine's addresses.
+    fn off_loopback(&self) -> bool {
+        !self.host_is(is_loopback_host)
+    }
+
+    /// `test` of the configured URL's host; true with no URL (the default
+    /// is loopback) or one that does not parse.
+    fn host_is(&self, test: fn(&str) -> bool) -> bool {
         self.url
             .as_deref()
             .and_then(|url| url.parse::<ureq::http::Uri>().ok())
-            .and_then(|uri| uri.host().map(|host| !is_loopback_host(host)))
-            .unwrap_or(false)
+            .and_then(|uri| uri.host().map(test))
+            .unwrap_or(true)
     }
 
     pub fn base_url(&self, port: u16) -> Result<String, ProbeIssue> {
@@ -117,7 +131,7 @@ impl Endpoint {
             return Err(ProbeIssue::InvalidEndpoint);
         }
         let base = self.base_url(port)?;
-        if self.api_key.is_some() && self.is_remote() && !self.allow_remote_auth {
+        if self.api_key.is_some() && self.off_loopback() && !self.allow_remote_auth {
             return Err(ProbeIssue::RemoteAuthBlocked);
         }
         let authorization = match &self.api_key {

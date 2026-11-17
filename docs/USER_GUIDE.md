@@ -2090,6 +2090,9 @@ variables apply to the other adapters. API details appear in **Processes** and
 `--once` reports. With a remote URL, OS memory, GPU and process readings still
 belong to the machine running mlxtop. Remote rates are excluded from local
 hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
+A URL that names an address one of this machine's interfaces holds is local,
+as for a server bound to its LAN or Thunderbolt address. Credentials still go
+only to loopback unless `MLXTOP_ALLOW_REMOTE_AUTH=1` is set.
 
 - **oMLX:** reads active request IDs and prompt counts from admin statistics.
   Some engines/phases do not expose counts; untokenized queued zeros are skipped

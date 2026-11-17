@@ -787,3 +787,24 @@ fn an_omlx_found_after_mlxtop_started_is_asked_at_once() {
     // Health alone: without a key nothing else is asked.
     assert_eq!(stop(port, server), ["GET /health HTTP/1.1"]);
 }
+
+#[test]
+fn an_address_this_machine_holds_is_local_and_others_are_not() {
+    assert!(is_local_host("127.0.0.1"));
+    assert!(is_local_host("localhost"));
+    assert!(is_local_host("[::1]"));
+    for elsewhere in [
+        "192.0.2.10",
+        "0.0.0.0",
+        "[::]",
+        "224.0.0.1",
+        "inference.example.net",
+    ] {
+        assert!(!is_local_host(elsewhere), "{elsewhere}");
+    }
+    let held = crate::test_support::held_interface_address()
+        .expect("a route off this machine, to find an address it holds");
+    assert!(!is_loopback_host(&held.to_string()));
+    assert!(is_local_host(&held.to_string()));
+    assert!(is_local_host(&format!("[{held}]")));
+}

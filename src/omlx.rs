@@ -14,6 +14,7 @@ use crate::runtime_diagnostics::{ProbeIssue, RuntimeReport};
 use crate::transport::{http_request, HttpResponse};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::{IpAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs};
@@ -111,7 +112,7 @@ impl LlmTelemetryClient {
         self.runtime.endpoint =
             crate::runtime_diagnostics::safe_endpoint(&format!("http://{authority}:{}", self.port))
                 .unwrap_or_else(|| "<invalid endpoint>".into());
-        self.runtime.remote = !is_loopback_host(&self.host);
+        self.runtime.remote = !is_local_host(&self.host);
         self.runtime.credentials_present =
             omlx_api_key(self.home.as_deref(), self.api_key.as_deref()).is_some();
         self.runtime.begin();
@@ -124,7 +125,7 @@ impl LlmTelemetryClient {
         self.runtime.finish(telemetry.is_some());
 
         if let Some(mut telemetry) = telemetry {
-            telemetry.remote = !is_loopback_host(&self.host);
+            telemetry.remote = !is_local_host(&self.host);
             self.cached = Some(telemetry);
             self.retry_backoff = Duration::from_secs(1);
             self.next_poll = Instant::now() + self.retry_backoff;
@@ -359,7 +360,7 @@ impl LlmTelemetryClient {
             }
         }
         // A remote oMLX names files on its own machine, not this one.
-        let local = is_loopback_host(&self.host);
+        let local = is_local_host(&self.host);
         let base = self
             .models
             .settings
@@ -671,6 +672,23 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
         host.trim_matches(['[', ']']),
         "127.0.0.1" | "localhost" | "::1"
     )
+}
+
+/// Whether `host` is this machine: a loopback host, or an address one of its
+/// own interfaces holds, as a server bound to its LAN or Thunderbolt address.
+pub(crate) fn is_local_host(host: &str) -> bool {
+    is_loopback_host(host)
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .is_ok_and(held_here)
+}
+
+/// Binding a socket to an address fails unless one of this machine's
+/// interfaces holds it. The wildcard and multicast addresses bind anywhere,
+/// so they never count.
+fn held_here(ip: IpAddr) -> bool {
+    !ip.is_unspecified() && !ip.is_multicast() && UdpSocket::bind((ip, 0)).is_ok()
 }
 
 pub(crate) fn read_omlx_api_key(home: Option<&Path>) -> Option<String> {

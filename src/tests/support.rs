@@ -653,3 +653,13 @@ pub(crate) fn owner_models(mut host: FakeHost) -> FakeHost {
     }
     host
 }
+
+/// An address one of this machine's interfaces holds that is not loopback:
+/// the source the system picks for a route off the machine. A UDP connect
+/// sends nothing. `None` on a machine with no such route.
+pub(crate) fn held_interface_address() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
