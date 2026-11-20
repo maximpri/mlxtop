@@ -160,10 +160,10 @@ pub(crate) fn now_clock(host: &dyn Host, platform: Platform) -> (String, Option<
 
 #[cfg(windows)]
 fn windows_clock() -> (String, Option<i32>) {
-    let now = chrono::Local::now();
+    let now = jiff::ZonedDateTime::now();
     (
-        now.format("%H:%M:%S").to_string(),
-        Some(now.offset().local_minus_utc()),
+        now.strftime("%H:%M:%S").to_string(),
+        Some(now.offset().seconds()),
     )
 }
 

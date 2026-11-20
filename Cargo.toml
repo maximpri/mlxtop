@@ -40,5 +40,5 @@ signal-hook = { version = "0.3.18", default-features = false }
 libproc = "0.14.11"
 
 [target."cfg(windows)".dependencies]
-chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform"] }
 sysinfo = { version = "=0.38.4", default-features = false, features = ["system"] }
