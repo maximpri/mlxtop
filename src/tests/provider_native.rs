@@ -2174,3 +2174,25 @@ fn ollama_show_carries_the_endpoints_key_and_the_model_in_a_json_body() {
         Some(8_030_261_248)
     );
 }
+
+#[test]
+fn a_server_on_an_address_this_machine_holds_is_local_but_still_gets_no_credentials() {
+    let held =
+        held_interface_address().expect("a route off this machine, to find an address it holds");
+    let host = match held {
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    let endpoint = |api_key: Option<&str>| Endpoint {
+        url: Some(format!("http://{host}:8080")),
+        api_key: api_key.map(Into::into),
+        allow_remote_auth: false,
+    };
+    assert!(!endpoint(None).is_remote());
+    // The credentials rule stays loopback only: the key needs the opt-in
+    // even though the server is on this machine.
+    assert_eq!(
+        endpoint(Some("test-token")).get(1, "/models"),
+        Err(ProbeIssue::RemoteAuthBlocked)
+    );
+}
