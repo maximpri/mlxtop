@@ -15,7 +15,7 @@ that remain under their respective licenses.
 | ureq | 3.4.2 | MIT OR Apache-2.0 |
 | libproc (macOS only) | 0.14.11 | MIT |
 | sysinfo (Windows only) | 0.38.4 | MIT |
-| chrono (Windows only) | 0.4.45 | MIT OR Apache-2.0 |
+| jiff (Windows only) | 1.0.1 | Unlicense OR MIT |
 | signal-hook (Unix only) | 0.3.18 | MIT OR Apache-2.0 |
 
 The complete dependency graph and exact versions are recorded in `Cargo.lock`.
