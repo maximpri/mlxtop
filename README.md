@@ -213,7 +213,9 @@ External contributions are credited here, with thanks.
 
 - [Samuel Reed](https://github.com/STRML) (@STRML) — the mlx-serve runtime
   support, per-request decode speeds, prefill progress with time left, sushi
-  gauge support, and the Journal recording overhaul (#15, #37, #38, #43, #44).
+  gauge support, the Journal recording overhaul, and runtimes on this
+  machine's own LAN or Thunderbolt addresses counted as local (#15, #37, #38,
+  #43, #44, #65).
 - David ([@sandbranch](https://github.com/sandbranch)) — AMD GPU monitoring on
   Linux from amdgpu sysfs, and live llama.cpp generation rate and slot
   readings (#40, #41, #42).
