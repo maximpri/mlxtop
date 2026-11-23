@@ -35,7 +35,9 @@ changed when the model slowed.
 - **Local and read-only:** no sudo, no account, no usage tracking. It never
   sends prompts or touches your models or runtime settings.
 
-**What's new in 3.4.0:** mlxtop knows what fast means for your machine. It
+**What's new in 3.4.1:** a runtime bound to one of this machine's own LAN or
+Thunderbolt addresses counts as local, not as a remote API.
+**3.4.0:** mlxtop knows what fast means for your machine. It
 reads what the model reads per forward pass and the chip's published memory
 bandwidth, estimates how close decode runs to that limit (per verify pass with
 a draft model), and judges usual speed at the same context depth and across

@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.4.1 — 2026-11-22
+
+### Runtimes
+
+- **A server on this machine's own address is local.** A runtime bound to
+  one of this machine's LAN or Thunderbolt addresses, as on a cluster where
+  each Mac serves its peers, was called a remote API and left out of local
+  hardware correlation. Now an address one of this machine's interfaces
+  holds counts as local, like loopback. Credentials still go only to
+  loopback unless `MLXTOP_ALLOW_REMOTE_AUTH=1` is set. Thanks to Samuel Reed
+  (#65).
+
+### Delivery
+
+- **The Windows clock reads the time with `jiff`.** `chrono`, used only for
+  the Windows header clock, is unmaintained, and the dependency check
+  refused it (#66).
+
+If you run 3.3.0, update with the install script or Homebrew, or [check what
+`mlxtop update` installed](https://github.com/maximpri/mlxtop/blob/main/CHANGELOG.md#updating-from-330-with-mlxtop-update).
+
 ## 3.4.0 — 2026-11-16
 
 mlxtop learns what fast means for the machine it watches. It reads what the
