@@ -187,6 +187,35 @@ fn detects_strata_processes_without_matching_other_uses_of_the_name() {
 }
 
 #[test]
+fn detects_magnitude_processes_without_matching_other_uses_of_the_name() {
+    for executable in [
+        "magnitude",
+        "/Users/me/.magnitude/bin/magnitude",
+        "/Applications/Magnitude.app/Contents/MacOS/Magnitude",
+        "/Applications/Magnitude.app/Contents/Resources/magnitude-inference",
+        "/usr/bin/magnitude",
+        r"C:\Users\me\AppData\Local\Programs\Magnitude CLI\magnitude.exe",
+        r"C:\tools\magnitude-inference.exe",
+    ] {
+        assert_eq!(
+            process_provider("unknown", &format!("{executable} serve --bind 127.0.0.1:0"))
+                .as_deref(),
+            Some("Magnitude"),
+            "command executable: {executable}"
+        );
+    }
+    assert_eq!(
+        process_provider("magnitude-inference", "").as_deref(),
+        Some("Magnitude")
+    );
+    assert_eq!(
+        process_provider("python", "python /tmp/order_of_magnitude.py"),
+        None
+    );
+    assert_eq!(process_provider("magnitudes", "magnitudes run"), None);
+}
+
+#[test]
 fn detects_runtime_entrypoints_with_consistent_provider_names() {
     for (name, command, provider) in [
         ("Python", "python -m mlx_lm.server --model test", "mlx-lm"),

@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.5.0 — 2026-11-25
+
+### Runtimes
+
+- **Magnitude.** mlxtop detects [Magnitude](https://github.com/magnitudedev/magnitude)
+  by its `magnitude` CLI, desktop app or `magnitude-inference` service, or
+  selects it with `MLXTOP_PROVIDER=magnitude` (default port 10100). It reads
+  the model catalogue at `/inference/v1/models`; Magnitude publishes no live
+  rates or queues, so request history comes from the usage recorder, which
+  now accepts `magnitude`.
+
 ## 3.4.1 — 2026-11-22
 
 ### Runtimes

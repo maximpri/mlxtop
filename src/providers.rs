@@ -90,6 +90,7 @@ pub(crate) fn rate_span_for(floor: Duration, interval_secs: u64) -> Duration {
 }
 const MLX_SERVE_PORT: u16 = 11234;
 const SPLASH_PORT: u16 = 8000;
+const MAGNITUDE_PORT: u16 = 10100;
 
 pub(super) fn new_request_summary(
     seen: &mut VecDeque<(String, u64)>,
@@ -348,6 +349,7 @@ fn canonical_provider(name: &str) -> Option<&'static str> {
         "omlx" => Some("oMLX"),
         "tensorfold" => Some("TensorFold"),
         "strata" => Some("Strata"),
+        "magnitude" => Some("Magnitude"),
         "mlx-lm" | "mlx_lm.server" | "mlx_lm" => Some("mlx-lm"),
         "ollama" => Some("Ollama"),
         "llama.cpp" | "llama-server" => Some("llama.cpp"),
@@ -556,6 +558,7 @@ impl Adapter {
                     self.poll_models("Jan", port)
                 }
                 Some("GPT4All") => self.poll_models("GPT4All", 4891),
+                Some("Magnitude") => self.poll_magnitude(),
                 _ => None,
             }
         };
@@ -690,6 +693,23 @@ impl Adapter {
 
     fn poll_models(&self, provider: &str, port: u16) -> Option<LlmTelemetry> {
         native::models(provider, &self.get_json(port, "/v1/models")?)
+    }
+
+    /// Magnitude's gateway serves the OpenAI API under `/inference`; its
+    /// engine's own routes are private to the app. A configured URL may
+    /// already be the `…/inference` base its clients use.
+    fn poll_magnitude(&self) -> Option<LlmTelemetry> {
+        let prefixed = self
+            .endpoint
+            .url
+            .as_deref()
+            .is_some_and(|url| url.trim_end_matches('/').ends_with("/inference"));
+        let path = if prefixed {
+            "/v1/models"
+        } else {
+            "/inference/v1/models"
+        };
+        native::models("Magnitude", &self.get_json(MAGNITUDE_PORT, path)?)
     }
 
     fn poll_kobold(&mut self) -> Option<LlmTelemetry> {

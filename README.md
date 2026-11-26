@@ -29,13 +29,16 @@ changed when the model slowed.
 - **A plain verdict:** a single line reads `✓ Healthy`, or names the problem,
   such as heavy paging, a model partly on the CPU, a full card or heat
   throttling.
-- **15 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
-  Ollama, LM Studio, KoboldCpp, TensorFold, Strata and more, detected
+- **16 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp,
+  Ollama, LM Studio, KoboldCpp, TensorFold, Strata, Magnitude and more, detected
   automatically.
 - **Local and read-only:** no sudo, no account, no usage tracking. It never
   sends prompts or touches your models or runtime settings.
 
-**What's new in 3.4.1:** a runtime bound to one of this machine's own LAN or
+**What's new in 3.5.0:** mlxtop supports
+[Magnitude](https://github.com/magnitudedev/magnitude): it detects the app,
+CLI or inference service and reads its model catalogue on port 10100.
+**3.4.1:** a runtime bound to one of this machine's own LAN or
 Thunderbolt addresses counts as local, not as a remote API.
 **3.4.0:** mlxtop knows what fast means for your machine. It
 reads what the model reads per forward pass and the chip's published memory
@@ -143,6 +146,7 @@ where each reading comes from.
 | Ollama | after completion | Loaded models, VRAM, CPU/GPU placement, the runner, quantization, parameters and context size |
 | LM Studio | after completion | Loaded instances, quantization, experts per token, context size and parallel requests |
 | TensorFold | ✓ | Model catalogue, active/queued requests, live decode rate, draft tokens per verify pass, preemptions and refused requests, prefix-cache reuse and device memory |
+| [Magnitude](https://github.com/magnitudedev/magnitude) | after completion | Process detection and model catalogue |
 | MLX-LM, LocalAI, Jan, GPT4All | after completion | Process detection and model catalogue |
 
 "After completion" means the speed of each finished request, recorded by the

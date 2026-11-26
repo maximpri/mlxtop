@@ -40,6 +40,7 @@ fn capabilities_preserve_sources_and_missing_or_stale_observations() {
         "GPT4All",
         "TensorFold",
         "Strata",
+        "Magnitude",
         "mlx-serve",
         "Splash",
     ] {

@@ -172,6 +172,7 @@ fn response_formats_preserve_full_prompt_and_cache_counts() {
         "localai",
         "tensorfold",
         "strata",
+        "magnitude",
     ] {
         let telemetry = parse_usage(&record(
             provider,
