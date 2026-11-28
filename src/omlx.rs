@@ -36,9 +36,14 @@ pub(crate) struct LlmTelemetryClient {
     /// Whether an oMLX was detected or chosen: only then is its port asked
     /// anything, the admin key included, not whatever answers there.
     pub(crate) login_allowed: bool,
-    /// When a login was last refused: a wrong key is retried once a minute,
-    /// not on every poll.
-    login_refused_at: Option<Instant>,
+    /// When a login was last refused, and why: a wrong key is retried once
+    /// a minute, not on every poll.
+    login_refused_at: Option<(Instant, ProbeIssue)>,
+    /// Whether oMLX serves its admin statistics without a login, as it does
+    /// with "Disable all authentication" on a loopback bind: `None` until
+    /// asked, and asked again once a login finds no key configured there or
+    /// a minute after it last refused.
+    pub(crate) open_admin: Option<(bool, Instant)>,
     /// The key set in mlxtop's own config, when there is one.
     api_key: Option<String>,
     decode: crate::decode_tracker::DecodeTracker,
@@ -71,6 +76,7 @@ impl LlmTelemetryClient {
                 .as_ref()
                 .is_some_and(|omx| omx.host.is_some() || omx.port.is_some()),
             login_refused_at: None,
+            open_admin: None,
             decode: Default::default(),
             files: Box::new(crate::host::System),
             models: OmlxModels::default(),
@@ -440,9 +446,61 @@ impl LlmTelemetryClient {
         self.fetch_json("/admin/api/stats?scope=session")
     }
 
+    /// Whether to ask for admin statistics without a login: oMLX answered
+    /// one so, or it may, as nothing could log in.
+    fn may_be_open(&self) -> bool {
+        let known = self
+            .open_admin
+            .filter(|(open, at)| *open || at.elapsed() < Duration::from_secs(60));
+        self.login_allowed
+            && known.map_or_else(
+                || {
+                    omlx_api_key(self.home.as_deref(), self.api_key.as_deref()).is_none()
+                        || matches!(self.login_refused_at, Some((_, ProbeIssue::NoServerKey)))
+                },
+                |(open, _)| open,
+            )
+    }
+
+    /// Ask `path` without a credential, so nothing but the request leaves the
+    /// machine. oMLX answers 401 unless it runs with "Disable all
+    /// authentication" on a loopback bind. `Err` means a login is needed.
+    fn fetch_open(&mut self, path: &str) -> Result<Option<Value>, ()> {
+        let Some(response) = self.request("GET", path, &[], None) else {
+            return Ok(None);
+        };
+        match response.status {
+            200 => {
+                self.open_admin = Some((true, Instant::now()));
+                // No login is needed, so a refused one is no failure.
+                self.runtime.forget("/admin/api/login");
+                Ok(self.runtime.record(
+                    path,
+                    serde_json::from_str(&response.body).map_err(|_| ProbeIssue::InvalidResponse),
+                ))
+            }
+            401 | 403 => {
+                self.open_admin = Some((false, Instant::now()));
+                // The login decides what this endpoint reports.
+                self.runtime.forget(path);
+                Err(())
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn fetch_json(&mut self, path: &str) -> Option<Value> {
+        if self.session_cookie.is_none() && self.may_be_open() {
+            if let Ok(value) = self.fetch_open(path) {
+                return value;
+            }
+        }
         if self.session_cookie.is_none() {
             self.login();
+            // The login found no key configured in oMLX: it may need none.
+            if self.session_cookie.is_none() && self.open_admin.is_none() && self.may_be_open() {
+                return self.fetch_open(path).ok().flatten();
+            }
         }
         let cookie = self.session_cookie.clone()?;
         let response = self.request("GET", path, &[("Cookie", cookie.as_str())], None)?;
@@ -488,12 +546,13 @@ impl LlmTelemetryClient {
                 .record::<()>("/admin/api/login", Err(ProbeIssue::NotDetected));
             return;
         }
-        if self
+        if let Some((_, issue)) = self
             .login_refused_at
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
         {
-            self.runtime
-                .record::<()>("/admin/api/login", Err(ProbeIssue::Http(401)));
+            let issue = issue.clone();
+            self.runtime.record::<()>("/admin/api/login", Err(issue));
             return;
         }
         let body = json!({ "api_key": api_key, "remember": true }).to_string();
@@ -505,10 +564,21 @@ impl LlmTelemetryClient {
         ) else {
             return;
         };
-        if matches!(response.status, 401 | 403) {
-            self.login_refused_at = Some(Instant::now());
+        if matches!(response.status, 401 | 403 | 429) {
+            // A wrong key, or oMLX's lockout after too many: wait a minute.
+            let issue = ProbeIssue::Http(response.status);
+            self.login_refused_at = Some((Instant::now(), issue.clone()));
+            self.runtime.record::<()>("/admin/api/login", Err(issue));
+            return;
+        }
+        if response.status == 400 && response.body.contains("No API key configured") {
+            // oMLX has no key to log in with. Ask again in a minute, and ask
+            // for the statistics without a login then: authentication may
+            // have been turned off meanwhile.
+            self.login_refused_at = Some((Instant::now(), ProbeIssue::NoServerKey));
+            self.open_admin = None;
             self.runtime
-                .record::<()>("/admin/api/login", Err(ProbeIssue::Http(response.status)));
+                .record::<()>("/admin/api/login", Err(ProbeIssue::NoServerKey));
             return;
         }
         self.login_refused_at = None;

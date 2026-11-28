@@ -18,6 +18,8 @@ pub(crate) enum ProbeIssue {
     /// A key is set, but no runtime process was found or chosen: it is not
     /// sent to whatever answers on the port.
     NotDetected,
+    /// oMLX refuses a login because it has no API key of its own.
+    NoServerKey,
     Timeout,
     Transport,
     Http(u16),
@@ -35,6 +37,7 @@ impl fmt::Display for ProbeIssue {
             Self::RemoteAuthBlocked => f.write_str("remote authentication blocked; MLXTOP_ALLOW_REMOTE_AUTH=1 is required to send credentials"),
             Self::CredentialsMissing => f.write_str("monitoring credentials not configured; set the API key in Settings (4), MLXTOP_PROVIDER_API_KEY, or auth.api_key in oMLX's settings"),
             Self::NotDetected => f.write_str("no oMLX process found; key not sent (set MLXTOP_PROVIDER=omlx to send it)"),
+            Self::NoServerKey => f.write_str("oMLX has no API key configured and asks for a login; turn on \"Disable all authentication\" on a loopback bind, or set an API key in oMLX and the same key in Settings (4)"),
             Self::Timeout => f.write_str("connection timed out; check the server address and reachability"),
             Self::Transport => f.write_str("connection failed; check that the server is running and reachable"),
             Self::Http(401 | 403) => f.write_str("authentication rejected; check the API key in Settings (4) or MLXTOP_PROVIDER_API_KEY, and its permissions"),
@@ -135,6 +138,11 @@ impl RuntimeReport {
             issue: result.as_ref().err().cloned(),
         });
         result.ok()
+    }
+
+    /// Drop what was recorded for `path`, when a later step decides it.
+    pub(crate) fn forget(&mut self, path: &str) {
+        self.probes.retain(|probe| probe.path != path);
     }
 
     pub(crate) fn finish(&mut self, connected: bool) {

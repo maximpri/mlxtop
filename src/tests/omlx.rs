@@ -784,8 +784,18 @@ fn an_omlx_found_after_mlxtop_started_is_asked_at_once() {
     assert_eq!(report.selection, "process detection; oMLX endpoint config");
     assert!(report.connected);
     assert_eq!(client.retry_backoff, Duration::from_secs(1));
-    // Health alone: without a key nothing else is asked.
-    assert_eq!(stop(port, server), ["GET /health HTTP/1.1"]);
+    // Without a key the admin routes are asked without one, in case oMLX
+    // runs without authentication; this server has none of them.
+    assert_eq!(
+        stop(port, server),
+        [
+            "GET /health HTTP/1.1",
+            "GET /admin/api/stats?scope=session HTTP/1.1",
+            "GET /admin/api/device-info HTTP/1.1",
+            "GET /admin/api/global-settings HTTP/1.1",
+            "GET /admin/api/settings HTTP/1.1",
+        ]
+    );
 }
 
 #[test]

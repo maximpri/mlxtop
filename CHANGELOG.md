@@ -10,6 +10,15 @@
   the model catalogue at `/inference/v1/models`; Magnitude publishes no live
   rates or queues, so request history comes from the usage recorder, which
   now accepts `magnitude`.
+- **oMLX without authentication.** With "Disable all authentication" on a
+  loopback bind, oMLX serves its admin statistics without a login, but
+  mlxtop needed a key to log in first, so speeds, requests and cache stayed
+  `not observed`. Now mlxtop asks for the statistics without a credential
+  when it has no key, or when oMLX answers a login with `No API key
+  configured`. `mlxtop doctor` names that answer instead of suggesting the
+  endpoint is disabled. A login oMLX refuses with that answer or with its
+  lockout (429) is retried once a minute, not on every poll. Thanks to
+  jetnet (#69).
 
 ## 3.4.1 — 2026-11-22
 

@@ -517,6 +517,15 @@ Overview says `No live rates: oMLX admin key not set`, and the first time
 that happens in a session mlxtop opens Settings on the API key, ready to
 type (see [Settings](#settings)).
 
+oMLX can also run with **Disable all authentication**
+(`auth.skip_api_key_verification`) on a loopback bind. It then serves the
+admin statistics without a login, and needs no key. Without a key, mlxtop asks
+oMLX for the statistics without a credential first; if oMLX refuses, mlxtop
+asks again a minute later. When a key is set but oMLX has none, the login fails
+with `No API key configured`, and mlxtop then tries the statistics without a
+login as well. If oMLX still asks for a login, `mlxtop doctor` says that oMLX
+has no API key configured.
+
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
 labels that fallback with its age:
