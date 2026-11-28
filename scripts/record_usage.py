@@ -24,7 +24,7 @@ PROVIDERS = {
     "koboldcpp": "KoboldCpp", "localai": "LocalAI",
     "vllm": "vLLM", "sglang": "SGLang", "jan": "Jan", "gpt4all": "GPT4All",
     "llmster": "LM Studio", "mlx-serve": "mlx-serve", "mlx_serve": "mlx-serve",
-    "splash": "Splash", "strata": "Strata",
+    "splash": "Splash", "strata": "Strata", "magnitude": "Magnitude",
 }
 
 

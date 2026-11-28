@@ -2,6 +2,7 @@ use crate::test_support::*;
 // SPDX-License-Identifier: MIT
 // Collector, sampler and oMLX client behavior driven through the host seam.
 use super::*;
+use crate::runtime_diagnostics::ProbeIssue;
 
 fn collector(host: FakeHost, platform: Platform, home: Option<PathBuf>) -> Collector {
     Collector::with_host(60, offline_config(), Box::new(host), platform, home)
@@ -847,14 +848,129 @@ fn omlx_client_retries_an_expired_session_once() {
 
 #[test]
 fn omlx_client_without_credentials_still_reports_health() {
-    let (port, server) = serve(vec![reply("GET /health ", 200, HEALTH)]);
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, HEALTH),
+        reply("GET /admin/api/stats?scope=session ", 401, "{}"),
+    ]);
     let mut client = omlx_client(port, None);
     client.next_metadata_poll = Instant::now() + Duration::from_secs(3600);
     let telemetry = client.poll_once().expect("health-only telemetry");
-    server.join().unwrap();
+    let requests = server.join().unwrap();
+    assert!(!requests[1].contains("Cookie") && !requests[1].contains("Authorization"));
     assert_eq!(telemetry.model.as_deref(), Some("qwen"));
     assert_eq!(telemetry.generation_tps, None, "stats need a session");
     assert_eq!(client.last_stats_available, Some(false));
+    let login = client
+        .runtime
+        .probes
+        .iter()
+        .find(|probe| probe.path == "/admin/api/login")
+        .unwrap();
+    assert_eq!(login.issue, Some(ProbeIssue::CredentialsMissing));
+    assert!(
+        !client
+            .runtime
+            .probes
+            .iter()
+            .any(|probe| probe.path.starts_with("/admin/api/stats")),
+        "the missing key explains the statistics"
+    );
+
+    // Within a minute the refusal stands: nothing is asked again.
+    let (port, server) = serve(vec![reply("GET /health ", 200, HEALTH)]);
+    client.port = port;
+    client.poll_once().expect("health-only telemetry");
+    assert_eq!(server.join().unwrap().len(), 1);
+}
+
+#[test]
+fn omlx_without_authentication_serves_statistics_without_a_login() {
+    // oMLX's "Disable all authentication" on a loopback bind, no key set.
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, HEALTH),
+        reply("GET /admin/api/stats?scope=session ", 200, STATS),
+        reply("GET /health ", 200, HEALTH),
+        reply("GET /admin/api/stats?scope=session ", 200, STATS),
+    ]);
+    let mut client = omlx_client(port, None);
+    client.next_metadata_poll = Instant::now() + Duration::from_secs(3600);
+    let telemetry = client.poll_once().expect("live telemetry");
+    assert_eq!(telemetry.generation_tps, Some(31.5));
+    assert_eq!(telemetry.prefill_tps, Some(900.0));
+    assert!(client
+        .runtime
+        .probes
+        .iter()
+        .all(|probe| probe.issue.is_none()));
+    client.poll_once().expect("live telemetry again");
+    let requests = server.join().unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| !request.contains("/admin/api/login")));
+    assert!(client.session_cookie.is_none());
+}
+
+#[test]
+fn a_key_omlx_does_not_have_falls_back_to_statistics_without_a_login() {
+    let home = TempDir::new("omlx-no-server-key");
+    home.write(".config/omlx-coding/server.env", "API_KEY=unneeded\n");
+    let no_key = r#"{"detail":"No API key configured. Please set up an API key first."}"#;
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, HEALTH),
+        reply("POST /admin/api/login ", 400, no_key),
+        reply("GET /admin/api/stats?scope=session ", 200, STATS),
+    ]);
+    let mut client = omlx_client(port, Some(home.0.clone()));
+    client.next_metadata_poll = Instant::now() + Duration::from_secs(3600);
+    let telemetry = client.poll_once().expect("live telemetry");
+    let requests = server.join().unwrap();
+    assert!(!requests[2].contains("Cookie") && !requests[2].contains("Authorization"));
+    assert_eq!(telemetry.generation_tps, Some(31.5));
+    assert!(client
+        .runtime
+        .probes
+        .iter()
+        .all(|probe| probe.issue.is_none()));
+
+    // When the statistics need a login after all, doctor names the reason
+    // and the login is not repeated within the minute.
+    let (port, server) = serve(vec![
+        reply("GET /health ", 200, HEALTH),
+        reply("POST /admin/api/login ", 400, no_key),
+        reply("GET /admin/api/stats?scope=session ", 401, "{}"),
+        reply("GET /health ", 200, HEALTH),
+    ]);
+    let mut client = omlx_client(port, Some(home.0.clone()));
+    client.next_metadata_poll = Instant::now() + Duration::from_secs(3600);
+    client.poll_once().expect("health-only telemetry");
+    let login = |client: &LlmTelemetryClient| {
+        client
+            .runtime
+            .probes
+            .iter()
+            .find(|probe| probe.path == "/admin/api/login")
+            .and_then(|probe| probe.issue.clone())
+    };
+    assert_eq!(login(&client), Some(ProbeIssue::NoServerKey));
+    client.runtime.begin();
+    client.poll_once().expect("health-only telemetry");
+    assert_eq!(login(&client), Some(ProbeIssue::NoServerKey));
+    assert_eq!(server.join().unwrap().len(), 4);
+    assert!(ProbeIssue::NoServerKey
+        .to_string()
+        .contains("Disable all authentication"));
+}
+
+#[test]
+fn an_omlx_lockout_is_not_asked_again_within_the_minute() {
+    let home = TempDir::new("omlx-lockout");
+    home.write(".config/omlx-coding/server.env", "API_KEY=k\n");
+    let (port, server) = serve(vec![reply("POST /admin/api/login ", 429, "{}")]);
+    let mut client = omlx_client(port, Some(home.0.clone()));
+    client.login();
+    client.login();
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert!(client.session_cookie.is_none());
 }
 
 #[test]

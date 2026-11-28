@@ -517,6 +517,15 @@ Overview says `No live rates: oMLX admin key not set`, and the first time
 that happens in a session mlxtop opens Settings on the API key, ready to
 type (see [Settings](#settings)).
 
+oMLX can also run with **Disable all authentication**
+(`auth.skip_api_key_verification`) on a loopback bind. It then serves the
+admin statistics without a login, and needs no key. Without a key, mlxtop asks
+oMLX for the statistics without a credential first; if oMLX refuses, mlxtop
+asks again a minute later. When a key is set but oMLX has none, the login fails
+with `No API key configured`, and mlxtop then tries the statistics without a
+login as well. If oMLX still asks for a login, `mlxtop doctor` says that oMLX
+has no API key configured.
+
 When the local admin API is available, values are marked `LIVE`. If it is not,
 mlxtop may use the latest structured completion record from these logs and
 labels that fallback with its age:
@@ -2063,6 +2072,7 @@ sessions to monitor independent endpoints concurrently.
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
 | `jan` | 1337, then 6767 | `/v1/models`; the desktop app serves on 1337, `jan serve` on 6767 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
+| `magnitude` | 10100 | `/inference/v1/models` |
 
 ```sh
 MLXTOP_PROVIDER=ollama mlxtop
@@ -2315,6 +2325,16 @@ only to loopback unless `MLXTOP_ALLOW_REMOTE_AUTH=1` is set.
 
   Set `MLXTOP_PROVIDER_PORT` for a custom port or `MLXTOP_PROVIDER_URL` to the server
   root URL (without `/v1`). The existing remote-auth restrictions also apply.
+- **Magnitude:** detected by the `magnitude` CLI, the Magnitude desktop app or
+  its `magnitude-inference` service, or selected with `MLXTOP_PROVIDER=magnitude`.
+  mlxtop reads the model catalogue at `/inference/v1/models` on port 10100.
+  Magnitude publishes no live rates, queues or cache counters there; its engine's
+  own routes are private to the app. Request history needs the client usage
+  recorder with provider `magnitude`; Magnitude's responses carry
+  `usage.prompt_tokens_details.cached_tokens`. Set `MLXTOP_PROVIDER_URL` to the
+  server root or to the same `…/inference` base your clients use. A server with
+  network access enabled needs its Network access key in `MLXTOP_PROVIDER_API_KEY`,
+  and the existing remote-auth restrictions apply.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
@@ -2349,7 +2369,8 @@ optional. Example shape (replace the timestamp with the completion time):
 
 Supported provider names: `omlx`, `mlx-lm` (also `mlx_lm.server`), `ollama`,
 `llama.cpp` (also `llama-server`), `lmstudio` (also `LM Studio`), `koboldcpp`,
-`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, `splash`, `tensorfold`, and `strata`.
+`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, `splash`, `tensorfold`, `strata`,
+and `magnitude`.
 
 Copy only usage counters from the response, with the required envelope above:
 
@@ -2610,5 +2631,6 @@ The adapters follow the documented read-only APIs:
 [LM Studio model inventory](https://lmstudio.ai/docs/developer/rest/list),
 [vLLM metrics](https://github.com/vllm-project/vllm/blob/main/vllm/v1/metrics/loggers.py),
 [SGLang production metrics](https://docs.sglang.io/docs/references/production_metrics),
-[Jan CLI](https://www.jan.ai/docs/desktop/cli), and
+[Jan CLI](https://www.jan.ai/docs/desktop/cli),
+[Magnitude API](https://docs.magnitude.dev/api/overview), and
 [GPT4All API server](https://docs.gpt4all.io/gpt4all_api_server/home.html).

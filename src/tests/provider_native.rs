@@ -64,7 +64,7 @@ fn inventories_distinguish_loaded_models_from_catalogues_and_capacity() {
     .unwrap();
     assert_eq!(legacy.model.as_deref(), Some("loaded"));
     assert!(lm_studio_legacy(&json!({"data":[{}]})).is_none());
-    for provider in ["Jan", "GPT4All", "mlx-lm", "LocalAI"] {
+    for provider in ["Jan", "GPT4All", "mlx-lm", "LocalAI", "Magnitude"] {
         let result = models(provider, &json!({"data":[{"id":"available"}]})).unwrap();
         assert_eq!(result.status.as_deref(), Some("available"));
         assert_eq!(result.active_requests, None);
@@ -1896,6 +1896,30 @@ fn adapter(provider: &str, port: u16) -> super::super::Adapter {
 }
 
 #[test]
+fn magnitude_reads_the_catalogue_under_its_gateway_prefix() {
+    let models =
+        r#"{"object":"list","data":[{"id":"qwen3.6-35b-a3b:gguf:q4","name":"Qwen3.6 35B"}]}"#;
+    let (port, server) = recording(move |_, path| match path {
+        "/inference/v1/models" | "/v1/models" => (200, models.into()),
+        _ => (404, "{}".into()),
+    });
+    let mut root = adapter("magnitude", port);
+    let result = root.poll().unwrap();
+    assert_eq!(result.provider.as_deref(), Some("Magnitude"));
+    assert_eq!(result.model.as_deref(), Some("qwen3.6-35b-a3b:gguf:q4"));
+    assert_eq!(result.status.as_deref(), Some("available"));
+    // A URL copied from a client's base URL already ends in /inference.
+    let mut prefixed = adapter("magnitude", port);
+    prefixed.endpoint.url = Some(format!("http://127.0.0.1:{port}/inference/"));
+    assert!(prefixed.poll().is_some());
+    let requests = stop(port, server);
+    assert_eq!(
+        requests,
+        ["GET /inference/v1/models", "GET /inference/v1/models"]
+    );
+}
+
+#[test]
 fn ollama_show_is_sent_once_per_digest_on_the_polled_endpoint() {
     let polled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (port, server) = recording({
@@ -2059,6 +2083,7 @@ fn no_adapter_asks_a_route_that_changes_state_or_generates() {
         "localai",
         "jan",
         "gpt4all",
+        "magnitude",
     ] {
         let body = metrics(provider);
         let (port, server) = recording(move |_, path| match path {
@@ -2067,7 +2092,7 @@ fn no_adapter_asks_a_route_that_changes_state_or_generates() {
             "/api/ps" => (200, OLLAMA_PS.into()),
             "/api/show" => (200, OLLAMA_SHOW.into()),
             "/api/v1/models" => (200, LM_STUDIO_MODELS.into()),
-            "/v1/models" => (200, r#"{"data":[{"id":"m"}]}"#.into()),
+            "/v1/models" | "/inference/v1/models" => (200, r#"{"data":[{"id":"m"}]}"#.into()),
             "/slots" => (200, "[]".into()),
             "/api/extra/perf" => (200, r#"{"total_gens":1}"#.into()),
             "/status" | "/health" => (200, "{}".into()),

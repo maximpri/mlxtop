@@ -287,6 +287,19 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         })
     {
         "Strata"
+    } else if std::iter::once(name)
+        .chain(command_tokens.first().copied())
+        .any(|token| {
+            // The `magnitude` CLI or desktop app serves the API; its
+            // `magnitude-inference` service and that service's role children
+            // hold the model.
+            matches!(
+                normalize_process_token(token).as_str(),
+                "magnitude" | "magnitudeexe" | "magnitudeinference" | "magnitudeinferenceexe"
+            )
+        })
+    {
+        "Magnitude"
     } else if has("omlx") {
         "oMLX"
     } else if has("ollama") {
